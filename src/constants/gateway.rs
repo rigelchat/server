@@ -4,43 +4,74 @@ use serde::{Deserialize, Serialize};
 
 pub const HEARTBEAT_INTERVAL: u32 = 41250;
 
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GatewayEncoding {
+    Json,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GatewayCompression {
+    ZstdStream,
+}
+
+/// See: https://docs.discord.com/developers/topics/opcodes-and-status-codes#gateway-gateway-close-event-codes
+/// See: https://docs.fluxer.app/gateway/opcodes-and-close-codes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "u8", into = "u8")]
+#[serde(try_from = "u8", into = "u8")]
 pub enum Opcode {
     Dispatch = 0,
     Heartbeat = 1,
     Identify = 2,
     PresenceUpdate = 3,
     VoiceStateUpdate = 4,
+    VoiceServerPing = 5,
     Resume = 6,
     Reconnect = 7,
     RequestGuildMembers = 8,
     InvalidSession = 9,
     Hello = 10,
-    HeartbeatAck = 11
+    HeartbeatAck = 11,
+    GatewayError = 12,
+    VoiceSignal = 13,
+    LazyRequest = 14,
+    RequestGuildCounts = 15,
+    RequestChannelMemberCounts = 16,
+    RequestForumUnreads = 28,
 }
 
-impl From<u8> for Opcode {
-    fn from(op: u8) -> Self {
+impl TryFrom<u8> for Opcode {
+    type Error = String;
+
+    fn try_from(op: u8) -> Result<Self, Self::Error> {
         match op {
-            1  => Opcode::Heartbeat,
-            2  => Opcode::Identify,
-            3  => Opcode::PresenceUpdate,
-            4  => Opcode::VoiceStateUpdate,
-            6  => Opcode::Resume,
-            7  => Opcode::Reconnect,
-            8  => Opcode::RequestGuildMembers,
-            9  => Opcode::InvalidSession,
-            10 => Opcode::Hello,
-            11 => Opcode::HeartbeatAck,
-            _  => Opcode::Dispatch
+            0 => Ok(Self::Dispatch),
+            1 => Ok(Self::Heartbeat),
+            2 => Ok(Self::Identify),
+            3 => Ok(Self::PresenceUpdate),
+            4 => Ok(Self::VoiceStateUpdate),
+            5 => Ok(Self::VoiceServerPing),
+            6 => Ok(Self::Resume),
+            7 => Ok(Self::Reconnect),
+            8 => Ok(Self::RequestGuildMembers),
+            9 => Ok(Self::InvalidSession),
+            10 => Ok(Self::Hello),
+            11 => Ok(Self::HeartbeatAck),
+            12 => Ok(Self::GatewayError),
+            13 => Ok(Self::VoiceSignal),
+            14 => Ok(Self::LazyRequest),
+            15 => Ok(Self::RequestGuildCounts),
+            16 => Ok(Self::RequestChannelMemberCounts),
+            28 => Ok(Self::RequestForumUnreads),
+            _ => Err(format!("Unknown gateway opcode: {op}")),
         }
     }
 }
 
 impl From<Opcode> for u8 {
     fn from(op: Opcode) -> u8 {
-        return op as u8;
+        op as u8
     }
 }
 
@@ -62,12 +93,17 @@ pub mod close_codes {
 }
 
 pub mod events {
+    pub const READY: &str = "READY";
+    pub const RESUMED: &str = "RESUMED";
     pub const GUILD_CREATE: &str = "GUILD_CREATE";
     pub const GUILD_DELETE: &str = "GUILD_DELETE";
     pub const GUILD_MEMBER_ADD: &str = "GUILD_MEMBER_ADD";
     pub const GUILD_MEMBER_REMOVE: &str = "GUILD_MEMBER_REMOVE";
-    pub const READY: &str = "READY";
-    pub const RESUMED: &str = "RESUMED";
+    pub const GUILD_MEMBER_LIST_UPDATE: &str = "GUILD_MEMBER_LIST_UPDATE";
+    pub const MESSAGE_CREATE: &str = "MESSAGE_CREATE";
+    pub const MESSAGE_UPDATE: &str = "MESSAGE_UPDATE";
+    pub const MESSAGE_DELETE: &str = "MESSAGE_DELETE";
     pub const PRESENCE_UPDATE: &str = "PRESENCE_UPDATE";
+    pub const USER_UPDATE: &str = "USER_UPDATE";
     pub const USER_SETTINGS_UPDATE: &str = "USER_SETTINGS_UPDATE";
 }

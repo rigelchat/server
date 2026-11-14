@@ -1,7 +1,9 @@
 use serde::Serialize;
-use sqlx::prelude::FromRow;
+use sqlx::FromRow;
 
-#[derive(Clone, Serialize, FromRow)]
+use crate::models::serde_helpers::serialize_u64_as_string;
+
+#[derive(Debug, Clone, Serialize, FromRow)]
 pub struct Role {
     pub id: String,
     pub guild_id: String,
@@ -11,5 +13,6 @@ pub struct Role {
     pub unicode_emoji: Option<String>,
     pub hoist: bool,
     pub mentionable: bool,
-    pub permissions: u64
+    #[serde(serialize_with = "serialize_u64_as_string")]
+    pub permissions: u64,
 }

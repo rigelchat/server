@@ -14,8 +14,8 @@ pub const MAXIMUM_WORKER_ID: u64 = 0b11111;
 pub const MAXIMUM_PROCESS_ID: u64 = 0b11111;
 pub const MAXIMUM_INCREMENT: u16 = 0b111111111111;
 
-pub static DISCORD_SNOWFLAKE: Snowflake = Snowflake::new(1420070400000);
-pub static TWITTER_SNOWFLAKE: Snowflake = Snowflake::new(1288834974657);
+pub static DISCORD_SNOWFLAKE: Snowflake = Snowflake::new(1420070400000); // 2015-01-01T00:00:00.000Z
+pub static TWITTER_SNOWFLAKE: Snowflake = Snowflake::new(1288834974657); // 2010-11-04T01:42:54.657Z
 
 #[derive(Debug)]
 pub struct Snowflake {

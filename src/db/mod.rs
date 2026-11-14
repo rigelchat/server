@@ -1,63 +1,78 @@
-pub mod queries;
-
-use tracing::info;
-use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
 use std::env;
 
+use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
+use tracing::info;
+
 pub async fn init() -> Result<MySqlPool, sqlx::Error> {
-    let database_url = env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be defined for the database connection");
+    let database_url =
+        env::var("DATABASE_URL").expect("DATABASE_URL must be defined for the database connection");
 
     let pool = MySqlPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await?;
 
-    info!("Database connected successfully.");
+    info!("Database connected successfully");
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS users (
             id VARCHAR(20) NOT NULL PRIMARY KEY,
             created_at BIGINT UNSIGNED NOT NULL,
             bot BOOLEAN NOT NULL DEFAULT FALSE,
             public_flags INT UNSIGNED NOT NULL DEFAULT 0,
-            username VARCHAR(32) NOT NULL,
+            username VARCHAR(32) NOT NULL UNIQUE,
+            email VARCHAR(255) NOT NULL UNIQUE,
+            verified BOOLEAN NOT NULL DEFAULT TRUE,
             password_hash VARCHAR(255) DEFAULT NULL,
             global_name VARCHAR(32) DEFAULT NULL,
-            discriminator VARCHAR(4) NOT NULL DEFAULT "0",
+            discriminator VARCHAR(4) NOT NULL DEFAULT '0',
             avatar VARCHAR(255) DEFAULT NULL,
             banner VARCHAR(255) DEFAULT NULL
         )
-    "#).execute(&pool).await?;
+        "#,
+    )
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS user_profiles (
             id VARCHAR(20) NOT NULL PRIMARY KEY,
-            bio VARCHAR(190) DEFAULT "",
-            pronouns VARCHAR(40) DEFAULT "",
+            bio VARCHAR(190) DEFAULT '',
+            pronouns VARCHAR(40) DEFAULT '',
             accent_color INT UNSIGNED DEFAULT NULL,
             theme_color_primary INT UNSIGNED DEFAULT NULL,
             theme_color_secondary INT UNSIGNED DEFAULT NULL,
             FOREIGN KEY (id) REFERENCES users(id) ON DELETE CASCADE
         )
-    "#).execute(&pool).await?;
+        "#,
+    )
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS user_settings (
             id VARCHAR(20) NOT NULL PRIMARY KEY,
-            status VARCHAR(10) NOT NULL DEFAULT "online",
+            status VARCHAR(16) NOT NULL DEFAULT 'online',
             afk_timeout INT UNSIGNED NOT NULL DEFAULT 600,
-            locale VARCHAR(5) NOT NULL DEFAULT "en-US",
-            theme VARCHAR(10) NOT NULL DEFAULT "dark",
+            locale VARCHAR(16) NOT NULL DEFAULT 'en-US',
+            theme VARCHAR(16) NOT NULL DEFAULT 'dark',
             background_gradient_preset VARCHAR(32) DEFAULT NULL,
             developer_mode BOOLEAN NOT NULL DEFAULT FALSE,
+            synced_preferences TEXT DEFAULT NULL,
             FOREIGN KEY (id) REFERENCES users(id) ON DELETE CASCADE
         )
-    "#).execute(&pool).await?;
+        "#,
+    )
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS user_sessions (
-            id VARCHAR(6) NOT NULL PRIMARY KEY,
+            id VARCHAR(36) NOT NULL PRIMARY KEY,
             created_at BIGINT UNSIGNED NOT NULL,
             last_used_at BIGINT UNSIGNED DEFAULT NULL,
             user_id VARCHAR(20) NOT NULL,
@@ -66,9 +81,13 @@ pub async fn init() -> Result<MySqlPool, sqlx::Error> {
             country_code VARCHAR(2) DEFAULT NULL,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
-    "#).execute(&pool).await?;
+        "#,
+    )
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS guilds (
             id VARCHAR(20) NOT NULL PRIMARY KEY,
             created_at BIGINT UNSIGNED NOT NULL,
@@ -85,9 +104,13 @@ pub async fn init() -> Result<MySqlPool, sqlx::Error> {
             system_channel_flags INT UNSIGNED NOT NULL DEFAULT 0,
             discoverable BOOLEAN NOT NULL DEFAULT FALSE
         )
-    "#).execute(&pool).await?;
+        "#,
+    )
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS roles (
             id VARCHAR(20) NOT NULL PRIMARY KEY,
             guild_id VARCHAR(20) NOT NULL,
@@ -100,9 +123,13 @@ pub async fn init() -> Result<MySqlPool, sqlx::Error> {
             permissions BIGINT UNSIGNED NOT NULL DEFAULT 0,
             FOREIGN KEY (guild_id) REFERENCES guilds(id) ON DELETE CASCADE
         )
-    "#).execute(&pool).await?;
+        "#,
+    )
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS channels (
             id VARCHAR(20) NOT NULL PRIMARY KEY,
             type INT UNSIGNED NOT NULL,
@@ -113,9 +140,13 @@ pub async fn init() -> Result<MySqlPool, sqlx::Error> {
             FOREIGN KEY (guild_id) REFERENCES guilds(id) ON DELETE CASCADE,
             FOREIGN KEY (parent_id) REFERENCES channels(id) ON DELETE SET NULL
         )
-    "#).execute(&pool).await?;
+        "#,
+    )
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS channel_permission_overwrites (
             type INT UNSIGNED NOT NULL,
             channel_id VARCHAR(20) NOT NULL,
@@ -125,20 +156,29 @@ pub async fn init() -> Result<MySqlPool, sqlx::Error> {
             PRIMARY KEY (channel_id, target_id),
             FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
         )
-    "#).execute(&pool).await?;
+        "#,
+    )
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS guild_members (
             joined_at BIGINT UNSIGNED NOT NULL,
             guild_id VARCHAR(20) NOT NULL,
             user_id VARCHAR(20) NOT NULL,
+            nick VARCHAR(32) DEFAULT NULL,
             PRIMARY KEY (guild_id, user_id),
             FOREIGN KEY (guild_id) REFERENCES guilds(id) ON DELETE CASCADE,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
-    "#).execute(&pool).await?;
+        "#,
+    )
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS guild_member_roles (
             guild_id VARCHAR(20) NOT NULL,
             user_id VARCHAR(20) NOT NULL,
@@ -147,9 +187,13 @@ pub async fn init() -> Result<MySqlPool, sqlx::Error> {
             FOREIGN KEY (guild_id, user_id) REFERENCES guild_members(guild_id, user_id) ON DELETE CASCADE,
             FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE
         )
-    "#).execute(&pool).await?;
+        "#,
+    )
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS guild_bans (
             id VARCHAR(20) NOT NULL PRIMARY KEY,
             banned_at BIGINT UNSIGNED NOT NULL,
@@ -159,9 +203,13 @@ pub async fn init() -> Result<MySqlPool, sqlx::Error> {
             FOREIGN KEY (guild_id) REFERENCES guilds(id) ON DELETE CASCADE,
             UNIQUE (guild_id, user_id)
         )
-    "#).execute(&pool).await?;
+        "#,
+    )
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS messages (
             id VARCHAR(20) NOT NULL PRIMARY KEY,
             timestamp BIGINT UNSIGNED NOT NULL,
@@ -174,21 +222,30 @@ pub async fn init() -> Result<MySqlPool, sqlx::Error> {
             FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
             FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
         )
-    "#).execute(&pool).await?;
+        "#,
+    )
+    .execute(&pool)
+    .await?;
 
-    sqlx::query(r#"
-        CREATE TABLE IF NOT EXISTS gateway_sessions (
-            id VARCHAR(36) NOT NULL PRIMARY KEY,
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS invites (
+            code VARCHAR(16) NOT NULL PRIMARY KEY,
+            guild_id VARCHAR(20) NOT NULL,
+            channel_id VARCHAR(20) NOT NULL,
+            inviter_id VARCHAR(20) NOT NULL,
+            uses INT UNSIGNED NOT NULL DEFAULT 0,
+            max_uses INT UNSIGNED NOT NULL DEFAULT 0,
             created_at BIGINT UNSIGNED NOT NULL,
-            expires_at BIGINT UNSIGNED NOT NULL,
-            user_id VARCHAR(20) DEFAULT NULL,
-            user_session_id VARCHAR(6) DEFAULT NULL,
-            encoding VARCHAR(4) NOT NULL,
-            compression VARCHAR(6),
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-            FOREIGN KEY (user_session_id) REFERENCES user_sessions(id) ON DELETE CASCADE
+            expires_at BIGINT UNSIGNED DEFAULT NULL,
+            FOREIGN KEY (guild_id) REFERENCES guilds(id) ON DELETE CASCADE,
+            FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
+            FOREIGN KEY (inviter_id) REFERENCES users(id) ON DELETE CASCADE
         )
-    "#).execute(&pool).await?;
+        "#,
+    )
+    .execute(&pool)
+    .await?;
 
-    return Ok(pool);
+    Ok(pool)
 }

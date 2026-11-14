@@ -1,18 +1,19 @@
 pub mod api;
-pub mod well_known;
+pub mod well_known_spacebar;
 
 use axum::{Router, routing::get, response::Html};
 
 use crate::AppState;
+use crate::constants::API_VERSION;
 
 pub fn router() -> Router<AppState> {
-    return Router::new()
+    Router::new()
         .route("/", get(index))
         .nest("/api", api::router())
-        .nest("/api/v0", api::router())
-        .nest("/.well-known", well_known::router());
+        .nest(&format!("/api/v{}", API_VERSION), api::router()) 
+        .nest("/.well-known/spacebar/client", well_known_spacebar::router())
 }
 
 async fn index() -> Html<&'static str> {
-    return Html(include_str!("../../static/index.html"));
+    Html(include_str!("../../static/index.html"))
 }

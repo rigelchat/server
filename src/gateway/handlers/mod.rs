@@ -1,3 +1,3 @@
 pub mod heartbeat;
 pub mod identify;
-pub mod resume;
+pub mod lazy_request;

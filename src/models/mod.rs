@@ -1,6 +1,11 @@
 pub mod channel;
+pub mod gateway;
 pub mod guild;
 pub mod guild_member;
+pub mod invite;
 pub mod message;
+pub mod permission;
+pub mod rest;
 pub mod role;
+pub mod serde_helpers;
 pub mod user;

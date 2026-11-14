@@ -2,17 +2,24 @@ use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
 bitflags! {
+    /// See: https://docs.discord.com/developers/resources/user#user-object-user-flags
+    /// See: https://docs.fluxer.app/http-api/users/#public-user-flags
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct UserFlags: u32 {
         const STAFF = 1 << 0;
         const PARTNERED = 1 << 1;
-        const VERIFIED_BOT = 1 << 16;
-        const VERIFIED_DEVELOPER = 1 << 17;
+        const BUG_HUNTER = 1 << 3;
+        const FRIENDLY_BOT = 1 << 4;
+        const FRIENDLY_BOT_MANUAL_APPROVAL = 1 << 5;
+        const SPAMMER = 1 << 6;
+        const PROFILE_HIDDEN = 1 << 7;
     }
 }
 
 bitflags! {
+    /// See: https://docs.discord.com/developers/resources/message#message-object-message-types
+    /// See: https://docs.fluxer.app/http-api/permissions
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct PermissionFlags: u64 {
@@ -35,7 +42,6 @@ bitflags! {
         const READ_MESSAGE_HISTORY = 1 << 16;
         const MENTION_EVERYONE = 1 << 17;
         const USE_EXTERNAL_EMOJIS = 1 << 18;
-        const VIEW_GUILD_INSIGHTS = 1 << 19;
         const CONNECT = 1 << 20;
         const SPEAK = 1 << 21;
         const MUTE_MEMBERS = 1 << 22;
@@ -46,24 +52,17 @@ bitflags! {
         const MANAGE_NICKNAMES = 1 << 27;
         const MANAGE_ROLES = 1 << 28;
         const MANAGE_WEBHOOKS = 1 << 29;
-        const MANAGE_GUILD_EXPRESSIONS = 1 << 30;
-        const USE_APPLICATION_COMMANDS = 1 << 31;
-        const REQUEST_TO_SPEAK = 1 << 32;
-        const MANAGE_EVENTS = 1 << 33;
+        const MANAGE_EXPRESSIONS = 1 << 30;
         const MANAGE_THREADS = 1 << 34;
         const CREATE_PUBLIC_THREADS = 1 << 35;
         const CREATE_PRIVATE_THREADS = 1 << 36;
         const USE_EXTERNAL_STICKERS = 1 << 37;
         const SEND_MESSAGES_IN_THREADS = 1 << 38;
-        const USE_EMBEDDED_ACTIVITIES = 1 << 39;
         const MODERATE_MEMBERS = 1 << 40;
-        const VIEW_CREATOR_MONETIZATION_ANALYTICS = 1 << 41;
-        const USE_SOUNDBOARD = 1 << 42;
-        const CREATE_GUILD_EXPRESSIONS = 1 << 43;
-        const CREATE_EVENTS = 1 << 44;
-        const USE_EXTERNAL_SOUNDS = 1 << 45;
-        const SEND_VOICE_MESSAGES = 1 << 46;
-        const SEND_POLLS = 1 << 49;
-        const USE_EXTERNAL_APPS = 1 << 50;
+        const CREATE_EXPRESSIONS = 1 << 43;
+        const PIN_MESSAGES = 1 << 51;
+        const BYPASS_SLOWMODE = 1 << 52;
+        const UPDATE_RTC_REGION = 1 << 53;
+        const VIEW_CHANNEL_MEMBERS = 1 << 54;
     }
 }

@@ -1,6 +1,8 @@
+pub mod ready;
+
 use serde::{Deserialize, Serialize};
 
-use crate::utils::constants::gateway::Opcode;
+use crate::constants::gateway::Opcode;
 
 #[derive(Serialize, Deserialize)]
 pub struct GatewayPayload<T = serde_json::Value> {
@@ -15,12 +17,12 @@ pub struct GatewayPayload<T = serde_json::Value> {
 
 impl<T> GatewayPayload<T> {
     pub fn new(op: Opcode, d: Option<T>) -> Self {
-        return Self {
+        Self {
             op,
             d,
             s: None,
             t: None
-        };
+        }
     }
 }
 
