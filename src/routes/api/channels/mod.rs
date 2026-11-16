@@ -5,11 +5,11 @@ use axum::{
     extract::{Path, State},
     routing::post,
 };
-use serde_json::Value;
 
 use crate::AppState;
 use crate::error::AppError;
 use crate::extractors::AuthUser;
+use crate::models::invite::CreatedInvite;
 use crate::services::invite_service;
 
 pub fn router() -> Router<AppState> {
@@ -22,7 +22,7 @@ async fn create_channel_invite(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(channel_id): Path<String>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<Json<CreatedInvite>, AppError> {
     let invite =
         invite_service::create_channel_invite(&state, &channel_id, &auth.user_id).await?;
     Ok(Json(invite))

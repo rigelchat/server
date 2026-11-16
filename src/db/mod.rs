@@ -4,8 +4,7 @@ use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
 use tracing::info;
 
 pub async fn init() -> Result<MySqlPool, sqlx::Error> {
-    let database_url =
-        env::var("DATABASE_URL").expect("DATABASE_URL must be defined for the database connection");
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be defined for the database connection");
 
     let pool = MySqlPoolOptions::new()
         .max_connections(5)

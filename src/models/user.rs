@@ -257,7 +257,7 @@ pub struct UserSettings {
     pub suppress_unprivileged_self_mentions: bool,
     pub suppress_unprivileged_self_mentions_bypass_user_ids: Vec<String>,
     pub staff_dm_access_user_ids: Vec<String>,
-    pub guild_folders: Vec<serde_json::Value>,
+    pub guild_folders: Vec<GuildFolder>,
 }
 
 impl Default for UserSettings {
@@ -323,4 +323,14 @@ impl From<UserSettingsRow> for UserSettings {
             ..Default::default()
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuildFolder {
+    pub id: i64,
+    pub name: Option<String>,
+    pub color: u32,
+    pub flags: u32,
+    pub icon: String,
+    pub guild_ids: Vec<String>,
 }

@@ -11,7 +11,7 @@ use crate::constants::gateway::{close_codes, events};
 use crate::models::gateway::IdentifyPayload;
 use crate::models::gateway::ready::{ClientSessionInfo, ReadyData, RtcRegion};
 use crate::models::guild::GatewayGuild;
-use crate::models::user::{CurrentUser, GatewayUserSummary, UserProfileRow, UserRow};
+use crate::models::user::{CurrentUser, GatewayUserSummary, UserProfileRow, UserRow, GuildFolder};
 use crate::services::{guild_service, user_service};
 use crate::utils::token::{TokenClaims, verify};
 
@@ -135,14 +135,14 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         .await
         .unwrap_or_default();
 
-    user_settings.guild_folders = vec![json!({
-        "id": -1,
-        "name": null,
-        "color": 0,
-        "flags": 0,
-        "icon": "folder",
-        "guild_ids": guild_ids,
-    })];
+    user_settings.guild_folders = vec![GuildFolder {
+        id: -1,
+        name: None,
+        color: 0,
+        flags: 0,
+        icon: "folder".to_string(),
+        guild_ids: guild_ids.clone(),
+    }];
 
     let status = user_settings.status.clone();
     let user_summary = GatewayUserSummary::from(&user_row);

@@ -1,3 +1,4 @@
+pub mod lazy_request;
 pub mod ready;
 
 use serde::{Deserialize, Serialize};

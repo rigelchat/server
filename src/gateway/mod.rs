@@ -18,7 +18,9 @@ use zstd::stream::raw::{Decoder as RawZstdDecoder, Operation};
 use crate::AppState;
 use crate::constants::gateway::{HEARTBEAT_INTERVAL, Opcode};
 use crate::gateway::session::GatewaySession;
-use crate::models::gateway::{GatewayPayload, HelloPayload, IdentifyPayload};
+use crate::models::gateway::{
+    GatewayPayload, HelloPayload, IdentifyPayload, lazy_request::LazyRequestPayload,
+};
 
 pub async fn handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
@@ -158,7 +160,16 @@ async fn process_gateway_message(text: &str, session_id: &str, state: &AppState)
             }
         }
         Opcode::Heartbeat => handlers::heartbeat::handle(session_id, state).await,
-        Opcode::LazyRequest => handlers::lazy_request::handle(session_id, state, &payload).await,
+        Opcode::LazyRequest => {
+            let Some(d) = payload.d else {
+                error!("LAZY_REQUEST received without 'd' payload");
+                return;
+            };
+            match serde_json::from_value::<LazyRequestPayload>(d.clone()) {
+                Ok(lazy_req) => handlers::lazy_request::handle(session_id, state, lazy_req).await,
+                Err(err) => error!(error = %err, raw = ?d, "Failed to parse LAZY_REQUEST payload"),
+            }
+        }
         other => warn!(opcode = ?other, "Unhandled gateway opcode"),
     }
 }

@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 
-use serde_json::{Value, json};
 use sqlx::FromRow;
 use tracing::error;
 
 use crate::AppState;
 use crate::constants::gateway::events;
-use crate::models::gateway::GatewayPayload;
-use crate::models::guild_member::GuildMemberRole;
-use crate::models::serde_helpers::millis_to_iso;
+use crate::models::gateway::lazy_request::{
+    GuildMemberListUpdate, LazyRequestPayload, MemberListClientStatus, MemberListGroup,
+    MemberListItem, MemberListMember, MemberListPresence, MemberListSyncOp, MemberListUser,
+};
+use crate::models::guild_member::{GuildMemberRole, GuildMemberUserRef};
 
 #[derive(FromRow)]
 struct LazyMemberRow {
@@ -22,43 +23,8 @@ struct LazyMemberRow {
     bot: bool,
 }
 
-fn parse_subscription(d: &Value) -> Option<(String, String, [i64; 2])> {
-    let mut range = [0i64, 99i64];
-
-    if let Some(subs) = d.get("subscriptions").and_then(|s| s.as_object()) {
-        let (guild_id, sub_val) = subs.iter().next()?;
-        let mut channel_id = "everyone".to_string();
-
-        if let Some(channels) = sub_val.get("member_list_channels").and_then(|c| c.as_object()) {
-            if let Some((cid, ranges_val)) = channels.iter().next() {
-                channel_id = cid.clone();
-                if let Some(arr) = ranges_val
-                    .as_array()
-                    .and_then(|r| r.first())
-                    .and_then(|r| r.as_array())
-                {
-                    if arr.len() == 2 {
-                        range = [arr[0].as_i64().unwrap_or(0), arr[1].as_i64().unwrap_or(99)];
-                    }
-                }
-            }
-        }
-        return Some((guild_id.clone(), channel_id, range));
-    }
-
-    let guild_id = d.get("guild_id").and_then(|g| g.as_str())?.to_string();
-    let channel_id = d
-        .get("channels")
-        .and_then(|c| c.as_object())
-        .and_then(|c| c.keys().next().cloned())
-        .unwrap_or_else(|| "everyone".to_string());
-
-    Some((guild_id, channel_id, range))
-}
-
-pub async fn handle(session_id: &str, state: &AppState, payload: &GatewayPayload) {
-    let Some(d) = &payload.d else { return };
-    let Some((target_guild_id, target_channel_id, range)) = parse_subscription(d) else {
+pub async fn handle(session_id: &str, state: &AppState, payload: LazyRequestPayload) {
+    let Some((target_guild_id, target_channel_id, range)) = payload.extract() else {
         return;
     };
 
@@ -115,32 +81,32 @@ pub async fn handle(session_id: &str, state: &AppState, payload: &GatewayPayload
 
     for row in member_rows {
         let is_online = online_user_ids.contains(&row.user_id);
-        let status = if is_online { "online" } else { "offline" };
+        let status = if is_online { "online" } else { "offline" }.to_string();
         let roles = roles_by_user.remove(&row.user_id).unwrap_or_default();
 
-        let item = json!({
-            "member": {
-                "user": {
-                    "id": row.user_id,
-                    "username": row.username,
-                    "discriminator": row.discriminator,
-                    "global_name": row.global_name,
-                    "avatar": row.avatar,
-                    "bot": row.bot,
+        let item = MemberListItem::Member {
+            member: MemberListMember {
+                user: MemberListUser {
+                    id: row.user_id.clone(),
+                    username: row.username,
+                    discriminator: row.discriminator,
+                    global_name: row.global_name,
+                    avatar: row.avatar,
+                    bot: row.bot,
                 },
-                "nick": row.nick,
-                "roles": roles,
-                "mute": false,
-                "deaf": false,
-                "joined_at": millis_to_iso(row.joined_at),
-                "presence": {
-                    "user": { "id": row.user_id },
-                    "status": status,
-                    "client_status": { "desktop": status },
-                    "activities": [],
-                }
-            }
-        });
+                nick: row.nick,
+                roles,
+                mute: false,
+                deaf: false,
+                joined_at: row.joined_at,
+                presence: MemberListPresence {
+                    user: GuildMemberUserRef { id: row.user_id },
+                    status: status.clone(),
+                    client_status: MemberListClientStatus { desktop: status },
+                    activities: vec![],
+                },
+            },
+        };
 
         if is_online {
             online_members.push(item);
@@ -155,11 +121,21 @@ pub async fn handle(session_id: &str, state: &AppState, payload: &GatewayPayload
 
     let mut all_items = Vec::with_capacity(total_member_count + 2);
     if online_count > 0 {
-        all_items.push(json!({ "group": { "id": "online", "count": online_count } }));
+        all_items.push(MemberListItem::Group {
+            group: MemberListGroup {
+                id: "online".to_string(),
+                count: online_count,
+            },
+        });
         all_items.extend(online_members);
     }
     if offline_count > 0 {
-        all_items.push(json!({ "group": { "id": "offline", "count": offline_count } }));
+        all_items.push(MemberListItem::Group {
+            group: MemberListGroup {
+                id: "offline".to_string(),
+                count: offline_count,
+            },
+        });
         all_items.extend(offline_members);
     }
 
@@ -171,22 +147,28 @@ pub async fn handle(session_id: &str, state: &AppState, payload: &GatewayPayload
         vec![]
     };
 
-    let update = json!({
-        "guild_id": target_guild_id,
-        "channel_id": target_channel_id,
-        "id": target_channel_id,
-        "ops": [{
-            "op": "SYNC",
-            "range": range,
-            "items": sliced_items,
+    let update = GuildMemberListUpdate {
+        guild_id: target_guild_id,
+        channel_id: target_channel_id.clone(),
+        id: target_channel_id,
+        ops: vec![MemberListSyncOp {
+            op: "SYNC",
+            range,
+            items: sliced_items,
         }],
-        "online_count": online_count,
-        "member_count": total_member_count,
-        "groups": [
-            { "id": "online", "count": online_count },
-            { "id": "offline", "count": offline_count },
-        ]
-    });
+        online_count,
+        member_count: total_member_count,
+        groups: vec![
+            MemberListGroup {
+                id: "online".to_string(),
+                count: online_count,
+            },
+            MemberListGroup {
+                id: "offline".to_string(),
+                count: offline_count,
+            },
+        ],
+    };
 
     let sessions = state.sessions.read().await;
     if let Some(session) = sessions.get(session_id) {

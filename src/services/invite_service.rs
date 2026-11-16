@@ -1,11 +1,15 @@
+use std::collections::HashSet;
+
 use chrono::Utc;
-use serde_json::{Value, json};
 use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::error::AppError;
-use crate::models::serde_helpers::millis_to_iso;
+use crate::models::invite::{
+    AcceptedInvite, CreatedInvite, InviteChannel, InviteGuild, InviteResponse, InviteType,
+    InviteUserRef,
+};
 use crate::services::guild_service;
 
 #[derive(FromRow)]
@@ -33,7 +37,7 @@ pub async fn create_channel_invite(
     state: &AppState,
     channel_id: &str,
     user_id: &str,
-) -> Result<Value, AppError> {
+) -> Result<CreatedInvite, AppError> {
     let guild_id = sqlx::query_scalar::<_, String>("SELECT guild_id FROM channels WHERE id = ?")
         .bind(channel_id)
         .fetch_optional(&state.db)
@@ -43,7 +47,7 @@ pub async fn create_channel_invite(
     guild_service::require_member(state, &guild_id, user_id).await?;
 
     let code = Uuid::new_v4().simple().to_string()[..8].to_string();
-    let now = Utc::now().timestamp_millis() as u64;
+    let created_at = Utc::now().timestamp_millis() as u64;
 
     sqlx::query(
         "INSERT INTO invites (code, guild_id, channel_id, inviter_id, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -52,22 +56,24 @@ pub async fn create_channel_invite(
     .bind(&guild_id)
     .bind(channel_id)
     .bind(user_id)
-    .bind(now)
+    .bind(created_at)
     .execute(&state.db)
     .await?;
 
-    Ok(json!({
-        "code": code,
-        "guild_id": guild_id,
-        "channel_id": channel_id,
-        "inviter": { "id": user_id },
-        "uses": 0,
-        "max_uses": 0,
-        "created_at": millis_to_iso(now),
-    }))
+    Ok(CreatedInvite {
+        code,
+        guild_id,
+        channel_id: channel_id.to_string(),
+        inviter: InviteUserRef {
+            id: user_id.to_string(),
+        },
+        uses: 0,
+        max_uses: 0,
+        created_at,
+    })
 }
 
-pub async fn get_invite(state: &AppState, code: &str) -> Result<Value, AppError> {
+pub async fn get_invite(state: &AppState, code: &str) -> Result<InviteResponse, AppError> {
     let row = sqlx::query_as::<_, InviteDetailsRow>(
         r#"
         SELECT
@@ -97,36 +103,36 @@ pub async fn get_invite(state: &AppState, code: &str) -> Result<Value, AppError>
             .values()
             .filter(|s| s.guilds.contains(&row.guild_id))
             .filter_map(|s| s.user_id.as_ref())
-            .collect::<std::collections::HashSet<_>>()
+            .collect::<HashSet<_>>()
             .len()
     };
 
-    Ok(json!({
-        "code": row.code,
-        "type": 0,
-        "guild": {
-            "id": row.guild_id,
-            "name": row.guild_name,
-            "icon": row.guild_icon,
-            "description": row.guild_description,
-            "features": [],
-            "verification_level": 0,
+    Ok(InviteResponse {
+        code: row.code,
+        kind: InviteType::Guild,
+        guild: InviteGuild {
+            id: row.guild_id,
+            name: row.guild_name,
+            icon: row.guild_icon,
+            description: row.guild_description,
+            features: vec![],
+            verification_level: 0,
         },
-        "channel": {
-            "id": row.channel_id,
-            "name": row.channel_name,
-            "type": row.channel_type,
+        channel: InviteChannel {
+            id: row.channel_id,
+            name: row.channel_name,
+            kind: row.channel_type,
         },
-        "approximate_member_count": member_count,
-        "approximate_presence_count": online_count,
-    }))
+        approximate_member_count: member_count,
+        approximate_presence_count: online_count,
+    })
 }
 
 pub async fn accept_invite(
     state: &AppState,
     code: &str,
     user_id: &str,
-) -> Result<Value, AppError> {
+) -> Result<AcceptedInvite, AppError> {
     let invite = sqlx::query_as::<_, InviteAcceptRow>(
         "SELECT guild_id, channel_id, uses, max_uses, expires_at FROM invites WHERE code = ?",
     )
@@ -152,8 +158,8 @@ pub async fn accept_invite(
         .execute(&state.db)
         .await?;
 
-    Ok(json!({
-        "guild_id": invite.guild_id,
-        "channel_id": invite.channel_id,
-    }))
+    Ok(AcceptedInvite {
+        guild_id: invite.guild_id,
+        channel_id: invite.channel_id,
+    })
 }
