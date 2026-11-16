@@ -5,25 +5,25 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug executable 'rigel-server-rs'",
+            "name": "Debug executable 'rigel-server'",
             "type": "lldb",
             "request": "launch",
             "cargo": {
                 "args": [
                     "run",
-                    "--bin=rigel-server-rs"
+                    "--bin=rigel-server"
                 ]
             },
             "args": []
         },
         {
-            "name": "Debug unit tests in executable 'rigel-server-rs'",
+            "name": "Debug unit tests in executable 'rigel-server'",
             "type": "lldb",
             "request": "launch",
             "cargo": {
                 "args": [
                     "test",
-                    "--bin=rigel-server-rs"
+                    "--bin=rigel-server"
                 ]
             }
         }
