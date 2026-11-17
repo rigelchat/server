@@ -28,6 +28,8 @@ async fn main() {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
+    utils::assets::spawn_emoji_sync();
+
     let db = db::init()
         .await
         .expect("Failed to connect to the database");
@@ -45,6 +47,7 @@ async fn main() {
 
     let app = Router::new()
         .nest_service("/cdn", ServeDir::new("static"))
+        .nest_service("/static", ServeDir::new("static"))
         .merge(routes::router())
         .route("/gateway", axum::routing::get(gateway::handler))
         .layer(cors)

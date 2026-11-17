@@ -1,3 +1,10 @@
+# Rust build
+/target/
+
+# Env & local overrides
 .env
-/target
+.env.*
 *.local
+
+# Runtime downloaded assets
+/static/emoji/

@@ -1,5 +1,5 @@
 use axum::http::StatusCode;
-use bcrypt::{DEFAULT_COST, hash, verify};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -155,7 +155,17 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
         )
     })?;
 
-    if !verify(&payload.password, password_hash).unwrap_or(false) {
+    let hash_owned = password_hash.to_string();
+    let password_owned = payload.password;
+    let valid = tokio::task::spawn_blocking(move || {
+        PasswordHash::new(&hash_owned)
+            .map(|parsed| Argon2::default().verify_password(password_owned.as_bytes(), &parsed).is_ok())
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+
+    if !valid {
         return Err(AppError::validation(
             "login",
             "INVALID_LOGIN_OR_PASSWORD",
@@ -252,11 +262,26 @@ pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<Logi
         .filter(|t| VALID_THEMES.contains(t))
         .unwrap_or("dark");
 
-    let password_hash = hash(password, DEFAULT_COST).map_err(|err| {
+    let password_owned = password.to_string();
+    let password_hash = tokio::task::spawn_blocking(move || {
+        Argon2::default()
+            .hash_password(password_owned.as_bytes())
+            .map(|h| h.to_string())
+            .map_err(|err| format!("Password hashing failed: {err}"))
+    })
+    .await
+    .map_err(|err| {
         AppError::coded(
             StatusCode::INTERNAL_SERVER_ERROR,
             ApiErrorCode::InternalServerError,
-            format!("Password hashing failed: {err}"),
+            format!("Password hashing task failed: {err}"),
+        )
+    })?
+    .map_err(|err| {
+        AppError::coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiErrorCode::InternalServerError,
+            err,
         )
     })?;
 
