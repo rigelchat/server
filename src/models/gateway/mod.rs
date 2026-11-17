@@ -35,5 +35,7 @@ pub struct HelloPayload {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IdentifyPayload {
     pub token: String,
-    pub properties: serde_json::Value
+    pub properties: serde_json::Value,
+    pub intents: Option<u64>,
+    pub shard: Option<[u32; 2]>,
 }

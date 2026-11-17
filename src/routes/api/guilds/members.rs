@@ -1,8 +1,9 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::get,
 };
+use serde::Deserialize;
 
 use crate::AppState;
 use crate::error::AppError;
@@ -10,15 +11,52 @@ use crate::extractors::AuthUser;
 use crate::models::guild_member::GuildMemberResponse;
 use crate::services::guild_service;
 
+#[derive(Deserialize)]
+struct ListMembersQuery {
+    limit: Option<u32>,
+    after: Option<String>,
+}
+
 pub fn router() -> Router<AppState> {
-    Router::new().route("/", get(get_members))
+    Router::new()
+        .route("/", get(get_members))
+        .route("/@me", get(get_current_member))
+        .route("/{user_id}", get(get_member))
 }
 
 async fn get_members(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(guild_id): Path<String>,
+    Query(query): Query<ListMembersQuery>,
 ) -> Result<Json<Vec<GuildMemberResponse>>, AppError> {
-    let members = guild_service::get_guild_members(&state, &guild_id, &auth.user_id).await?;
+    let members = guild_service::get_guild_members(
+        &state,
+        &guild_id,
+        &auth.user_id,
+        query.limit,
+        query.after.as_deref(),
+    )
+    .await?;
     Ok(Json(members))
+}
+
+async fn get_current_member(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(guild_id): Path<String>,
+) -> Result<Json<GuildMemberResponse>, AppError> {
+    let member =
+        guild_service::get_guild_member(&state, &guild_id, &auth.user_id, &auth.user_id).await?;
+    Ok(Json(member))
+}
+
+async fn get_member(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((guild_id, user_id)): Path<(String, String)>,
+) -> Result<Json<GuildMemberResponse>, AppError> {
+    let member =
+        guild_service::get_guild_member(&state, &guild_id, &auth.user_id, &user_id).await?;
+    Ok(Json(member))
 }

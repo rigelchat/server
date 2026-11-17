@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
 use crate::models::serde_helpers::{serialize_millis_iso, serialize_millis_iso_opt};
-use crate::models::user::GatewayUserSummary;
+use crate::models::user::PartialUser;
 
 #[derive(Debug, Clone, FromRow)]
 pub struct MessageDbRow {
@@ -26,7 +26,7 @@ pub struct MessageDbRow {
 pub struct Message {
     pub id: String,
     pub channel_id: String,
-    pub author: GatewayUserSummary,
+    pub author: PartialUser,
     #[serde(rename = "type")]
     pub kind: u32,
     pub flags: u32,
@@ -38,7 +38,7 @@ pub struct Message {
     pub pinned: bool,
     pub mention_everyone: bool,
     pub tts: bool,
-    pub mentions: Vec<GatewayUserSummary>,
+    pub mentions: Vec<PartialUser>,
     pub mention_roles: Vec<String>,
     pub embeds: Vec<serde_json::Value>,
     pub attachments: Vec<serde_json::Value>,
@@ -52,7 +52,7 @@ impl From<MessageDbRow> for Message {
         Self {
             id: row.id,
             channel_id: row.channel_id,
-            author: GatewayUserSummary {
+            author: PartialUser {
                 id: row.author_id,
                 username: row.username,
                 discriminator: row.discriminator,
@@ -80,6 +80,40 @@ impl From<MessageDbRow> for Message {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageMember {
+    pub nick: Option<String>,
+    pub avatar: Option<String>,
+    pub banner: Option<String>,
+    pub accent_color: Option<u32>,
+    pub roles: Vec<String>,
+    #[serde(serialize_with = "serialize_millis_iso")]
+    pub joined_at: u64,
+    pub mute: bool,
+    pub deaf: bool,
+    pub communication_disabled_until: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GatewayMessageEvent {
+    #[serde(flatten)]
+    pub message: Message,
+    pub channel_type: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guild_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member: Option<MessageMember>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct GetMessagesQuery {
+    pub limit: Option<u32>,
+    pub before: Option<String>,
+    pub after: Option<String>,
+    pub around: Option<String>,
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageType {
     Default = 0,

@@ -5,11 +5,13 @@ use axum::extract::ws::{CloseFrame, Message};
 use serde::Serialize;
 use tokio::sync::mpsc;
 
+use crate::constants::dialect::ClientDialect;
 use crate::constants::gateway::Opcode;
 use crate::models::gateway::GatewayPayload;
 
 pub struct GatewaySession {
     pub id: String,
+    pub dialect: ClientDialect,
     pub user_id: Option<String>,
     pub auth_session_id: Option<String>,
     pub sender: mpsc::Sender<Message>,
@@ -18,9 +20,10 @@ pub struct GatewaySession {
 }
 
 impl GatewaySession {
-    pub fn new(id: String, sender: mpsc::Sender<Message>) -> Self {
+    pub fn new(id: String, dialect: ClientDialect, sender: mpsc::Sender<Message>) -> Self {
         Self {
             id,
+            dialect,
             user_id: None,
             auth_session_id: None,
             sender,

@@ -78,7 +78,7 @@ impl From<Opcode> for u8 {
 pub mod close_codes {
     pub const UNKNOWN_ERROR: (u16, &'static str) = (4000, "We're not sure what went wrong. Try reconnecting?");
     pub const UNKNOWN_OPCODE: (u16, &'static str) = (4001, "You sent an invalid Gateway opcode or an invalid payload for an opcode. Don't do that!");
-    pub const DECODE_ERROR: (u16, &'static str) = (4002, "You sent an invalid payload to Discord. Don't do that!");
+    pub const DECODE_ERROR: (u16, &'static str) = (4002, "Invalid Gateway payload.");
     pub const NOT_AUTHENTICATED: (u16, &'static str) = (4003, "You sent us a payload prior to identifying, or this session has been invalidated.");
     pub const AUTHENTICATION_FAILED: (u16, &'static str) = (4004, "The account token sent with your identify payload is incorrect.");
     pub const ALREADY_AUTHENTICATED: (u16, &'static str) = (4005, "You sent more than one identify payload. Don't do that!");
@@ -94,6 +94,7 @@ pub mod close_codes {
 
 pub mod events {
     pub const READY: &str = "READY";
+    pub const SESSIONS_REPLACE: &str = "SESSIONS_REPLACE";
     pub const RESUMED: &str = "RESUMED";
     pub const GUILD_CREATE: &str = "GUILD_CREATE";
     pub const GUILD_DELETE: &str = "GUILD_DELETE";

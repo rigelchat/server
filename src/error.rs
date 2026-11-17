@@ -2,30 +2,168 @@ use std::fmt;
 
 use axum::{
     Json,
+    extract::Request,
     http::StatusCode,
+    middleware::Next,
     response::{IntoResponse, Response},
 };
-use serde_json::json;
+use serde::Serialize;
+
+use crate::constants::dialect::ClientDialect;
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiErrorCode {
+    BadRequest,
+    InvalidFormBody,
+    Unauthorized,
+    MissingAuthorization,
+    InvalidAuthToken,
+    AccessDenied,
+    MissingAccess,
+    MissingPermissions,
+    NotFound,
+    UnknownUser,
+    UnknownGuild,
+    UnknownChannel,
+    UnknownMessage,
+    UnknownInvite,
+    UnknownMember,
+    UnknownRole,
+    CannotSendEmptyMessage,
+    CannotEditOtherUserMessage,
+    UserBannedFromGuild,
+    Conflict,
+    UsernameAlreadyTaken,
+    EmailAlreadyInUse,
+    EmailUnavailableOnInstance,
+    InternalServerError,
+}
+
+impl ApiErrorCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BadRequest => "BAD_REQUEST",
+            Self::InvalidFormBody => "INVALID_FORM_BODY",
+            Self::Unauthorized => "UNAUTHORIZED",
+            Self::MissingAuthorization => "MISSING_AUTHORIZATION",
+            Self::InvalidAuthToken => "INVALID_AUTH_TOKEN",
+            Self::AccessDenied => "ACCESS_DENIED",
+            Self::MissingAccess => "MISSING_ACCESS",
+            Self::MissingPermissions => "MISSING_PERMISSIONS",
+            Self::NotFound => "NOT_FOUND",
+            Self::UnknownUser => "UNKNOWN_USER",
+            Self::UnknownGuild => "UNKNOWN_GUILD",
+            Self::UnknownChannel => "UNKNOWN_CHANNEL",
+            Self::UnknownMessage => "UNKNOWN_MESSAGE",
+            Self::UnknownInvite => "UNKNOWN_INVITE",
+            Self::UnknownMember => "UNKNOWN_MEMBER",
+            Self::UnknownRole => "UNKNOWN_ROLE",
+            Self::CannotSendEmptyMessage => "CANNOT_SEND_EMPTY_MESSAGE",
+            Self::CannotEditOtherUserMessage => "CANNOT_EDIT_OTHER_USER_MESSAGE",
+            Self::UserBannedFromGuild => "USER_BANNED_FROM_GUILD",
+            Self::Conflict => "CONFLICT",
+            Self::UsernameAlreadyTaken => "USERNAME_ALREADY_TAKEN",
+            Self::EmailAlreadyInUse => "EMAIL_ALREADY_IN_USE",
+            Self::EmailUnavailableOnInstance => "EMAIL_UNAVAILABLE_ON_INSTANCE",
+            Self::InternalServerError => "INTERNAL_SERVER_ERROR",
+        }
+    }
+
+    pub fn discord_code(self) -> u32 {
+        match self {
+            Self::InvalidFormBody => 50035,
+            Self::AccessDenied | Self::MissingAccess => 50001,
+            Self::MissingPermissions => 50013,
+            Self::UnknownChannel => 10003,
+            Self::UnknownGuild => 10004,
+            Self::UnknownInvite => 10006,
+            Self::UnknownMember => 10007,
+            Self::UnknownMessage => 10008,
+            Self::UnknownRole => 10011,
+            Self::UnknownUser => 10013,
+            Self::CannotEditOtherUserMessage => 50005,
+            Self::CannotSendEmptyMessage => 50006,
+            Self::UserBannedFromGuild => 40007,
+            _ => 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ValidationError {
+    pub path: String,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+struct ApiErrorMeta {
+    status: StatusCode,
+    code: ApiErrorCode,
+    message: String,
+}
+
+fn slice_is_empty(errors: &&[ValidationError]) -> bool { errors.is_empty() }
+
+#[derive(Serialize)]
+struct FluxerErrorBody<'a> {
+    code: &'static str,
+    message: &'a str,
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    errors: &'a [ValidationError],
+}
+
+#[derive(Serialize)]
+struct DiscordErrorBody<'a> {
+    code: u32,
+    message: &'a str,
+}
 
 #[derive(Debug)]
 pub enum AppError {
-    BadRequest(String),
-    Unauthorized(String),
-    Forbidden(String),
-    NotFound(String),
-    Conflict(String),
     Internal(String),
+    Coded {
+        status: StatusCode,
+        code: ApiErrorCode,
+        message: String,
+        errors: Vec<ValidationError>,
+    },
+}
+
+impl AppError {
+    pub fn coded(status: StatusCode, code: ApiErrorCode, message: impl Into<String>) -> Self {
+        Self::Coded {
+            status,
+            code,
+            message: message.into(),
+            errors: Vec::new(),
+        }
+    }
+
+    pub fn validation(
+        path: impl Into<String>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::Coded {
+            status: StatusCode::BAD_REQUEST,
+            code: ApiErrorCode::InvalidFormBody,
+            message: "Invalid form body.".to_string(),
+            errors: vec![ValidationError {
+                path: path.into(),
+                code: code.into(),
+                message: message.into(),
+            }],
+        }
+    }
 }
 
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::BadRequest(msg)
-            | Self::Unauthorized(msg)
-            | Self::Forbidden(msg)
-            | Self::NotFound(msg)
-            | Self::Conflict(msg)
-            | Self::Internal(msg) => write!(f, "{msg}"),
+            Self::Internal(msg) => write!(f, "{msg}"),
+            Self::Coded { message, .. } => write!(f, "{message}"),
         }
     }
 }
@@ -40,18 +178,60 @@ impl From<sqlx::Error> for AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
-            Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
-            Self::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg),
-            Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
-            Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            Self::Conflict(msg) => (StatusCode::CONFLICT, msg),
+        let (status, code, message, errors) = match self {
             Self::Internal(err) => {
                 tracing::error!(error = %err, "Internal server error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ApiErrorCode::InternalServerError,
+                    "Internal server error".to_string(),
+                    Vec::new(),
+                )
             }
+            Self::Coded {
+                status,
+                code,
+                message,
+                errors,
+            } => (status, code, message, errors),
         };
 
-        (status, Json(json!({ "message": message }))).into_response()
+        let mut response = (
+            status,
+            Json(FluxerErrorBody {
+                code: code.as_str(),
+                message: &message,
+                errors: &errors,
+            }),
+        )
+            .into_response();
+
+        response
+            .extensions_mut()
+            .insert(ApiErrorMeta { status, code, message });
+
+        response
     }
+}
+
+pub async fn adapt_error_dialect(mut req: Request, next: Next) -> Response {
+    let dialect = ClientDialect::from_http(req.uri().path(), req.headers());
+    req.extensions_mut().insert(dialect);
+
+    let res = next.run(req).await;
+
+    if dialect == ClientDialect::Discord {
+        if let Some(meta) = res.extensions().get::<ApiErrorMeta>() {
+            return (
+                meta.status,
+                Json(DiscordErrorBody {
+                    code: meta.code.discord_code(),
+                    message: &meta.message,
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    res
 }

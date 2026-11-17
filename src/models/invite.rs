@@ -1,8 +1,10 @@
 #![allow(dead_code)]
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::constants::dialect::ClientDialect;
 use crate::models::serde_helpers::serialize_millis_iso;
+use crate::models::user::PartialUser;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(into = "u8")]
@@ -18,21 +20,11 @@ impl From<InviteType> for u8 {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct InviteUserRef {
-    pub id: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct CreatedInvite {
-    pub code: String,
-    pub guild_id: String,
-    pub channel_id: String,
-    pub inviter: InviteUserRef,
-    pub uses: u32,
-    pub max_uses: u32,
-    #[serde(serialize_with = "serialize_millis_iso")]
-    pub created_at: u64,
+#[derive(Debug, Deserialize, Default)]
+pub struct CreateInviteRequest {
+    pub max_uses: Option<u32>,
+    pub max_age: Option<u32>,
+    pub temporary: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -40,15 +32,26 @@ pub struct InviteGuild {
     pub id: String,
     pub name: String,
     pub icon: Option<String>,
-    pub description: Option<String>,
+    pub banner: Option<String>,
+    pub banner_width: Option<u32>,
+    pub banner_height: Option<u32>,
+    pub splash: Option<String>,
+    pub splash_width: Option<u32>,
+    pub splash_height: Option<u32>,
+    pub splash_card_alignment: u8,
+    pub embed_splash: Option<String>,
+    pub embed_splash_width: Option<u32>,
+    pub embed_splash_height: Option<u32>,
     pub features: Vec<String>,
-    pub verification_level: u8,
+    pub badge_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InviteChannel {
     pub id: String,
-    pub name: String,
+    pub name: Option<String>,
     #[serde(rename = "type")]
     pub kind: u32,
 }
@@ -60,12 +63,43 @@ pub struct InviteResponse {
     pub kind: InviteType,
     pub guild: InviteGuild,
     pub channel: InviteChannel,
-    pub approximate_member_count: i64,
-    pub approximate_presence_count: usize,
+    pub inviter: Option<PartialUser>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approximate_member_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approximate_presence_count: Option<usize>,
+    pub expires_at: Option<String>,
+    pub temporary: bool,
+}
+
+impl InviteResponse {
+    pub fn with_dialect(mut self, dialect: ClientDialect) -> Self {
+        if dialect == ClientDialect::Discord {
+            self.approximate_member_count = self.member_count.take();
+            self.approximate_presence_count = self.presence_count.take();
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct AcceptedInvite {
-    pub guild_id: String,
-    pub channel_id: String,
+pub struct CreatedInvite {
+    #[serde(flatten)]
+    pub invite: InviteResponse,
+    #[serde(serialize_with = "serialize_millis_iso")]
+    pub created_at: u64,
+    pub uses: u32,
+    pub max_uses: u32,
+    pub max_age: u32,
+}
+
+impl CreatedInvite {
+    pub fn with_dialect(mut self, dialect: ClientDialect) -> Self {
+        self.invite = self.invite.with_dialect(dialect);
+        self
+    }
 }

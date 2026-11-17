@@ -3,8 +3,31 @@ use std::env;
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
 use tracing::info;
 
+async fn ensure_column(
+    pool: &MySqlPool,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), sqlx::Error> {
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+    )
+    .bind(table)
+    .bind(column)
+    .fetch_one(pool)
+    .await?;
+
+    if exists == 0 {
+        let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+        sqlx::query(&sql).execute(pool).await?;
+    }
+
+    Ok(())
+}
+
 pub async fn init() -> Result<MySqlPool, sqlx::Error> {
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be defined for the database connection");
+    let database_url =
+        env::var("DATABASE_URL").expect("DATABASE_URL must be defined for the database connection");
 
     let pool = MySqlPoolOptions::new()
         .max_connections(5)
@@ -21,11 +44,11 @@ pub async fn init() -> Result<MySqlPool, sqlx::Error> {
             bot BOOLEAN NOT NULL DEFAULT FALSE,
             public_flags INT UNSIGNED NOT NULL DEFAULT 0,
             username VARCHAR(32) NOT NULL UNIQUE,
-            email VARCHAR(255) NOT NULL UNIQUE,
+            email VARCHAR(255) DEFAULT NULL UNIQUE,
             verified BOOLEAN NOT NULL DEFAULT TRUE,
             password_hash VARCHAR(255) DEFAULT NULL,
             global_name VARCHAR(32) DEFAULT NULL,
-            discriminator VARCHAR(4) NOT NULL DEFAULT '0',
+            discriminator VARCHAR(4) NOT NULL DEFAULT '0000',
             avatar VARCHAR(255) DEFAULT NULL,
             banner VARCHAR(255) DEFAULT NULL
         )
@@ -38,8 +61,8 @@ pub async fn init() -> Result<MySqlPool, sqlx::Error> {
         r#"
         CREATE TABLE IF NOT EXISTS user_profiles (
             id VARCHAR(20) NOT NULL PRIMARY KEY,
-            bio VARCHAR(190) DEFAULT '',
-            pronouns VARCHAR(40) DEFAULT '',
+            bio VARCHAR(320) DEFAULT NULL,
+            pronouns VARCHAR(40) DEFAULT NULL,
             accent_color INT UNSIGNED DEFAULT NULL,
             theme_color_primary INT UNSIGNED DEFAULT NULL,
             theme_color_secondary INT UNSIGNED DEFAULT NULL,
@@ -61,6 +84,7 @@ pub async fn init() -> Result<MySqlPool, sqlx::Error> {
             background_gradient_preset VARCHAR(32) DEFAULT NULL,
             developer_mode BOOLEAN NOT NULL DEFAULT FALSE,
             synced_preferences TEXT DEFAULT NULL,
+            extra_settings TEXT DEFAULT NULL,
             FOREIGN KEY (id) REFERENCES users(id) ON DELETE CASCADE
         )
         "#,
@@ -245,6 +269,21 @@ pub async fn init() -> Result<MySqlPool, sqlx::Error> {
     )
     .execute(&pool)
     .await?;
+
+    // Idempotent column migrations for pre-existing tables.
+    sqlx::query("ALTER TABLE users MODIFY COLUMN email VARCHAR(255) DEFAULT NULL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE users MODIFY COLUMN discriminator VARCHAR(4) NOT NULL DEFAULT '0000'")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE user_profiles MODIFY COLUMN bio VARCHAR(320) DEFAULT NULL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE user_profiles MODIFY COLUMN pronouns VARCHAR(40) DEFAULT NULL")
+        .execute(&pool)
+        .await?;
+    ensure_column(&pool, "user_settings", "extra_settings", "TEXT DEFAULT NULL").await?;
 
     Ok(pool)
 }

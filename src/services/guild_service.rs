@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use axum::http::StatusCode;
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::json;
@@ -9,11 +10,11 @@ use crate::AppState;
 use crate::constants::flags::{PermissionFlags, UserFlags};
 use crate::constants::gateway::events;
 use crate::constants::guild::{DiscoveryCategory, VerificationLevel};
-use crate::error::AppError;
+use crate::error::{ApiErrorCode, AppError};
 use crate::models::channel::{
     ChannelOverwriteRow, ChannelResponse, ChannelType, GuildChannel, PermissionOverwrite,
 };
-use crate::models::guild::{BaseGuild, GatewayGuild, GatewayGuildProperties};
+use crate::models::guild::{BaseGuild, DiscordGuildCreate, GatewayGuild, Guild, ListGuildsQuery};
 use crate::models::guild_member::{
     BaseGuildMember, GatewayGuildMember, GuildMemberResponse, GuildMemberRole, GuildMemberUserRef,
 };
@@ -21,9 +22,11 @@ use crate::models::permission::OverwriteType;
 use crate::models::rest::discoverable_guilds::{
     DiscoverableGuild as RestDiscoverableGuild, DiscoverableGuildsResponse,
 };
-use crate::models::rest::discovery::{DiscoverableGuild, GuildDiscoveryResponse};
-use crate::models::role::Role;
-use crate::models::user::PublicUser;
+use crate::models::rest::discovery::{
+    CategoryCount, DiscoverableGuild, DiscoverySearchQuery, GuildDiscoveryResponse,
+};
+use crate::models::role::{Role, RoleRow};
+use crate::models::user::PartialUser;
 use crate::utils::snowflake::DISCORD_SNOWFLAKE;
 
 #[derive(FromRow)]
@@ -35,7 +38,6 @@ struct MemberJoinRow {
     discriminator: String,
     global_name: Option<String>,
     avatar: Option<String>,
-    banner: Option<String>,
     bot: bool,
     public_flags: u32,
 }
@@ -77,22 +79,22 @@ pub async fn is_member(state: &AppState, guild_id: &str, user_id: &str) -> Resul
 
 pub async fn require_member(state: &AppState, guild_id: &str, user_id: &str) -> Result<(), AppError> {
     if !is_member(state, guild_id, user_id).await? {
-        return Err(AppError::Forbidden(
-            "You are not a member of this guild".to_string(),
+        return Err(AppError::coded(
+            StatusCode::FORBIDDEN,
+            ApiErrorCode::MissingPermissions,
+            "You don't have the permissions required to perform this action.",
         ));
     }
     Ok(())
 }
 
-pub async fn create_guild(
-    state: &AppState,
-    name: &str,
-    owner_id: &str,
-) -> Result<GatewayGuild, AppError> {
+pub async fn create_guild(state: &AppState, name: &str, owner_id: &str) -> Result<Guild, AppError> {
     let name = name.trim();
     if name.is_empty() || name.len() > 100 {
-        return Err(AppError::BadRequest(
-            "Guild name must be between 1 and 100 characters".to_string(),
+        return Err(AppError::validation(
+            "name",
+            "STRING_LENGTH_INVALID",
+            "String length must be between 1 and 100 characters.",
         ));
     }
 
@@ -100,11 +102,19 @@ pub async fn create_guild(
         .bind(owner_id)
         .fetch_optional(&state.db)
         .await?
-        .ok_or_else(|| AppError::Unauthorized("User not found".to_string()))?;
+        .ok_or_else(|| {
+            AppError::coded(
+                StatusCode::UNAUTHORIZED,
+                ApiErrorCode::Unauthorized,
+                "Unauthorized",
+            )
+        })?;
 
     if !UserFlags::from_bits_truncate(owner_flags).contains(UserFlags::STAFF) {
-        return Err(AppError::Forbidden(
-            "Only staff users can create guilds".to_string(),
+        return Err(AppError::coded(
+            StatusCode::FORBIDDEN,
+            ApiErrorCode::MissingPermissions,
+            "You don't have permission to create communities on this instance.",
         ));
     }
 
@@ -185,23 +195,160 @@ pub async fn create_guild(
         .execute(&mut *tx)
         .await?;
 
-    sqlx::query("INSERT INTO guild_member_roles (guild_id, user_id, role_id) VALUES (?, ?, ?)")
-        .bind(&guild_id)
-        .bind(owner_id)
-        .bind(&guild_id)
-        .execute(&mut *tx)
-        .await?;
-
     tx.commit().await?;
 
     state.add_user_guild(owner_id, &guild_id).await;
 
-    let gateway_guild = build_gateway_guild(state, &guild_id, owner_id).await?;
+    let gateway_guild = build_full_gateway_guild(state, &guild_id).await?;
+    let props = gateway_guild.properties.clone();
     state
-        .dispatch_user(events::GUILD_CREATE, &gateway_guild, owner_id)
+        .dispatch_user_dialect(events::GUILD_CREATE, owner_id, |dialect| match dialect {
+            crate::constants::dialect::ClientDialect::Fluxer => {
+                serde_json::to_value(&gateway_guild).unwrap_or_default()
+            }
+            crate::constants::dialect::ClientDialect::Discord => {
+                serde_json::to_value(DiscordGuildCreate::from(gateway_guild.clone()))
+                    .unwrap_or_default()
+            }
+        })
         .await;
 
-    Ok(gateway_guild)
+    Ok(props)
+}
+
+pub async fn get_guild(
+    state: &AppState,
+    guild_id: &str,
+    user_id: &str,
+) -> Result<Guild, AppError> {
+    let base = sqlx::query_as::<_, BaseGuild>("SELECT * FROM guilds WHERE id = ?")
+        .bind(guild_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| {
+            AppError::coded(StatusCode::NOT_FOUND, ApiErrorCode::UnknownGuild, "Unknown guild")
+        })?;
+
+    require_member(state, guild_id, user_id).await?;
+
+    let roles = fetch_guild_roles(state, guild_id).await?;
+    let channels = fetch_guild_channels(state, guild_id).await?;
+    let member_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM guild_members WHERE guild_id = ?")
+            .bind(guild_id)
+            .fetch_one(&state.db)
+            .await?;
+
+    let online_count = count_guild_online(state, guild_id).await;
+
+    let mut guild = Guild::from(base);
+    guild.roles = Some(roles);
+    guild.emojis = Some(vec![]);
+    guild.stickers = Some(vec![]);
+    guild.channels = Some(channels);
+    guild.member_count = Some(member_count.max(1) as u64);
+    guild.online_count = Some(online_count);
+
+    Ok(guild)
+}
+
+pub async fn get_user_guilds(
+    state: &AppState,
+    user_id: &str,
+    query: ListGuildsQuery,
+) -> Result<Vec<Guild>, AppError> {
+    let limit = query.limit.unwrap_or(200).clamp(1, 200);
+    let include_permissions = limit <= 100;
+    let with_counts = query.with_counts.unwrap_or(false);
+
+    let mut qb = QueryBuilder::<MySql>::new(
+        "SELECT g.* FROM guilds g INNER JOIN guild_members gm ON gm.guild_id = g.id WHERE gm.user_id = ",
+    );
+    qb.push_bind(user_id);
+
+    if let Some(before) = &query.before {
+        qb.push(" AND g.id < ");
+        qb.push_bind(before);
+    }
+    if let Some(after) = &query.after {
+        qb.push(" AND g.id > ");
+        qb.push_bind(after);
+    }
+
+    qb.push(" ORDER BY g.id ASC LIMIT ");
+    qb.push_bind(limit);
+
+    let rows = qb.build_query_as::<BaseGuild>().fetch_all(&state.db).await?;
+    let mut guilds = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        let gid = row.id.clone();
+        let owner_id = row.owner_id.clone();
+        let mut guild = Guild::from(row);
+
+        if include_permissions {
+            let perms = compute_guild_permissions(state, &gid, user_id, &owner_id).await?;
+            guild.permissions = Some(perms.to_string());
+        }
+
+        if with_counts {
+            let member_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM guild_members WHERE guild_id = ?")
+                    .bind(&gid)
+                    .fetch_one(&state.db)
+                    .await?;
+            guild.approximate_member_count = Some(member_count.max(1) as u64);
+            guild.approximate_presence_count = Some(count_guild_online(state, &gid).await);
+        }
+
+        guilds.push(guild);
+    }
+
+    Ok(guilds)
+}
+
+async fn compute_guild_permissions(
+    state: &AppState,
+    guild_id: &str,
+    user_id: &str,
+    owner_id: &str,
+) -> Result<u64, AppError> {
+    if user_id == owner_id {
+        return Ok(PermissionFlags::all().bits());
+    }
+
+    let role_perms: Vec<u64> = sqlx::query_scalar(
+        r#"
+        SELECT r.permissions FROM roles r
+        WHERE r.guild_id = ? AND (
+            r.id = ?
+            OR r.id IN (SELECT gmr.role_id FROM guild_member_roles gmr WHERE gmr.guild_id = ? AND gmr.user_id = ?)
+        )
+        "#,
+    )
+    .bind(guild_id)
+    .bind(guild_id)
+    .bind(guild_id)
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let combined = role_perms.into_iter().fold(0u64, |acc, p| acc | p);
+    if PermissionFlags::from_bits_truncate(combined).contains(PermissionFlags::ADMINISTRATOR) {
+        return Ok(PermissionFlags::all().bits());
+    }
+
+    Ok(combined)
+}
+
+async fn count_guild_online(state: &AppState, guild_id: &str) -> u64 {
+    let sessions = state.sessions.read().await;
+    sessions
+        .values()
+        .filter(|s| s.guilds.contains(guild_id))
+        .filter_map(|s| s.user_id.as_ref())
+        .collect::<HashSet<_>>()
+        .len() as u64
 }
 
 pub async fn add_member_to_guild(
@@ -215,7 +362,11 @@ pub async fn add_member_to_guild(
         .await?;
 
     if guild_exists.is_none() {
-        return Err(AppError::NotFound("Guild not found".to_string()));
+        return Err(AppError::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownGuild,
+            "Unknown guild",
+        ));
     }
 
     let banned: Option<(String,)> =
@@ -226,7 +377,11 @@ pub async fn add_member_to_guild(
             .await?;
 
     if banned.is_some() {
-        return Err(AppError::Forbidden("You are banned from this guild".to_string()));
+        return Err(AppError::coded(
+            StatusCode::FORBIDDEN,
+            ApiErrorCode::UserBannedFromGuild,
+            "This user is banned from this community.",
+        ));
     }
 
     if is_member(state, guild_id, user_id).await? {
@@ -234,25 +389,13 @@ pub async fn add_member_to_guild(
     }
 
     let now = Utc::now().timestamp_millis() as u64;
-    let mut tx = state.db.begin().await?;
-
     sqlx::query("INSERT INTO guild_members (user_id, guild_id, joined_at) VALUES (?, ?, ?)")
         .bind(user_id)
         .bind(guild_id)
         .bind(now)
-        .execute(&mut *tx)
+        .execute(&state.db)
         .await?;
 
-    sqlx::query("INSERT INTO guild_member_roles (guild_id, user_id, role_id) VALUES (?, ?, ?)")
-        .bind(guild_id)
-        .bind(user_id)
-        .bind(guild_id)
-        .execute(&mut *tx)
-        .await?;
-
-    tx.commit().await?;
-
-    // Build and broadcast GUILD_MEMBER_ADD to existing members before adding the joiner to session.guilds.
     if let Ok(member) = fetch_member_response(state, guild_id, user_id).await {
         let evt = GuildMemberAddEvent {
             guild_id: guild_id.to_string(),
@@ -265,9 +408,17 @@ pub async fn add_member_to_guild(
 
     state.add_user_guild(user_id, guild_id).await;
 
-    let gateway_guild = build_gateway_guild(state, guild_id, user_id).await?;
+    let gateway_guild = build_full_gateway_guild(state, guild_id).await?;
     state
-        .dispatch_user(events::GUILD_CREATE, &gateway_guild, user_id)
+        .dispatch_user_dialect(events::GUILD_CREATE, user_id, |dialect| match dialect {
+            crate::constants::dialect::ClientDialect::Fluxer => {
+                serde_json::to_value(&gateway_guild).unwrap_or_default()
+            }
+            crate::constants::dialect::ClientDialect::Discord => {
+                serde_json::to_value(DiscordGuildCreate::from(gateway_guild.clone()))
+                    .unwrap_or_default()
+            }
+        })
         .await;
 
     Ok(())
@@ -275,7 +426,11 @@ pub async fn add_member_to_guild(
 
 pub async fn leave_guild(state: &AppState, user_id: &str, guild_id: &str) -> Result<(), AppError> {
     if !is_member(state, guild_id, user_id).await? {
-        return Err(AppError::NotFound("You are not in this guild".to_string()));
+        return Err(AppError::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownMember,
+            "Unknown member",
+        ));
     }
 
     let mut tx = state.db.begin().await?;
@@ -299,7 +454,7 @@ pub async fn leave_guild(state: &AppState, user_id: &str, guild_id: &str) -> Res
     state
         .dispatch_user(
             events::GUILD_DELETE,
-            &json!({ "id": guild_id, "unavailable": false }),
+            &json!({ "id": guild_id }),
             user_id,
         )
         .await;
@@ -315,12 +470,59 @@ pub async fn leave_guild(state: &AppState, user_id: &str, guild_id: &str) -> Res
     Ok(())
 }
 
+pub async fn get_channel(
+    state: &AppState,
+    channel_id: &str,
+    user_id: &str,
+) -> Result<ChannelResponse, AppError> {
+    let channel = sqlx::query_as::<_, GuildChannel>(
+        r#"
+        SELECT
+            c.id, c.type, c.position, c.guild_id, c.parent_id, c.name,
+            (SELECT m.id FROM messages m WHERE m.channel_id = c.id ORDER BY m.id DESC LIMIT 1) AS last_message_id
+        FROM channels c
+        WHERE c.id = ?
+        "#,
+    )
+    .bind(channel_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| {
+        AppError::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownChannel,
+            "Unknown channel",
+        )
+    })?;
+
+    require_member(state, &channel.guild_id, user_id).await?;
+
+    let overwrites = sqlx::query_as::<_, ChannelOverwriteRow>(
+        "SELECT channel_id, type, target_id, allow, deny FROM channel_permission_overwrites WHERE channel_id = ?",
+    )
+    .bind(channel_id)
+    .fetch_all(&state.db)
+    .await?
+    .into_iter()
+    .map(PermissionOverwrite::from)
+    .collect();
+
+    Ok(ChannelResponse::from_parts(channel, overwrites))
+}
+
 pub async fn fetch_guild_channels(
     state: &AppState,
     guild_id: &str,
 ) -> Result<Vec<ChannelResponse>, AppError> {
     let channels = sqlx::query_as::<_, GuildChannel>(
-        "SELECT id, type, position, guild_id, parent_id, name FROM channels WHERE guild_id = ? ORDER BY position ASC",
+        r#"
+        SELECT
+            c.id, c.type, c.position, c.guild_id, c.parent_id, c.name,
+            (SELECT m.id FROM messages m WHERE m.channel_id = c.id ORDER BY m.id DESC LIMIT 1) AS last_message_id
+        FROM channels c
+        WHERE c.guild_id = ?
+        ORDER BY c.position ASC
+        "#,
     )
     .bind(guild_id)
     .fetch_all(&state.db)
@@ -354,12 +556,7 @@ pub async fn fetch_guild_channels(
         .into_iter()
         .map(|base| {
             let permission_overwrites = overwrites_by_channel.remove(&base.id).unwrap_or_default();
-            ChannelResponse {
-                base,
-                nsfw: false,
-                nsfw_override: false,
-                permission_overwrites,
-            }
+            ChannelResponse::from_parts(base, permission_overwrites)
         })
         .collect())
 }
@@ -374,42 +571,62 @@ pub async fn get_guild_channels(
 }
 
 pub async fn fetch_guild_roles(state: &AppState, guild_id: &str) -> Result<Vec<Role>, AppError> {
-    let roles = sqlx::query_as::<_, Role>(
-        "SELECT id, guild_id, position, name, color, unicode_emoji, hoist, mentionable, permissions FROM roles WHERE guild_id = ? ORDER BY position ASC",
+    let rows = sqlx::query_as::<_, RoleRow>(
+        "SELECT id, position, name, color, unicode_emoji, hoist, mentionable, permissions FROM roles WHERE guild_id = ? ORDER BY position DESC",
     )
     .bind(guild_id)
     .fetch_all(&state.db)
     .await?;
 
-    Ok(roles)
+    Ok(rows.into_iter().map(Role::from).collect())
+}
+
+pub async fn get_guild_roles(
+    state: &AppState,
+    guild_id: &str,
+    user_id: &str,
+) -> Result<Vec<Role>, AppError> {
+    require_member(state, guild_id, user_id).await?;
+    fetch_guild_roles(state, guild_id).await
 }
 
 pub async fn get_guild_members(
     state: &AppState,
     guild_id: &str,
     user_id: &str,
+    limit: Option<u32>,
+    after: Option<&str>,
 ) -> Result<Vec<GuildMemberResponse>, AppError> {
     require_member(state, guild_id, user_id).await?;
 
-    let rows = sqlx::query_as::<_, MemberJoinRow>(
+    let limit = limit.unwrap_or(100).clamp(1, 1000);
+
+    let mut qb = QueryBuilder::<MySql>::new(
         r#"
         SELECT
             gm.user_id, gm.joined_at, gm.nick,
-            u.username, u.discriminator, u.global_name, u.avatar, u.banner, u.bot, u.public_flags
+            u.username, u.discriminator, u.global_name, u.avatar, u.bot, u.public_flags
         FROM guild_members gm
         INNER JOIN users u ON u.id = gm.user_id
-        WHERE gm.guild_id = ?
-        ORDER BY gm.joined_at ASC
-        LIMIT 100
+        WHERE gm.guild_id = 
         "#,
-    )
-    .bind(guild_id)
-    .fetch_all(&state.db)
-    .await?;
+    );
+    qb.push_bind(guild_id);
+
+    if let Some(after_id) = after {
+        qb.push(" AND gm.user_id > ");
+        qb.push_bind(after_id);
+    }
+
+    qb.push(" ORDER BY gm.user_id ASC LIMIT ");
+    qb.push_bind(limit);
+
+    let rows = qb.build_query_as::<MemberJoinRow>().fetch_all(&state.db).await?;
 
     let role_rows = sqlx::query_as::<_, GuildMemberRole>(
-        "SELECT guild_id, user_id, role_id FROM guild_member_roles WHERE guild_id = ?",
+        "SELECT user_id, role_id FROM guild_member_roles WHERE guild_id = ? AND role_id != ?",
     )
+    .bind(guild_id)
     .bind(guild_id)
     .fetch_all(&state.db)
     .await?;
@@ -424,28 +641,38 @@ pub async fn get_guild_members(
         .map(|m| {
             let roles = roles_by_user.remove(&m.user_id).unwrap_or_default();
             GuildMemberResponse {
-                user: PublicUser {
+                user: PartialUser {
                     id: m.user_id,
                     username: m.username,
                     discriminator: m.discriminator,
                     global_name: m.global_name,
                     avatar: m.avatar,
-                    banner: m.banner,
+                    avatar_color: None,
                     bot: m.bot,
                     flags: m.public_flags,
                 },
-                roles,
                 nick: m.nick,
                 avatar: None,
-                premium_since: None,
+                banner: None,
+                accent_color: None,
+                roles,
                 joined_at: m.joined_at,
-                deaf: false,
                 mute: false,
-                flags: 0,
-                pending: false,
+                deaf: false,
+                communication_disabled_until: None,
             }
         })
         .collect())
+}
+
+pub async fn get_guild_member(
+    state: &AppState,
+    guild_id: &str,
+    viewer_id: &str,
+    target_user_id: &str,
+) -> Result<GuildMemberResponse, AppError> {
+    require_member(state, guild_id, viewer_id).await?;
+    fetch_member_response(state, guild_id, target_user_id).await
 }
 
 async fn fetch_member_response(
@@ -457,7 +684,7 @@ async fn fetch_member_response(
         r#"
         SELECT
             gm.user_id, gm.joined_at, gm.nick,
-            u.username, u.discriminator, u.global_name, u.avatar, u.banner, u.bot, u.public_flags
+            u.username, u.discriminator, u.global_name, u.avatar, u.bot, u.public_flags
         FROM guild_members gm
         INNER JOIN users u ON u.id = gm.user_id
         WHERE gm.guild_id = ? AND gm.user_id = ?
@@ -465,37 +692,45 @@ async fn fetch_member_response(
     )
     .bind(guild_id)
     .bind(user_id)
-    .fetch_one(&state.db)
-    .await?;
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| {
+        AppError::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownMember,
+            "Unknown member",
+        )
+    })?;
 
     let roles: Vec<String> = sqlx::query_scalar(
-        "SELECT role_id FROM guild_member_roles WHERE guild_id = ? AND user_id = ?",
+        "SELECT role_id FROM guild_member_roles WHERE guild_id = ? AND user_id = ? AND role_id != ?",
     )
     .bind(guild_id)
     .bind(user_id)
+    .bind(guild_id)
     .fetch_all(&state.db)
     .await?;
 
     Ok(GuildMemberResponse {
-        user: PublicUser {
+        user: PartialUser {
             id: row.user_id,
             username: row.username,
             discriminator: row.discriminator,
             global_name: row.global_name,
             avatar: row.avatar,
-            banner: row.banner,
+            avatar_color: None,
             bot: row.bot,
             flags: row.public_flags,
         },
-        roles,
         nick: row.nick,
         avatar: None,
-        premium_since: None,
+        banner: None,
+        accent_color: None,
+        roles,
         joined_at: row.joined_at,
-        deaf: false,
         mute: false,
-        flags: 0,
-        pending: false,
+        deaf: false,
+        communication_disabled_until: None,
     })
 }
 
@@ -508,13 +743,15 @@ pub async fn build_gateway_guild(
         .bind(guild_id)
         .fetch_optional(&state.db)
         .await?
-        .ok_or_else(|| AppError::NotFound("Guild not found".to_string()))?;
+        .ok_or_else(|| {
+            AppError::coded(StatusCode::NOT_FOUND, ApiErrorCode::UnknownGuild, "Unknown guild")
+        })?;
 
     let channels = fetch_guild_channels(state, guild_id).await?;
     let roles = fetch_guild_roles(state, guild_id).await?;
 
     let member = sqlx::query_as::<_, BaseGuildMember>(
-        "SELECT joined_at, guild_id, user_id, nick FROM guild_members WHERE guild_id = ? AND user_id = ?",
+        "SELECT joined_at, nick FROM guild_members WHERE guild_id = ? AND user_id = ?",
     )
     .bind(guild_id)
     .bind(user_id)
@@ -522,10 +759,11 @@ pub async fn build_gateway_guild(
     .await?;
 
     let member_roles: Vec<String> = sqlx::query_scalar(
-        "SELECT role_id FROM guild_member_roles WHERE guild_id = ? AND user_id = ?",
+        "SELECT role_id FROM guild_member_roles WHERE guild_id = ? AND user_id = ? AND role_id != ?",
     )
     .bind(guild_id)
     .bind(user_id)
+    .bind(guild_id)
     .fetch_all(&state.db)
     .await?;
 
@@ -535,16 +773,7 @@ pub async fn build_gateway_guild(
             .fetch_one(&state.db)
             .await?;
 
-    let online_count = {
-        let sessions = state.sessions.read().await;
-        sessions
-            .values()
-            .filter(|s| s.guilds.contains(guild_id))
-            .filter_map(|s| s.user_id.as_ref())
-            .collect::<std::collections::HashSet<_>>()
-            .len()
-            .max(1) as u64
-    };
+    let online_count = count_guild_online(state, guild_id).await.max(1);
 
     Ok(GatewayGuild {
         id: guild.id.clone(),
@@ -572,14 +801,107 @@ pub async fn build_gateway_guild(
         presences: vec![],
         voice_states: vec![],
         threads: vec![],
-        properties: GatewayGuildProperties::from(guild),
+        properties: Guild::from(guild),
+    })
+}
+
+pub async fn build_full_gateway_guild(
+    state: &AppState,
+    guild_id: &str,
+) -> Result<GatewayGuild<GuildMemberResponse>, AppError> {
+    let guild = sqlx::query_as::<_, BaseGuild>("SELECT * FROM guilds WHERE id = ?")
+        .bind(guild_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| {
+            AppError::coded(StatusCode::NOT_FOUND, ApiErrorCode::UnknownGuild, "Unknown guild")
+        })?;
+
+    let channels = fetch_guild_channels(state, guild_id).await?;
+    let roles = fetch_guild_roles(state, guild_id).await?;
+
+    let rows = sqlx::query_as::<_, MemberJoinRow>(
+        r#"
+        SELECT
+            gm.user_id, gm.joined_at, gm.nick,
+            u.username, u.discriminator, u.global_name, u.avatar, u.bot, u.public_flags
+        FROM guild_members gm
+        INNER JOIN users u ON u.id = gm.user_id
+        WHERE gm.guild_id = ?
+        ORDER BY gm.joined_at ASC
+        "#,
+    )
+    .bind(guild_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let role_rows = sqlx::query_as::<_, GuildMemberRole>(
+        "SELECT user_id, role_id FROM guild_member_roles WHERE guild_id = ? AND role_id != ?",
+    )
+    .bind(guild_id)
+    .bind(guild_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut roles_by_user: HashMap<String, Vec<String>> = HashMap::new();
+    for r in role_rows {
+        roles_by_user.entry(r.user_id).or_default().push(r.role_id);
+    }
+
+    let joined_at = rows.first().map(|r| r.joined_at).unwrap_or(guild.created_at);
+    let members: Vec<GuildMemberResponse> = rows
+        .into_iter()
+        .map(|m| {
+            let m_roles = roles_by_user.remove(&m.user_id).unwrap_or_default();
+            GuildMemberResponse {
+                user: PartialUser {
+                    id: m.user_id,
+                    username: m.username,
+                    discriminator: m.discriminator,
+                    global_name: m.global_name,
+                    avatar: m.avatar,
+                    avatar_color: None,
+                    bot: m.bot,
+                    flags: m.public_flags,
+                },
+                nick: m.nick,
+                avatar: None,
+                banner: None,
+                accent_color: None,
+                roles: m_roles,
+                joined_at: m.joined_at,
+                mute: false,
+                deaf: false,
+                communication_disabled_until: None,
+            }
+        })
+        .collect();
+
+    let member_count = members.len().max(1) as u64;
+    let online_count = count_guild_online(state, guild_id).await.max(1);
+
+    Ok(GatewayGuild {
+        id: guild.id.clone(),
+        joined_at,
+        member_count,
+        online_count,
+        channels,
+        roles,
+        members,
+        emojis: vec![],
+        stickers: vec![],
+        presences: vec![],
+        voice_states: vec![],
+        threads: vec![],
+        properties: Guild::from(guild),
     })
 }
 
 async fn fetch_discoverable_rows(
     state: &AppState,
+    search: Option<&str>,
 ) -> Result<(Vec<DiscoverableGuildRow>, HashMap<String, u64>), AppError> {
-    let rows = sqlx::query_as::<_, DiscoverableGuildRow>(
+    let mut qb = QueryBuilder::<MySql>::new(
         r#"
         SELECT
             g.id, g.name, g.icon, g.banner, g.description,
@@ -587,12 +909,24 @@ async fn fetch_discoverable_rows(
         FROM guilds g
         LEFT JOIN guild_members gm ON g.id = gm.guild_id
         WHERE g.discoverable = TRUE
-        GROUP BY g.id
-        ORDER BY g.name ASC
         "#,
-    )
-    .fetch_all(&state.db)
-    .await?;
+    );
+
+    if let Some(q) = search.map(str::trim).filter(|s| !s.is_empty()) {
+        let pattern = format!("%{}%", q.to_ascii_lowercase());
+        qb.push(" AND (LOWER(g.name) LIKE ");
+        qb.push_bind(pattern.clone());
+        qb.push(" OR LOWER(COALESCE(g.description, '')) LIKE ");
+        qb.push_bind(pattern);
+        qb.push(")");
+    }
+
+    qb.push(" GROUP BY g.id ORDER BY member_count DESC, g.name ASC");
+
+    let rows = qb
+        .build_query_as::<DiscoverableGuildRow>()
+        .fetch_all(&state.db)
+        .await?;
 
     let online_ids = state.online_user_ids().await;
     let mut online_counts = HashMap::new();
@@ -620,11 +954,30 @@ async fn fetch_discoverable_rows(
     Ok((rows, online_counts))
 }
 
-pub async fn get_discovery_guilds(state: &AppState) -> Result<GuildDiscoveryResponse, AppError> {
-    let (rows, online_counts) = fetch_discoverable_rows(state).await?;
+pub async fn get_discovery_guilds(
+    state: &AppState,
+    params: DiscoverySearchQuery,
+) -> Result<GuildDiscoveryResponse, AppError> {
+    if let Some(cat) = params.category {
+        if cat != DiscoveryCategory::Other as u8 {
+            return Ok(GuildDiscoveryResponse {
+                guilds: vec![],
+                total: 0,
+                category_counts: vec![],
+            });
+        }
+    }
+
+    let (rows, online_counts) = fetch_discoverable_rows(state, params.query.as_deref()).await?;
+
+    let total = rows.len() as u64;
+    let offset = params.offset.unwrap_or(0) as usize;
+    let limit = params.limit.unwrap_or(24).clamp(1, 48) as usize;
 
     let guilds: Vec<DiscoverableGuild> = rows
         .into_iter()
+        .skip(offset)
+        .take(limit)
         .map(|row| {
             let online_count = online_counts.get(&row.id).copied().unwrap_or(0);
             DiscoverableGuild {
@@ -638,25 +991,33 @@ pub async fn get_discovery_guilds(state: &AppState) -> Result<GuildDiscoveryResp
                 custom_tags: vec![],
                 member_count: row.member_count.max(0) as u64,
                 online_count,
-                features: vec![],
-                verification_level: VerificationLevel::None,
+                features: vec!["DISCOVERABLE".to_string()],
+                badge_ids: vec![],
+                verification_level: VerificationLevel::Low,
             }
         })
         .collect();
 
-    let total = guilds.len() as u64;
+    let category_counts = if total > 0 {
+        vec![CategoryCount {
+            category_type: DiscoveryCategory::Other,
+            count: total,
+        }]
+    } else {
+        vec![]
+    };
 
     Ok(GuildDiscoveryResponse {
         total,
         guilds,
-        category_counts: vec![],
+        category_counts,
     })
 }
 
 pub async fn get_discoverable_guilds(
     state: &AppState,
 ) -> Result<DiscoverableGuildsResponse, AppError> {
-    let (rows, online_counts) = fetch_discoverable_rows(state).await?;
+    let (rows, online_counts) = fetch_discoverable_rows(state, None).await?;
 
     let guilds: Vec<RestDiscoverableGuild> = rows
         .into_iter()
@@ -670,7 +1031,7 @@ pub async fn get_discoverable_guilds(
                 banner: row.banner,
                 splash: None,
                 discovery_splash: None,
-                features: vec![],
+                features: vec!["DISCOVERABLE".to_string()],
                 approximate_presence_count: presence_count,
                 approximate_member_count: row.member_count.max(0) as u64,
                 premium_subscription_count: 0,

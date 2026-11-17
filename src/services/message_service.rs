@@ -1,19 +1,75 @@
+use axum::http::StatusCode;
 use chrono::Utc;
 use serde_json::json;
+use sqlx::FromRow;
 
 use crate::AppState;
 use crate::constants::gateway::events;
-use crate::error::AppError;
-use crate::models::message::{Message, MessageDbRow, MessageType};
+use crate::error::{ApiErrorCode, AppError};
+use crate::models::message::{
+    GatewayMessageEvent, GetMessagesQuery, Message, MessageDbRow, MessageMember, MessageType,
+};
 use crate::services::guild_service;
 use crate::utils::snowflake::DISCORD_SNOWFLAKE;
 
-async fn get_channel_guild_id(state: &AppState, channel_id: &str) -> Result<String, AppError> {
-    sqlx::query_scalar::<_, String>("SELECT guild_id FROM channels WHERE id = ?")
+#[derive(FromRow)]
+struct ChannelMetaRow {
+    guild_id: String,
+    #[sqlx(rename = "type")]
+    channel_type: u32,
+}
+
+async fn get_channel_meta(state: &AppState, channel_id: &str) -> Result<ChannelMetaRow, AppError> {
+    sqlx::query_as::<_, ChannelMetaRow>("SELECT guild_id, type FROM channels WHERE id = ?")
         .bind(channel_id)
         .fetch_optional(&state.db)
         .await?
-        .ok_or_else(|| AppError::NotFound("Channel not found".to_string()))
+        .ok_or_else(|| {
+            AppError::coded(
+                StatusCode::NOT_FOUND,
+                ApiErrorCode::UnknownChannel,
+                "Unknown channel",
+            )
+        })
+}
+
+async fn fetch_message_member(
+    state: &AppState,
+    guild_id: &str,
+    user_id: &str,
+) -> Option<MessageMember> {
+    let row: Option<(Option<String>, u64)> = sqlx::query_as(
+        "SELECT nick, joined_at FROM guild_members WHERE guild_id = ? AND user_id = ?",
+    )
+    .bind(guild_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    let (nick, joined_at) = row?;
+    let roles: Vec<String> = sqlx::query_scalar(
+        "SELECT role_id FROM guild_member_roles WHERE guild_id = ? AND user_id = ? AND role_id != ?",
+    )
+    .bind(guild_id)
+    .bind(user_id)
+    .bind(guild_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    Some(MessageMember {
+        nick,
+        avatar: None,
+        banner: None,
+        accent_color: None,
+        roles,
+        joined_at,
+        mute: false,
+        deaf: false,
+        communication_disabled_until: None,
+    })
 }
 
 async fn fetch_message(state: &AppState, message_id: &str) -> Result<Message, AppError> {
@@ -32,36 +88,93 @@ async fn fetch_message(state: &AppState, message_id: &str) -> Result<Message, Ap
     .bind(message_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("Message not found".to_string()))?;
+    .ok_or_else(|| {
+        AppError::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownMessage,
+            "Unknown message",
+        )
+    })?;
 
     Ok(Message::from(row))
 }
+
+const SELECT_MSG_COLS: &str = r#"
+    SELECT
+        m.id, m.channel_id, m.content, m.timestamp, m.edited_timestamp,
+        m.type AS kind, m.flags,
+        u.id AS author_id, u.username, u.discriminator, u.global_name, u.avatar,
+        u.bot, u.public_flags
+    FROM messages m
+    INNER JOIN users u ON u.id = m.author_id
+"#;
 
 pub async fn get_messages(
     state: &AppState,
     channel_id: &str,
     user_id: &str,
+    query: GetMessagesQuery,
 ) -> Result<Vec<Message>, AppError> {
-    let guild_id = get_channel_guild_id(state, channel_id).await?;
-    guild_service::require_member(state, &guild_id, user_id).await?;
+    let meta = get_channel_meta(state, channel_id).await?;
+    guild_service::require_member(state, &meta.guild_id, user_id).await?;
 
-    let rows = sqlx::query_as::<_, MessageDbRow>(
-        r#"
-        SELECT
-            m.id, m.channel_id, m.content, m.timestamp, m.edited_timestamp,
-            m.type AS kind, m.flags,
-            u.id AS author_id, u.username, u.discriminator, u.global_name, u.avatar,
-            u.bot, u.public_flags
-        FROM messages m
-        INNER JOIN users u ON u.id = m.author_id
-        WHERE m.channel_id = ?
-        ORDER BY m.timestamp DESC, m.id DESC
-        LIMIT 50
-        "#,
-    )
-    .bind(channel_id)
-    .fetch_all(&state.db)
-    .await?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+
+    let rows = if let Some(around) = &query.around {
+        let half_older = (limit / 2).max(1);
+        let half_newer = limit.saturating_sub(half_older).max(1);
+
+        let mut newer = sqlx::query_as::<_, MessageDbRow>(&format!(
+            "{SELECT_MSG_COLS} WHERE m.channel_id = ? AND CAST(m.id AS UNSIGNED) > CAST(? AS UNSIGNED) ORDER BY CAST(m.id AS UNSIGNED) ASC LIMIT ?"
+        ))
+        .bind(channel_id)
+        .bind(around)
+        .bind(half_newer)
+        .fetch_all(&state.db)
+        .await?;
+        newer.reverse();
+
+        let older = sqlx::query_as::<_, MessageDbRow>(&format!(
+            "{SELECT_MSG_COLS} WHERE m.channel_id = ? AND CAST(m.id AS UNSIGNED) <= CAST(? AS UNSIGNED) ORDER BY CAST(m.id AS UNSIGNED) DESC LIMIT ?"
+        ))
+        .bind(channel_id)
+        .bind(around)
+        .bind(half_older)
+        .fetch_all(&state.db)
+        .await?;
+
+        newer.extend(older);
+        newer.truncate(limit as usize);
+        newer
+    } else if let Some(after) = &query.after {
+        let mut rows = sqlx::query_as::<_, MessageDbRow>(&format!(
+            "{SELECT_MSG_COLS} WHERE m.channel_id = ? AND CAST(m.id AS UNSIGNED) > CAST(? AS UNSIGNED) ORDER BY CAST(m.id AS UNSIGNED) ASC LIMIT ?"
+        ))
+        .bind(channel_id)
+        .bind(after)
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await?;
+        rows.reverse();
+        rows
+    } else if let Some(before) = &query.before {
+        sqlx::query_as::<_, MessageDbRow>(&format!(
+            "{SELECT_MSG_COLS} WHERE m.channel_id = ? AND CAST(m.id AS UNSIGNED) < CAST(? AS UNSIGNED) ORDER BY CAST(m.id AS UNSIGNED) DESC LIMIT ?"
+        ))
+        .bind(channel_id)
+        .bind(before)
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_as::<_, MessageDbRow>(&format!(
+            "{SELECT_MSG_COLS} WHERE m.channel_id = ? ORDER BY CAST(m.id AS UNSIGNED) DESC LIMIT ?"
+        ))
+        .bind(channel_id)
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await?
+    };
 
     Ok(rows.into_iter().map(Message::from).collect())
 }
@@ -74,11 +187,15 @@ pub async fn create_message(
     nonce: Option<String>,
 ) -> Result<Message, AppError> {
     if content.trim().is_empty() {
-        return Err(AppError::BadRequest("Message content cannot be empty".to_string()));
+        return Err(AppError::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::CannotSendEmptyMessage,
+            "You can't send an empty message.",
+        ));
     }
 
-    let guild_id = get_channel_guild_id(state, channel_id).await?;
-    guild_service::require_member(state, &guild_id, user_id).await?;
+    let meta = get_channel_meta(state, channel_id).await?;
+    guild_service::require_member(state, &meta.guild_id, user_id).await?;
 
     let message_id = DISCORD_SNOWFLAKE.generate(None).to_string();
     let timestamp = Utc::now().timestamp_millis() as u64;
@@ -98,8 +215,16 @@ pub async fn create_message(
     let mut msg = fetch_message(state, &message_id).await?;
     msg.nonce = nonce;
 
+    let member = fetch_message_member(state, &meta.guild_id, user_id).await;
+    let event = GatewayMessageEvent {
+        message: msg.clone(),
+        channel_type: meta.channel_type,
+        guild_id: Some(meta.guild_id.clone()),
+        member,
+    };
+
     state
-        .dispatch_guild(events::MESSAGE_CREATE, &msg, &guild_id)
+        .dispatch_guild(events::MESSAGE_CREATE, &event, &meta.guild_id)
         .await;
 
     Ok(msg)
@@ -113,11 +238,15 @@ pub async fn edit_message(
     content: String,
 ) -> Result<Message, AppError> {
     if content.trim().is_empty() {
-        return Err(AppError::BadRequest("Message content cannot be empty".to_string()));
+        return Err(AppError::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::CannotSendEmptyMessage,
+            "You can't send an empty message.",
+        ));
     }
 
-    let guild_id = get_channel_guild_id(state, channel_id).await?;
-    guild_service::require_member(state, &guild_id, user_id).await?;
+    let meta = get_channel_meta(state, channel_id).await?;
+    guild_service::require_member(state, &meta.guild_id, user_id).await?;
 
     let author_id = sqlx::query_scalar::<_, String>(
         "SELECT author_id FROM messages WHERE id = ? AND channel_id = ?",
@@ -126,11 +255,19 @@ pub async fn edit_message(
     .bind(channel_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("Message not found".to_string()))?;
+    .ok_or_else(|| {
+        AppError::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownMessage,
+            "Unknown message",
+        )
+    })?;
 
     if author_id != user_id {
-        return Err(AppError::Forbidden(
-            "Cannot edit a message authored by another user".to_string(),
+        return Err(AppError::coded(
+            StatusCode::FORBIDDEN,
+            ApiErrorCode::CannotEditOtherUserMessage,
+            "You can't edit another user's message.",
         ));
     }
 
@@ -144,8 +281,16 @@ pub async fn edit_message(
         .await?;
 
     let updated = fetch_message(state, message_id).await?;
+    let member = fetch_message_member(state, &meta.guild_id, user_id).await;
+    let event = GatewayMessageEvent {
+        message: updated.clone(),
+        channel_type: meta.channel_type,
+        guild_id: Some(meta.guild_id.clone()),
+        member,
+    };
+
     state
-        .dispatch_guild(events::MESSAGE_UPDATE, &updated, &guild_id)
+        .dispatch_guild(events::MESSAGE_UPDATE, &event, &meta.guild_id)
         .await;
 
     Ok(updated)
@@ -157,8 +302,8 @@ pub async fn delete_message(
     message_id: &str,
     user_id: &str,
 ) -> Result<(), AppError> {
-    let guild_id = get_channel_guild_id(state, channel_id).await?;
-    guild_service::require_member(state, &guild_id, user_id).await?;
+    let meta = get_channel_meta(state, channel_id).await?;
+    guild_service::require_member(state, &meta.guild_id, user_id).await?;
 
     let author_id = sqlx::query_scalar::<_, String>(
         "SELECT author_id FROM messages WHERE id = ? AND channel_id = ?",
@@ -167,10 +312,20 @@ pub async fn delete_message(
     .bind(channel_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("Message not found".to_string()))?;
+    .ok_or_else(|| {
+        AppError::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownMessage,
+            "Unknown message",
+        )
+    })?;
 
     if author_id != user_id {
-        return Err(AppError::Forbidden("Missing permissions".to_string()));
+        return Err(AppError::coded(
+            StatusCode::FORBIDDEN,
+            ApiErrorCode::MissingPermissions,
+            "You don't have the permissions required to perform this action.",
+        ));
     }
 
     sqlx::query("DELETE FROM messages WHERE id = ?")
@@ -184,9 +339,9 @@ pub async fn delete_message(
             &json!({
                 "id": message_id,
                 "channel_id": channel_id,
-                "guild_id": guild_id,
+                "guild_id": meta.guild_id,
             }),
-            &guild_id,
+            &meta.guild_id,
         )
         .await;
 

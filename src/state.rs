@@ -8,6 +8,7 @@ use serde::Serialize;
 use sqlx::mysql::MySqlPool;
 use tokio::sync::RwLock;
 
+use crate::constants::dialect::ClientDialect;
 use crate::gateway::session::GatewaySession;
 
 #[derive(Clone, Debug)]
@@ -109,6 +110,20 @@ impl AppState {
         for session in sessions.values() {
             if session.user_id.as_deref() == Some(user_id) {
                 session.dispatch(event_name, value.clone()).await;
+            }
+        }
+    }
+
+    pub async fn dispatch_user_dialect<F, T>(&self, event_name: &str, user_id: &str, mut build: F)
+    where
+        F: FnMut(ClientDialect) -> T,
+        T: Serialize,
+    {
+        let sessions = self.sessions.read().await;
+        for session in sessions.values() {
+            if session.user_id.as_deref() == Some(user_id) {
+                let payload = build(session.dialect);
+                session.dispatch(event_name, payload).await;
             }
         }
     }

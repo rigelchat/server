@@ -8,7 +8,7 @@ bitflags! {
     #[serde(transparent)]
     pub struct UserFlags: u32 {
         const STAFF = 1 << 0;
-        const PARTNERED = 1 << 1;
+        const PARTNER = 1 << 2;
         const BUG_HUNTER = 1 << 3;
         const FRIENDLY_BOT = 1 << 4;
         const FRIENDLY_BOT_MANUAL_APPROVAL = 1 << 5;

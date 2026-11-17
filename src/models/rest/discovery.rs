@@ -1,12 +1,20 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::constants::guild::{DiscoveryCategory, VerificationLevel};
+
+#[derive(Debug, Deserialize)]
+pub struct DiscoverySearchQuery {
+    pub query: Option<String>,
+    pub category: Option<u8>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
 
 #[derive(Serialize)]
 pub struct GuildDiscoveryResponse {
     pub guilds: Vec<DiscoverableGuild>,
     pub total: u64,
-    pub category_counts: Vec<CategoryCount>
+    pub category_counts: Vec<CategoryCount>,
 }
 
 #[derive(Serialize)]
@@ -22,17 +30,18 @@ pub struct DiscoverableGuild {
     pub member_count: u64,
     pub online_count: u64,
     pub features: Vec<String>,
-    pub verification_level: VerificationLevel
+    pub badge_ids: Vec<String>,
+    pub verification_level: VerificationLevel,
 }
 
 #[derive(Serialize)]
 pub struct CategoryCount {
     pub category_type: DiscoveryCategory,
-    pub count: u64
+    pub count: u64,
 }
 
 #[derive(Serialize)]
 pub struct DiscoveryCategoryResponse {
     pub id: u8,
-    pub name: String
+    pub name: String,
 }

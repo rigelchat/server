@@ -1,16 +1,18 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{delete, get, patch, post},
 };
 
 use crate::AppState;
+use crate::constants::dialect::ClientDialect;
 use crate::error::AppError;
 use crate::extractors::AuthUser;
 use crate::models::rest::users::{
     UpdateProfileRequest, UpdateSettingsRequest, UpdateUserRequest, UserProfileResponse,
 };
+use crate::models::guild::{Guild, ListGuildsQuery};
 use crate::models::user::{CurrentUser, UserSettings};
 use crate::services::{guild_service, user_service};
 
@@ -19,6 +21,7 @@ pub fn router() -> Router<AppState> {
         .route("/", get(get_current_user).patch(update_user))
         .route("/profile", patch(update_profile))
         .route("/settings", get(get_settings).patch(update_settings))
+        .route("/guilds", get(get_guilds))
         .route("/guilds/{guild_id}", delete(leave_guild))
         .route("/mobile-devices", post(no_content))
         .route("/mobile-devices/unregister", post(no_content))
@@ -27,18 +30,20 @@ pub fn router() -> Router<AppState> {
 async fn get_current_user(
     State(state): State<AppState>,
     auth: AuthUser,
+    dialect: ClientDialect,
 ) -> Result<Json<CurrentUser>, AppError> {
     let user = user_service::get_current_user(&state, &auth.user_id).await?;
-    Ok(Json(user))
+    Ok(Json(user.with_dialect(dialect)))
 }
 
 async fn update_user(
     State(state): State<AppState>,
     auth: AuthUser,
+    dialect: ClientDialect,
     Json(payload): Json<UpdateUserRequest>,
 ) -> Result<Json<CurrentUser>, AppError> {
     let updated = user_service::update_user(&state, &auth.user_id, payload).await?;
-    Ok(Json(updated))
+    Ok(Json(updated.with_dialect(dialect)))
 }
 
 async fn update_profile(
@@ -78,4 +83,12 @@ async fn leave_guild(
 
 async fn no_content() -> StatusCode {
     StatusCode::NO_CONTENT
+}
+async fn get_guilds(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<ListGuildsQuery>,
+) -> Result<Json<Vec<Guild>>, AppError> {
+    let guilds = guild_service::get_user_guilds(&state, &auth.user_id, query).await?;
+    Ok(Json(guilds))
 }

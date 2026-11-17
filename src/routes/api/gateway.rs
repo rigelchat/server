@@ -1,7 +1,7 @@
-use axum::{Router, Json, extract::State, routing::get};
+use axum::{Json, Router, extract::State, routing::get};
 
 use crate::AppState;
-use crate::models::rest::gateway::{GatewayResponse, GatewayBotResponse, SessionStartLimit};
+use crate::models::rest::gateway::{GatewayBotResponse, GatewayResponse, SessionStartLimit};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -9,25 +9,21 @@ pub fn router() -> Router<AppState> {
         .route("/bot", get(bot_gateway))
 }
 
-async fn gateway(
-    State(state): State<AppState>
-) -> Json<GatewayResponse> {
+async fn gateway(State(state): State<AppState>) -> Json<GatewayResponse> {
     Json(GatewayResponse {
-        url: format!("{}/gateway", state.config.public_ws_url)
+        url: format!("{}/gateway", state.config.public_ws_url),
     })
 }
 
-async fn bot_gateway(
-    State(state): State<AppState>
-) -> Json<GatewayBotResponse> {
+async fn bot_gateway(State(state): State<AppState>) -> Json<GatewayBotResponse> {
     Json(GatewayBotResponse {
         url: format!("{}/gateway", state.config.public_ws_url),
         shards: 1,
         session_start_limit: SessionStartLimit {
-            remaining: 0,
-            total: 1,
+            total: 1000,
+            remaining: 999,
             max_concurrency: 1,
-            reset_after: 14400000
-        }
+            reset_after: 14400000,
+        },
     })
 }

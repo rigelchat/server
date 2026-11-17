@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::guild_member::GuildMemberUserRef;
 use crate::models::serde_helpers::serialize_millis_iso;
+use crate::models::user::{CustomStatus, PartialUser};
 
 #[derive(Debug, Deserialize)]
 pub struct LazyRequestPayload {
@@ -64,36 +65,40 @@ pub struct MemberListGroup {
 
 #[derive(Clone, Serialize)]
 pub struct MemberListClientStatus {
-    pub desktop: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
-pub struct MemberListPresence {
-    pub user: GuildMemberUserRef,
-    pub status: String,
-    pub client_status: MemberListClientStatus,
-    pub activities: Vec<serde_json::Value>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct MemberListUser {
-    pub id: String,
-    pub username: String,
-    pub discriminator: String,
-    pub global_name: Option<String>,
-    pub avatar: Option<String>,
-    pub bot: bool,
+#[serde(untagged)]
+pub enum MemberListPresence {
+    Fluxer {
+        status: String,
+        mobile: bool,
+        afk: bool,
+        custom_status: Option<CustomStatus>,
+    },
+    Discord {
+        user: GuildMemberUserRef,
+        status: String,
+        client_status: MemberListClientStatus,
+        activities: Vec<serde_json::Value>,
+    },
 }
 
 #[derive(Clone, Serialize)]
 pub struct MemberListMember {
-    pub user: MemberListUser,
+    pub user: PartialUser,
     pub nick: Option<String>,
+    pub avatar: Option<String>,
+    pub banner: Option<String>,
+    pub accent_color: Option<u32>,
     pub roles: Vec<String>,
-    pub mute: bool,
-    pub deaf: bool,
     #[serde(serialize_with = "serialize_millis_iso")]
     pub joined_at: u64,
+    pub mute: bool,
+    pub deaf: bool,
+    pub communication_disabled_until: Option<String>,
     pub presence: MemberListPresence,
 }
 

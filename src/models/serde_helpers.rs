@@ -31,3 +31,22 @@ where
 {
     Option::<T>::deserialize(deserializer).map(Some)
 }
+pub fn deserialize_opt_string_or_int<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrInt {
+        Str(String),
+        Int(i64),
+        Uint(u64),
+    }
+
+    match Option::<StringOrInt>::deserialize(deserializer)? {
+        Some(StringOrInt::Str(s)) => Ok(Some(s)),
+        Some(StringOrInt::Int(i)) => Ok(Some(i.to_string())),
+        Some(StringOrInt::Uint(u)) => Ok(Some(u.to_string())),
+        None => Ok(None),
+    }
+}

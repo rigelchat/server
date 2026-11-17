@@ -3,12 +3,13 @@ pub mod session;
 
 use axum::{
     extract::{
-        State,
+        Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
@@ -16,17 +17,30 @@ use uuid::Uuid;
 use zstd::stream::raw::{Decoder as RawZstdDecoder, Operation};
 
 use crate::AppState;
-use crate::constants::gateway::{HEARTBEAT_INTERVAL, Opcode};
+use crate::constants::dialect::ClientDialect;
+use crate::constants::gateway::{HEARTBEAT_INTERVAL, Opcode, close_codes};
+use crate::gateway::handlers::presence::PresenceUpdatePayload;
 use crate::gateway::session::GatewaySession;
 use crate::models::gateway::{
     GatewayPayload, HelloPayload, IdentifyPayload, lazy_request::LazyRequestPayload,
 };
 
-pub async fn handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+#[derive(Debug, Deserialize)]
+pub struct GatewayQuery {
+    pub v: Option<String>,
 }
 
-async fn handle_socket(ws: WebSocket, state: AppState) {
+pub async fn handler(
+    ws: WebSocketUpgrade,
+    Query(query): Query<GatewayQuery>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let version = query.v.as_deref().and_then(|v| v.parse::<u8>().ok());
+    let dialect = ClientDialect::from_gateway_version(version);
+    ws.on_upgrade(move |socket| handle_socket(socket, state, dialect))
+}
+
+async fn handle_socket(ws: WebSocket, state: AppState, dialect: ClientDialect) {
     debug!("New WebSocket connection established");
 
     let (mut socket_sender, mut socket_receiver) = ws.split();
@@ -35,7 +49,10 @@ async fn handle_socket(ws: WebSocket, state: AppState) {
 
     {
         let mut sessions = state.sessions.write().await;
-        sessions.insert(session_id.clone(), GatewaySession::new(session_id.clone(), tx));
+        sessions.insert(
+            session_id.clone(),
+            GatewaySession::new(session_id.clone(), dialect, tx),
+        );
     }
 
     let hello = GatewayPayload::new(
@@ -98,11 +115,30 @@ async fn handle_socket(ws: WebSocket, state: AppState) {
         _ = (&mut recv_task) => send_task.abort(),
     }
 
-    let remaining = {
+    let (removed, has_other_session, remaining) = {
         let mut sessions = state.sessions.write().await;
-        sessions.remove(&session_id);
-        sessions.len()
+        let removed = sessions.remove(&session_id);
+        let has_other = removed
+            .as_ref()
+            .and_then(|r| r.user_id.as_ref())
+            .is_some_and(|uid| sessions.values().any(|s| s.user_id.as_deref() == Some(uid)));
+        (removed, has_other, sessions.len())
     };
+
+    if let Some(session) = removed {
+        if let Some(uid) = session.user_id {
+            if !has_other_session {
+                handlers::presence::broadcast_presence(
+                    &state,
+                    &uid,
+                    &session.guilds,
+                    "offline",
+                    None,
+                )
+                .await;
+            }
+        }
+    }
 
     debug!(session_id = %session_id, active_sessions = remaining, "WebSocket session destroyed");
 }
@@ -137,6 +173,13 @@ fn decode_binary_frame(bin: &[u8], decoder: Option<&mut RawZstdDecoder>) -> Opti
     std::str::from_utf8(bin).ok().map(str::to_string)
 }
 
+async fn close_with(session_id: &str, state: &AppState, code: (u16, &'static str)) {
+    let sessions = state.sessions.read().await;
+    if let Some(session) = sessions.get(session_id) {
+        session.close(code).await;
+    }
+}
+
 async fn process_gateway_message(text: &str, session_id: &str, state: &AppState) {
     debug!(payload = %text, "Received gateway message");
 
@@ -144,32 +187,63 @@ async fn process_gateway_message(text: &str, session_id: &str, state: &AppState)
         Ok(p) => p,
         Err(err) => {
             error!(error = %err, raw = %text, "Failed to parse GatewayPayload");
+            close_with(session_id, state, close_codes::DECODE_ERROR).await;
             return;
         }
     };
 
+    if !matches!(payload.op, Opcode::Identify | Opcode::Heartbeat) {
+        let authenticated = {
+            let sessions = state.sessions.read().await;
+            sessions
+                .get(session_id)
+                .is_some_and(|s| s.user_id.is_some())
+        };
+        if !authenticated {
+            close_with(session_id, state, close_codes::NOT_AUTHENTICATED).await;
+            return;
+        }
+    }
+
     match payload.op {
         Opcode::Identify => {
             let Some(d) = payload.d else {
-                error!("IDENTIFY received without 'd' payload");
+                close_with(session_id, state, close_codes::DECODE_ERROR).await;
                 return;
             };
-            match serde_json::from_value::<IdentifyPayload>(d.clone()) {
+            match serde_json::from_value::<IdentifyPayload>(d) {
                 Ok(identify) => handlers::identify::handle(session_id, state, identify).await,
-                Err(err) => error!(error = %err, raw = ?d, "Failed to parse IDENTIFY payload"),
+                Err(err) => {
+                    error!(error = %err, "Failed to parse IDENTIFY payload");
+                    close_with(session_id, state, close_codes::DECODE_ERROR).await;
+                }
             }
         }
         Opcode::Heartbeat => handlers::heartbeat::handle(session_id, state).await,
-        Opcode::LazyRequest => {
+        Opcode::PresenceUpdate => {
             let Some(d) = payload.d else {
-                error!("LAZY_REQUEST received without 'd' payload");
+                close_with(session_id, state, close_codes::DECODE_ERROR).await;
                 return;
             };
-            match serde_json::from_value::<LazyRequestPayload>(d.clone()) {
-                Ok(lazy_req) => handlers::lazy_request::handle(session_id, state, lazy_req).await,
-                Err(err) => error!(error = %err, raw = ?d, "Failed to parse LAZY_REQUEST payload"),
+            match serde_json::from_value::<PresenceUpdatePayload>(d) {
+                Ok(presence_req) => handlers::presence::handle(session_id, state, presence_req).await,
+                Err(err) => {
+                    error!(error = %err, "Failed to parse PRESENCE_UPDATE payload");
+                    close_with(session_id, state, close_codes::DECODE_ERROR).await;
+                }
             }
         }
-        other => warn!(opcode = ?other, "Unhandled gateway opcode"),
+        Opcode::LazyRequest => {
+            let Some(d) = payload.d else {
+                return;
+            };
+            match serde_json::from_value::<LazyRequestPayload>(d) {
+                Ok(lazy_req) => handlers::lazy_request::handle(session_id, state, lazy_req).await,
+                Err(err) => error!(error = %err, "Failed to parse LAZY_REQUEST payload"),
+            }
+        }
+        other => {
+            warn!(opcode = ?other, "Unhandled gateway opcode");
+        }
     }
 }

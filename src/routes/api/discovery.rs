@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -8,7 +8,9 @@ use axum::{
 use crate::AppState;
 use crate::error::AppError;
 use crate::extractors::AuthUser;
-use crate::models::rest::discovery::{DiscoveryCategoryResponse, GuildDiscoveryResponse};
+use crate::models::rest::discovery::{
+    DiscoveryCategoryResponse, DiscoverySearchQuery, GuildDiscoveryResponse,
+};
 use crate::services::guild_service;
 
 pub fn router() -> Router<AppState> {
@@ -20,8 +22,9 @@ pub fn router() -> Router<AppState> {
 
 async fn get_discovery_guilds(
     State(state): State<AppState>,
+    Query(params): Query<DiscoverySearchQuery>,
 ) -> Result<Json<GuildDiscoveryResponse>, AppError> {
-    let res = guild_service::get_discovery_guilds(&state).await?;
+    let res = guild_service::get_discovery_guilds(&state, params).await?;
     Ok(Json(res))
 }
 
@@ -35,5 +38,23 @@ async fn join_discovery_guild(
 }
 
 async fn get_discovery_categories() -> Json<Vec<DiscoveryCategoryResponse>> {
-    Json(vec![])
+    let categories = [
+        (0, "Gaming"),
+        (1, "Music"),
+        (2, "Entertainment"),
+        (3, "Education"),
+        (4, "Science & Technology"),
+        (5, "Content Creator"),
+        (6, "Anime & Manga"),
+        (7, "Movies & TV"),
+        (8, "Other"),
+    ]
+    .into_iter()
+    .map(|(id, name)| DiscoveryCategoryResponse {
+        id,
+        name: name.to_string(),
+    })
+    .collect();
+
+    Json(categories)
 }
