@@ -1,11 +1,11 @@
-use axum::http::StatusCode;
 use chrono::Utc;
 use serde_json::json;
 use sqlx::FromRow;
 
 use crate::AppState;
 use crate::constants::gateway::events;
-use crate::error::{ApiErrorCode, AppError};
+use crate::constants::limits::{DEFAULT_MESSAGES_PAGE_LIMIT, MAX_MESSAGES_PAGE_LIMIT, MAX_MESSAGE_LENGTH};
+use crate::error::{AppError, ValidationCode};
 use crate::models::message::{
     GatewayMessageEvent, GetMessagesQuery, Message, MessageDbRow, MessageMember, MessageType,
 };
@@ -25,11 +25,7 @@ async fn get_channel_meta(state: &AppState, channel_id: &str) -> Result<ChannelM
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| {
-            AppError::coded(
-                StatusCode::NOT_FOUND,
-                ApiErrorCode::UnknownChannel,
-                "Unknown channel",
-            )
+            AppError::unknown_channel()
         })
 }
 
@@ -89,11 +85,7 @@ async fn fetch_message(state: &AppState, message_id: &str) -> Result<Message, Ap
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| {
-        AppError::coded(
-            StatusCode::NOT_FOUND,
-            ApiErrorCode::UnknownMessage,
-            "Unknown message",
-        )
+        AppError::unknown_message()
     })?;
 
     Ok(Message::from(row))
@@ -118,7 +110,7 @@ pub async fn get_messages(
     let meta = get_channel_meta(state, channel_id).await?;
     guild_service::require_member(state, &meta.guild_id, user_id).await?;
 
-    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    let limit = query.limit.unwrap_or(DEFAULT_MESSAGES_PAGE_LIMIT).clamp(1, MAX_MESSAGES_PAGE_LIMIT);
 
     let rows = if let Some(around) = &query.around {
         let half_older = (limit / 2).max(1);
@@ -187,10 +179,14 @@ pub async fn create_message(
     nonce: Option<String>,
 ) -> Result<Message, AppError> {
     if content.trim().is_empty() {
-        return Err(AppError::coded(
-            StatusCode::BAD_REQUEST,
-            ApiErrorCode::CannotSendEmptyMessage,
-            "You can't send an empty message.",
+        return Err(AppError::empty_message());
+    }
+    let max_len = MAX_MESSAGE_LENGTH;
+    if content.chars().count() > max_len {
+        return Err(AppError::validation(
+            "content",
+            ValidationCode::ContentExceedsMaxLength,
+            format!("Text must not exceed {max_len} characters."),
         ));
     }
 
@@ -238,10 +234,14 @@ pub async fn edit_message(
     content: String,
 ) -> Result<Message, AppError> {
     if content.trim().is_empty() {
-        return Err(AppError::coded(
-            StatusCode::BAD_REQUEST,
-            ApiErrorCode::CannotSendEmptyMessage,
-            "You can't send an empty message.",
+        return Err(AppError::empty_message());
+    }
+    let max_len = MAX_MESSAGE_LENGTH;
+    if content.chars().count() > max_len {
+        return Err(AppError::validation(
+            "content",
+            ValidationCode::ContentExceedsMaxLength,
+            format!("Text must not exceed {max_len} characters."),
         ));
     }
 
@@ -256,19 +256,11 @@ pub async fn edit_message(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| {
-        AppError::coded(
-            StatusCode::NOT_FOUND,
-            ApiErrorCode::UnknownMessage,
-            "Unknown message",
-        )
+        AppError::unknown_message()
     })?;
 
     if author_id != user_id {
-        return Err(AppError::coded(
-            StatusCode::FORBIDDEN,
-            ApiErrorCode::CannotEditOtherUserMessage,
-            "You can't edit another user's message.",
-        ));
+        return Err(AppError::cannot_edit_other_message());
     }
 
     let edited_timestamp = Utc::now().timestamp_millis() as u64;
@@ -313,19 +305,11 @@ pub async fn delete_message(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| {
-        AppError::coded(
-            StatusCode::NOT_FOUND,
-            ApiErrorCode::UnknownMessage,
-            "Unknown message",
-        )
+        AppError::unknown_message()
     })?;
 
     if author_id != user_id {
-        return Err(AppError::coded(
-            StatusCode::FORBIDDEN,
-            ApiErrorCode::MissingPermissions,
-            "You don't have the permissions required to perform this action.",
-        ));
+        return Err(AppError::missing_permissions());
     }
 
     sqlx::query("DELETE FROM messages WHERE id = ?")

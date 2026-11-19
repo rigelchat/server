@@ -10,8 +10,7 @@ use crate::constants::API_VERSION;
 use crate::constants::dialect::ClientDialect;
 use crate::constants::gateway::{close_codes, events};
 use crate::models::gateway::IdentifyPayload;
-use crate::models::gateway::ready::{
-    ClientSessionInfo, DiscordReadyData, DiscordReadyGuild, PartialApplication, ReadyData,
+use crate::models::gateway::ready::{ DiscordReadyData, DiscordReadyGuild, PartialApplication, ReadyData,
     RtcRegion, UnavailableGuild,
 };
 use crate::models::guild::{DiscordGuildCreate, GatewayGuild};
@@ -19,7 +18,7 @@ use crate::models::user::{CurrentUser, GuildFolder, PartialUser, UserProfileRow,
 use crate::services::{auth_service, guild_service, user_service};
 use crate::utils::token::{TokenClaims, verify};
 
-use super::presence;
+use super::{lazy_request, presence};
 
 fn hash_session_id(id: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(id.as_bytes()))
@@ -60,7 +59,7 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
     let TokenClaims {
         user_id,
         session_id: auth_session_id,
-    } = match verify(raw_token, &state.config.auth_secret) {
+    } = match verify(raw_token, &state.config.auth.secret) {
         Ok(claims) => claims,
         Err(err) => {
             error!(error = %err, "Identify token validation failed");
@@ -155,6 +154,13 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         .await
         .unwrap_or_default();
 
+    {
+        let mut sessions = state.sessions.write().await;
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.status = user_settings.status.clone();
+        }
+    }
+
     user_settings.guild_folders = vec![GuildFolder {
         id: -1,
         name: None,
@@ -164,7 +170,6 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         guild_ids: guild_ids.clone(),
     }];
 
-    let stored_status = user_settings.status.clone();
     let custom_status = user_settings.custom_status.clone();
     let is_bot = user_row.bot;
     let user_summary = PartialUser::from(&user_row);
@@ -185,13 +190,13 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
             let ready = ReadyData {
                 auth_session_id_hash: hash_session_id(&auth_session_id),
                 session_id: session_id.to_string(),
-                country_code: "FR".to_string(),
+                country_code: state.config.instance.country_code.clone(),
                 version: 1,
                 guilds,
                 private_channels: vec![],
                 pinned_dms: vec![],
                 relationships: vec![],
-                presences: vec![],
+                presences: presence::build_ready_presences(state, &user_id, &guild_ids).await,
                 read_states: vec![],
                 notes: HashMap::new(),
                 favorite_memes: vec![],
@@ -202,12 +207,7 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
                     name: "Automatic".to_string(),
                     emoji: "🌐".to_string(),
                 }],
-                sessions: vec![ClientSessionInfo {
-                    session_id: "all".to_string(),
-                    status: stored_status.clone(),
-                    afk: false,
-                    mobile: false,
-                }],
+                sessions: presence::build_user_sessions(state, &user_id).await,
                 user: current_user,
                 user_settings,
                 users: vec![user_summary],
@@ -270,18 +270,18 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         }
     }
 
-    let public_status = if stored_status == "invisible" {
-        "offline"
-    } else {
-        stored_status.as_str()
-    };
+    let pub_status = presence::user_public_status(state, &user_id).await;
     let my_guilds: HashSet<String> = guild_ids.into_iter().collect();
+    presence::dispatch_sessions_replace(state, &user_id).await;
     presence::broadcast_presence(
         state,
         &user_id,
         &my_guilds,
-        public_status,
+        pub_status,
         custom_status.as_ref(),
     )
     .await;
+    for gid in &my_guilds {
+        lazy_request::refresh_guild_member_lists(state, gid).await;
+    }
 }

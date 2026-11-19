@@ -63,3 +63,6 @@ impl From<DiscoveryCategory> for u8 {
         category as u8
     }
 }
+
+pub const DEFAULT_VOICE_BITRATE: u32 = 64_000;
+pub const DEFAULT_VOICE_CONNECTION_LIMIT: u32 = 5;

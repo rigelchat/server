@@ -1,9 +1,10 @@
-use axum::http::StatusCode;
 use sqlx::{FromRow, MySql, QueryBuilder};
 
 use crate::AppState;
 use crate::constants::gateway::events;
-use crate::error::{ApiErrorCode, AppError};
+use crate::constants::limits::{MAX_BIO_LENGTH, MAX_GLOBAL_NAME_LENGTH, MAX_PRONOUNS_LENGTH};
+use crate::constants::user::{DEFAULT_AFK_TIMEOUT, VALID_STATUSES, VALID_THEMES};
+use crate::error::{AppError, ValidationCode};
 use crate::models::rest::users::{
     GetProfileQuery, MutualGuild, UpdateProfileRequest, UpdateSettingsRequest, UpdateUserRequest,
     UserProfileResponse,
@@ -26,7 +27,7 @@ pub async fn get_current_user(state: &AppState, user_id: &str) -> Result<Current
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| {
-            AppError::coded(StatusCode::NOT_FOUND, ApiErrorCode::UnknownUser, "Unknown user")
+            AppError::unknown_user()
         })?;
 
     let profile = sqlx::query_as::<_, UserProfileRow>(
@@ -45,7 +46,7 @@ pub async fn get_partial_user(state: &AppState, user_id: &str) -> Result<Partial
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| {
-            AppError::coded(StatusCode::NOT_FOUND, ApiErrorCode::UnknownUser, "Unknown user")
+            AppError::unknown_user()
         })?;
 
     Ok(PartialUser::from(&user))
@@ -76,7 +77,7 @@ pub async fn update_user(
             if own.is_none() {
                 return Err(AppError::validation(
                     "username",
-                    "USERNAME_ALREADY_TAKEN",
+                    ValidationCode::UsernameAlreadyTaken,
                     "This username is already taken.",
                 ));
             }
@@ -92,10 +93,10 @@ pub async fn update_user(
             let trimmed = name.trim();
             if trimmed.is_empty() {
                 user_sep.push_bind_unseparated(Option::<String>::None);
-            } else if trimmed.len() > 32 {
+            } else if trimmed.len() > MAX_GLOBAL_NAME_LENGTH {
                 return Err(AppError::validation(
                     "global_name",
-                    "GLOBAL_NAME_LENGTH_INVALID",
+                    ValidationCode::GlobalNameLengthInvalid,
                     "Global name must be between 1 and 32 characters.",
                 ));
             } else {
@@ -132,10 +133,10 @@ pub async fn update_user(
     if let Some(bio) = &payload.bio {
         let value = bio.as_deref().map(str::trim).filter(|s| !s.is_empty());
         if let Some(text) = value {
-            if text.len() > 320 {
+            if text.len() > MAX_BIO_LENGTH {
                 return Err(AppError::validation(
                     "bio",
-                    "CONTENT_EXCEEDS_MAX_LENGTH",
+                    ValidationCode::ContentExceedsMaxLength,
                     "Text must not exceed 320 characters.",
                 ));
             }
@@ -148,10 +149,10 @@ pub async fn update_user(
     if let Some(pronouns) = &payload.pronouns {
         let value = pronouns.as_deref().map(str::trim).filter(|s| !s.is_empty());
         if let Some(text) = value {
-            if text.len() > 40 {
+            if text.len() > MAX_PRONOUNS_LENGTH {
                 return Err(AppError::validation(
                     "pronouns",
-                    "CONTENT_EXCEEDS_MAX_LENGTH",
+                    ValidationCode::ContentExceedsMaxLength,
                     "Text must not exceed 40 characters.",
                 ));
             }
@@ -166,7 +167,7 @@ pub async fn update_user(
             if color > 0x00FF_FFFF {
                 return Err(AppError::validation(
                     "accent_color",
-                    "COLOR_VALUE_TOO_HIGH",
+                    ValidationCode::ColorValueTooHigh,
                     "Color value must not exceed 0xffffff.",
                 ));
             }
@@ -192,6 +193,18 @@ pub async fn update_user(
     let updated = get_current_user(state, user_id).await?;
     if has_user_updates || has_profile_updates {
         state.dispatch_user(events::USER_UPDATE, &updated, user_id).await;
+        if has_user_updates {
+            let guild_ids: Vec<String> =
+                sqlx::query_scalar("SELECT guild_id FROM guild_members WHERE user_id = ?")
+                    .bind(user_id)
+                    .fetch_all(&state.db)
+                    .await
+                    .unwrap_or_default();
+            for gid in guild_ids {
+                crate::gateway::handlers::lazy_request::refresh_guild_member_lists(state, &gid)
+                    .await;
+            }
+        }
     }
 
     Ok(updated)
@@ -277,10 +290,10 @@ pub async fn update_profile(
     if let Some(bio) = &payload.bio {
         let value = bio.as_deref().map(str::trim).filter(|s| !s.is_empty());
         if let Some(text) = value {
-            if text.len() > 320 {
+            if text.len() > MAX_BIO_LENGTH {
                 return Err(AppError::validation(
                     "bio",
-                    "CONTENT_EXCEEDS_MAX_LENGTH",
+                    ValidationCode::ContentExceedsMaxLength,
                     "Text must not exceed 320 characters.",
                 ));
             }
@@ -293,10 +306,10 @@ pub async fn update_profile(
     if let Some(pronouns) = &payload.pronouns {
         let value = pronouns.as_deref().map(str::trim).filter(|s| !s.is_empty());
         if let Some(text) = value {
-            if text.len() > 40 {
+            if text.len() > MAX_PRONOUNS_LENGTH {
                 return Err(AppError::validation(
                     "pronouns",
-                    "CONTENT_EXCEEDS_MAX_LENGTH",
+                    ValidationCode::ContentExceedsMaxLength,
                     "Text must not exceed 40 characters.",
                 ));
             }
@@ -399,10 +412,10 @@ pub async fn update_settings(
     let mut locale_changed = false;
 
     if let Some(status) = &payload.status {
-        if !matches!(status.as_str(), "online" | "idle" | "dnd" | "invisible") {
+        if !VALID_STATUSES.contains(&status.as_str()) {
             return Err(AppError::validation(
                 "status",
-                "INVALID_FORMAT",
+                ValidationCode::InvalidFormat,
                 "Invalid status value.",
             ));
         }
@@ -414,7 +427,7 @@ pub async fn update_settings(
 
     if let Some(afk_timeout) = payload.afk_timeout {
         separated.push("afk_timeout = ");
-        separated.push_bind_unseparated(afk_timeout.clamp(60, 600));
+        separated.push_bind_unseparated(afk_timeout.clamp(60, DEFAULT_AFK_TIMEOUT));
         has_col_updates = true;
     }
 
@@ -426,6 +439,13 @@ pub async fn update_settings(
     }
 
     if let Some(theme) = &payload.theme {
+        if !VALID_THEMES.contains(&theme.as_str()) {
+            return Err(AppError::validation(
+                "theme",
+                ValidationCode::InvalidFormat,
+                "Invalid theme value.",
+            ));
+        }
         separated.push("theme = ");
         separated.push_bind_unseparated(theme);
         has_col_updates = true;
@@ -459,6 +479,7 @@ pub async fn update_settings(
         };
     }
 
+    let custom_status_changed = payload.custom_status.is_some();
     if let Some(cs) = payload.custom_status {
         extras.custom_status = cs.map(CustomStatus::from);
         has_extra_updates = true;
@@ -539,7 +560,17 @@ pub async fn update_settings(
         }
     }
 
-    if status_changed {
+    if let Some(new_status) = &payload.status {
+        let mut sessions = state.sessions.write().await;
+        for session in sessions.values_mut() {
+            if session.user_id.as_deref() == Some(user_id) {
+                session.status = new_status.clone();
+            }
+        }
+    }
+
+    if status_changed || custom_status_changed {
+        crate::gateway::handlers::presence::dispatch_sessions_replace(state, user_id).await;
         broadcast_presence_from_settings(state, user_id, &settings).await;
     }
 
@@ -560,11 +591,7 @@ async fn broadcast_presence_from_settings(
             .into_iter()
             .collect();
 
-    let public_status = if settings.status == "invisible" {
-        "offline"
-    } else {
-        settings.status.as_str()
-    };
+    let public_status = crate::gateway::handlers::presence::user_public_status(state, user_id).await;
 
     crate::gateway::handlers::presence::broadcast_presence(
         state,
@@ -574,4 +601,8 @@ async fn broadcast_presence_from_settings(
         settings.custom_status.as_ref(),
     )
     .await;
+
+    for gid in &guild_ids {
+        crate::gateway::handlers::lazy_request::refresh_guild_member_lists(state, gid).await;
+    }
 }

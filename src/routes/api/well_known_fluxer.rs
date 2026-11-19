@@ -3,7 +3,12 @@ use std::collections::BTreeMap;
 use axum::{Json, Router, extract::State, routing::get};
 
 use crate::AppState;
+use crate::config::{GuildCreationPolicy, LoginMode, RegistrationMode, TagStyle};
 use crate::constants::API_VERSION;
+use crate::constants::limits::{
+    MAX_ATTACHMENT_SIZE_BYTES, MAX_BIO_LENGTH, MAX_CHANNELS_PER_GUILD, MAX_GUILDS_PER_USER,
+    MAX_INVITES_PER_GUILD, MAX_MESSAGE_LENGTH,
+};
 use crate::models::rest::well_known::fluxer;
 
 pub fn router() -> Router<AppState> {
@@ -11,24 +16,66 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn get_config(State(state): State<AppState>) -> Json<fluxer::InstanceResponse> {
+    let cfg = &state.config;
+
+    let account_identity = match cfg.auth.login_mode {
+        LoginMode::Username => fluxer::AccountIdentity::Username,
+        LoginMode::Email => fluxer::AccountIdentity::Email,
+    };
+
+    let tag_style = match cfg.auth.tag_style {
+        TagStyle::None => fluxer::TagStyle::None,
+        TagStyle::Random => fluxer::TagStyle::Random,
+    };
+
+    let email_delivery_state = match cfg.auth.login_mode {
+        LoginMode::Username => fluxer::EmailDeliveryState::OffUsernameMode,
+        LoginMode::Email => fluxer::EmailDeliveryState::OffDisabled,
+    };
+
+    let registration_mode = match cfg.auth.registration_mode {
+        RegistrationMode::Open | RegistrationMode::InviteOnly => fluxer::RegistrationModes::Open,
+        RegistrationMode::Closed => fluxer::RegistrationModes::Closed,
+    };
+
+    let mut limit_overrides = BTreeMap::new();
+    limit_overrides.insert(
+        "max_message_length".to_string(),
+        MAX_MESSAGE_LENGTH as i64,
+    );
+    limit_overrides.insert("max_bio_length".to_string(), MAX_BIO_LENGTH as i64);
+    limit_overrides.insert("max_guilds".to_string(), MAX_GUILDS_PER_USER);
+    limit_overrides.insert(
+        "max_guild_channels".to_string(),
+        MAX_CHANNELS_PER_GUILD as i64,
+    );
+    limit_overrides.insert(
+        "max_guild_invites".to_string(),
+        MAX_INVITES_PER_GUILD as i64,
+    );
+    limit_overrides.insert(
+        "max_attachment_file_size".to_string(),
+        MAX_ATTACHMENT_SIZE_BYTES as i64,
+    );
+
     Json(fluxer::InstanceResponse {
         codename: None,
         api_code_version: API_VERSION,
         endpoints: fluxer::Endpoints {
-            api: format!("{}/api", state.config.public_http_url),
-            api_client: format!("{}/api", state.config.public_http_url),
-            api_public: format!("{}/api", state.config.public_http_url),
+            api: format!("{}/api", cfg.public_http_url),
+            api_client: format!("{}/api", cfg.public_http_url),
+            api_public: format!("{}/api", cfg.public_http_url),
             api_transport: None,
-            gateway: format!("{}/gateway", state.config.public_ws_url),
-            media: format!("{}/media", state.config.public_http_url),
+            gateway: format!("{}/gateway", cfg.public_ws_url),
+            media: format!("{}/media", cfg.public_http_url),
             upload_relay: None,
-            static_cdn: format!("{}/static", state.config.public_http_url),
-            marketing: state.config.instance.website_url.clone().unwrap_or_default(),
+            static_cdn: format!("{}/static", cfg.public_http_url),
+            marketing: cfg.instance.website_url.clone().unwrap_or_default(),
             docs: None,
-            admin: format!("{}/admin", state.config.public_http_url),
-            invite: format!("{}/invite", state.config.public_http_url),
-            gift: format!("{}/gifts", state.config.public_http_url),
-            webapp: state.config.instance.webapp_url.clone().unwrap_or_default(),
+            admin: format!("{}/admin", cfg.public_http_url),
+            invite: format!("{}/invite", cfg.public_http_url),
+            gift: format!("{}/gifts", cfg.public_http_url),
+            webapp: cfg.instance.webapp_url.clone().unwrap_or_default(),
         },
         captcha: fluxer::Captcha {
             provider: fluxer::CaptchaProviders::None,
@@ -39,7 +86,7 @@ async fn get_config(State(state): State<AppState>) -> Json<fluxer::InstanceRespo
             premium_enabled: false,
             stripe_serviceable: false,
             self_hosted: true,
-            presigned_attachment_uploads: false,
+            presigned_attachment_uploads: cfg.features.enable_attachments,
             proxy_attachments_through_api: Some(false),
             emails_enabled: false,
             phone_verification_enabled: false,
@@ -47,15 +94,15 @@ async fn get_config(State(state): State<AppState>) -> Json<fluxer::InstanceRespo
             desktop_modules_enabled: None,
             account_deletion_grace_period_hours: None,
             max_background_gateway_connections: None,
-            account_identity: fluxer::AccountIdentity::Username,
-            tag_style: fluxer::TagStyle::None,
+            account_identity,
+            tag_style,
             identifier_first: Some(false),
             instant_accounts: Some(false),
             email_codes: Some(false),
             date_of_birth_step: Some(false),
             interaction_tier: Some(fluxer::InteractionTier::Legacy),
             guild_join_gate: Some("off".to_string()),
-            email_delivery_state: Some(fluxer::EmailDeliveryState::OffUsernameMode),
+            email_delivery_state: Some(email_delivery_state),
             verification_basis: Some(fluxer::VerificationBasis::LocalCredential),
         },
         gif: fluxer::Gif {
@@ -73,7 +120,7 @@ async fn get_config(State(state): State<AppState>) -> Json<fluxer::InstanceRespo
             available: Some(false),
         },
         registration: fluxer::Registration {
-            mode: fluxer::RegistrationModes::Open,
+            mode: registration_mode,
             admin_registration_urls_enabled: false,
         },
         community: fluxer::Community {
@@ -82,7 +129,8 @@ async fn get_config(State(state): State<AppState>) -> Json<fluxer::InstanceRespo
             direct_messages_disabled: true,
             friends_disabled: Some(true),
             personal_notes_enabled: Some(false),
-            guild_create_access: false,
+            guild_create_access: cfg.features.guild_creation_policy
+                == GuildCreationPolicy::Everyone,
         },
         services: fluxer::Services {
             gif_enabled: false,
@@ -96,7 +144,7 @@ async fn get_config(State(state): State<AppState>) -> Json<fluxer::InstanceRespo
             rules: vec![fluxer::LimitRule {
                 id: "default".to_string(),
                 filters: None,
-                overrides: BTreeMap::new(),
+                overrides: limit_overrides,
             }],
             defaults_hash: "default".to_string(),
         },
@@ -109,14 +157,14 @@ async fn get_config(State(state): State<AppState>) -> Json<fluxer::InstanceRespo
         },
         app_public: fluxer::AppPublic {
             branding: fluxer::Branding {
-                product_name: state.config.instance.name.clone(),
-                icon_url: state.config.instance.image.clone(),
+                product_name: cfg.instance.name.clone(),
+                icon_url: cfg.instance.image.clone(),
                 symbol_url: None,
-                logo_url: state.config.instance.image.clone(),
+                logo_url: cfg.instance.image.clone(),
                 wordmark_url: None,
-                favicon_url: state.config.instance.image.clone(),
+                favicon_url: cfg.instance.image.clone(),
                 favicon_dark_url: None,
-                theme_color: state.config.instance.color.clone(),
+                theme_color: cfg.instance.color.clone(),
                 status_page_url: None,
                 status_page_instatus: false,
                 status_page_incident_history_url: None,
@@ -138,9 +186,9 @@ async fn get_config(State(state): State<AppState>) -> Json<fluxer::InstanceRespo
                 account_identity_locked: Some(true),
             },
             legal: fluxer::Legal {
-                terms_url: state.config.instance.terms_url.clone(),
-                privacy_url: state.config.instance.privacy_url.clone(),
-                guidelines_url: None,
+                terms_url: cfg.instance.terms_url.clone(),
+                privacy_url: cfg.instance.privacy_url.clone(),
+                guidelines_url: cfg.instance.guidelines_url.clone(),
             },
             registration: fluxer::AppRegistration {
                 collect_date_of_birth: false,

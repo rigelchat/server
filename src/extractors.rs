@@ -1,11 +1,11 @@
 use axum::{
     extract::{FromRef, FromRequestParts},
-    http::{StatusCode, header::AUTHORIZATION, request::Parts},
+    http::{header::AUTHORIZATION, request::Parts},
 };
 
 use crate::{
     constants::dialect::ClientDialect,
-    error::{ApiErrorCode, AppError},
+    error::AppError,
     state::AppState,
     utils::token::{self, TokenClaims},
 };
@@ -21,7 +21,7 @@ where
             return Ok(dialect);
         }
 
-        Ok(ClientDialect::from_http(parts.uri.path(), &parts.headers))
+        Ok(ClientDialect::from_http(&parts.headers))
     }
 }
 
@@ -45,11 +45,7 @@ where
             .get(AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| {
-                AppError::coded(
-                    StatusCode::UNAUTHORIZED,
-                    ApiErrorCode::MissingAuthorization,
-                    "Missing or invalid authorization header",
-                )
+                AppError::missing_auth()
             })?;
 
         let token = raw_header
@@ -61,20 +57,12 @@ where
         let TokenClaims {
             user_id,
             session_id,
-        } = token::verify(token, &state.config.auth_secret).map_err(|err| {
-            AppError::coded(
-                StatusCode::UNAUTHORIZED,
-                ApiErrorCode::InvalidAuthToken,
-                err,
-            )
+        } = token::verify(token, &state.config.auth.secret).map_err(|err| {
+            AppError::invalid_token(err)
         })?;
 
         if !crate::services::auth_service::is_session_active(&state, &session_id, &user_id).await? {
-            return Err(AppError::coded(
-                StatusCode::UNAUTHORIZED,
-                ApiErrorCode::InvalidAuthToken,
-                "Invalid or expired authorization token",
-            ));
+            return Err(AppError::invalid_token("Invalid or expired authorization token"));
         }
 
         Ok(Self {

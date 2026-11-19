@@ -66,13 +66,12 @@ cargo run --release
 
 By default, Rigel listens on `127.0.0.1:3000`:
 
-| Service               | Endpoint                                            |
-| --------------------- | --------------------------------------------------- |
-| **REST API**          | `http://localhost:3000/api` (`/api/v9`)             |
-| **WebSocket Gateway** | `ws://localhost:3000/gateway`                       |
-| **Discovery**         | `http://localhost:3000/.well-known/fluxer`          |
-|                       | `http://localhost:3000/.well-known/spacebar/client` |
-| **Static Assets**     | `http://localhost:3000/static`                      |
+| Service | Endpoint |
+| --- | --- |
+| **REST API** | `http://localhost:3000/api` (`/api/v1`) |
+| **WebSocket Gateway** | `ws://localhost:3000/gateway` |
+| **Discovery** | `/.well-known/fluxer` · `/.well-known/spacebar/client` |
+| **Static Assets** | `http://localhost:3000/static` |
 
 ---
 

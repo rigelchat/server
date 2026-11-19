@@ -1,5 +1,3 @@
-use std::env;
-
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
 use tracing::info;
 
@@ -25,13 +23,10 @@ async fn ensure_column(
     Ok(())
 }
 
-pub async fn init() -> Result<MySqlPool, sqlx::Error> {
-    let database_url =
-        env::var("DATABASE_URL").expect("DATABASE_URL must be defined for the database connection");
-
+pub async fn init(database_url: &str, max_connections: u32) -> Result<MySqlPool, sqlx::Error> {
     let pool = MySqlPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
+        .max_connections(max_connections.max(1))
+        .connect(database_url)
         .await?;
 
     info!("Database connected successfully");
@@ -284,6 +279,16 @@ pub async fn init() -> Result<MySqlPool, sqlx::Error> {
         .execute(&pool)
         .await?;
     ensure_column(&pool, "user_settings", "extra_settings", "TEXT DEFAULT NULL").await?;
+
+    let default_perms = crate::constants::flags::PermissionFlags::DEFAULT_EVERYONE.bits();
+    sqlx::query(
+        "UPDATE roles SET permissions = permissions | ? WHERE id = guild_id AND (permissions & ?) != ?",
+    )
+    .bind(default_perms)
+    .bind(default_perms)
+    .bind(default_perms)
+    .execute(&pool)
+    .await?;
 
     Ok(pool)
 }

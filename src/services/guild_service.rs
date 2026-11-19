@@ -1,16 +1,17 @@
 use std::collections::{HashMap, HashSet};
 
-use axum::http::StatusCode;
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::json;
 use sqlx::{FromRow, MySql, QueryBuilder};
 
 use crate::AppState;
+use crate::config::GuildCreationPolicy;
+use crate::constants::limits::{MAX_GUILDS_PAGE_LIMIT, MAX_GUILDS_PER_USER, MAX_GUILD_NAME_LENGTH, MAX_MEMBERS_PAGE_LIMIT};
 use crate::constants::flags::{PermissionFlags, UserFlags};
 use crate::constants::gateway::events;
 use crate::constants::guild::{DiscoveryCategory, VerificationLevel};
-use crate::error::{ApiErrorCode, AppError};
+use crate::error::{AppError, ValidationCode};
 use crate::models::channel::{
     ChannelOverwriteRow, ChannelResponse, ChannelType, GuildChannel, PermissionOverwrite,
 };
@@ -79,21 +80,17 @@ pub async fn is_member(state: &AppState, guild_id: &str, user_id: &str) -> Resul
 
 pub async fn require_member(state: &AppState, guild_id: &str, user_id: &str) -> Result<(), AppError> {
     if !is_member(state, guild_id, user_id).await? {
-        return Err(AppError::coded(
-            StatusCode::FORBIDDEN,
-            ApiErrorCode::MissingPermissions,
-            "You don't have the permissions required to perform this action.",
-        ));
+        return Err(AppError::missing_permissions());
     }
     Ok(())
 }
 
 pub async fn create_guild(state: &AppState, name: &str, owner_id: &str) -> Result<Guild, AppError> {
     let name = name.trim();
-    if name.is_empty() || name.len() > 100 {
+    if name.is_empty() || name.len() > MAX_GUILD_NAME_LENGTH {
         return Err(AppError::validation(
             "name",
-            "STRING_LENGTH_INVALID",
+            ValidationCode::StringLengthInvalid,
             "String length must be between 1 and 100 characters.",
         ));
     }
@@ -103,19 +100,22 @@ pub async fn create_guild(state: &AppState, name: &str, owner_id: &str) -> Resul
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| {
-            AppError::coded(
-                StatusCode::UNAUTHORIZED,
-                ApiErrorCode::Unauthorized,
-                "Unauthorized",
-            )
+            AppError::unauthorized()
         })?;
 
-    if !UserFlags::from_bits_truncate(owner_flags).contains(UserFlags::STAFF) {
-        return Err(AppError::coded(
-            StatusCode::FORBIDDEN,
-            ApiErrorCode::MissingPermissions,
-            "You don't have permission to create communities on this instance.",
-        ));
+    if state.config.features.guild_creation_policy == GuildCreationPolicy::Staff
+        && !UserFlags::from_bits_truncate(owner_flags).contains(UserFlags::STAFF)
+    {
+        return Err(AppError::missing_permissions_with("You don't have permission to create communities on this instance."));
+    }
+
+    let joined_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM guild_members WHERE user_id = ?")
+            .bind(owner_id)
+            .fetch_one(&state.db)
+            .await?;
+    if joined_count >= MAX_GUILDS_PER_USER {
+        return Err(AppError::max_guilds());
     }
 
     let now = Utc::now().timestamp_millis() as u64;
@@ -125,16 +125,7 @@ pub async fn create_guild(state: &AppState, name: &str, owner_id: &str) -> Resul
     let system_channel_id = DISCORD_SNOWFLAKE.generate(None).to_string();
     let afk_channel_id = DISCORD_SNOWFLAKE.generate(None).to_string();
 
-    let default_permissions = (PermissionFlags::VIEW_CHANNEL
-        | PermissionFlags::CREATE_EXPRESSIONS
-        | PermissionFlags::SEND_MESSAGES
-        | PermissionFlags::EMBED_LINKS
-        | PermissionFlags::ATTACH_FILES
-        | PermissionFlags::ADD_REACTIONS
-        | PermissionFlags::READ_MESSAGE_HISTORY
-        | PermissionFlags::CONNECT
-        | PermissionFlags::SPEAK)
-        .bits();
+    let default_permissions = PermissionFlags::DEFAULT_EVERYONE.bits();
 
     let channels = [
         (&text_category_id, ChannelType::GuildCategory, 0u32, None, "Text channels"),
@@ -226,7 +217,7 @@ pub async fn get_guild(
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| {
-            AppError::coded(StatusCode::NOT_FOUND, ApiErrorCode::UnknownGuild, "Unknown guild")
+            AppError::unknown_guild()
         })?;
 
     require_member(state, guild_id, user_id).await?;
@@ -257,7 +248,7 @@ pub async fn get_user_guilds(
     user_id: &str,
     query: ListGuildsQuery,
 ) -> Result<Vec<Guild>, AppError> {
-    let limit = query.limit.unwrap_or(200).clamp(1, 200);
+    let limit = query.limit.unwrap_or(MAX_GUILDS_PAGE_LIMIT).clamp(1, MAX_GUILDS_PAGE_LIMIT);
     let include_permissions = limit <= 100;
     let with_counts = query.with_counts.unwrap_or(false);
 
@@ -362,11 +353,7 @@ pub async fn add_member_to_guild(
         .await?;
 
     if guild_exists.is_none() {
-        return Err(AppError::coded(
-            StatusCode::NOT_FOUND,
-            ApiErrorCode::UnknownGuild,
-            "Unknown guild",
-        ));
+        return Err(AppError::unknown_guild());
     }
 
     let banned: Option<(String,)> =
@@ -377,11 +364,7 @@ pub async fn add_member_to_guild(
             .await?;
 
     if banned.is_some() {
-        return Err(AppError::coded(
-            StatusCode::FORBIDDEN,
-            ApiErrorCode::UserBannedFromGuild,
-            "This user is banned from this community.",
-        ));
+        return Err(AppError::banned_from_guild());
     }
 
     if is_member(state, guild_id, user_id).await? {
@@ -407,6 +390,7 @@ pub async fn add_member_to_guild(
     }
 
     state.add_user_guild(user_id, guild_id).await;
+    crate::gateway::handlers::lazy_request::refresh_guild_member_lists(state, guild_id).await;
 
     let gateway_guild = build_full_gateway_guild(state, guild_id).await?;
     state
@@ -426,11 +410,7 @@ pub async fn add_member_to_guild(
 
 pub async fn leave_guild(state: &AppState, user_id: &str, guild_id: &str) -> Result<(), AppError> {
     if !is_member(state, guild_id, user_id).await? {
-        return Err(AppError::coded(
-            StatusCode::NOT_FOUND,
-            ApiErrorCode::UnknownMember,
-            "Unknown member",
-        ));
+        return Err(AppError::unknown_member());
     }
 
     let mut tx = state.db.begin().await?;
@@ -450,6 +430,7 @@ pub async fn leave_guild(state: &AppState, user_id: &str, guild_id: &str) -> Res
     tx.commit().await?;
 
     state.remove_user_guild(user_id, guild_id).await;
+    crate::gateway::handlers::lazy_request::refresh_guild_member_lists(state, guild_id).await;
 
     state
         .dispatch_user(
@@ -488,11 +469,7 @@ pub async fn get_channel(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| {
-        AppError::coded(
-            StatusCode::NOT_FOUND,
-            ApiErrorCode::UnknownChannel,
-            "Unknown channel",
-        )
+        AppError::unknown_channel()
     })?;
 
     require_member(state, &channel.guild_id, user_id).await?;
@@ -599,7 +576,7 @@ pub async fn get_guild_members(
 ) -> Result<Vec<GuildMemberResponse>, AppError> {
     require_member(state, guild_id, user_id).await?;
 
-    let limit = limit.unwrap_or(100).clamp(1, 1000);
+    let limit = limit.unwrap_or(100).clamp(1, MAX_MEMBERS_PAGE_LIMIT);
 
     let mut qb = QueryBuilder::<MySql>::new(
         r#"
@@ -695,11 +672,7 @@ async fn fetch_member_response(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| {
-        AppError::coded(
-            StatusCode::NOT_FOUND,
-            ApiErrorCode::UnknownMember,
-            "Unknown member",
-        )
+        AppError::unknown_member()
     })?;
 
     let roles: Vec<String> = sqlx::query_scalar(
@@ -744,7 +717,7 @@ pub async fn build_gateway_guild(
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| {
-            AppError::coded(StatusCode::NOT_FOUND, ApiErrorCode::UnknownGuild, "Unknown guild")
+            AppError::unknown_guild()
         })?;
 
     let channels = fetch_guild_channels(state, guild_id).await?;
@@ -814,7 +787,7 @@ pub async fn build_full_gateway_guild(
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| {
-            AppError::coded(StatusCode::NOT_FOUND, ApiErrorCode::UnknownGuild, "Unknown guild")
+            AppError::unknown_guild()
         })?;
 
     let channels = fetch_guild_channels(state, guild_id).await?;

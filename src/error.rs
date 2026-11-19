@@ -19,8 +19,6 @@ pub enum ApiErrorCode {
     Unauthorized,
     MissingAuthorization,
     InvalidAuthToken,
-    AccessDenied,
-    MissingAccess,
     MissingPermissions,
     NotFound,
     UnknownUser,
@@ -29,14 +27,13 @@ pub enum ApiErrorCode {
     UnknownMessage,
     UnknownInvite,
     UnknownMember,
-    UnknownRole,
     CannotSendEmptyMessage,
     CannotEditOtherUserMessage,
     UserBannedFromGuild,
     Conflict,
-    UsernameAlreadyTaken,
-    EmailAlreadyInUse,
-    EmailUnavailableOnInstance,
+    RegistrationClosed,
+    MaxInvites,
+    MaxGuilds,
     InternalServerError,
 }
 
@@ -48,8 +45,6 @@ impl ApiErrorCode {
             Self::Unauthorized => "UNAUTHORIZED",
             Self::MissingAuthorization => "MISSING_AUTHORIZATION",
             Self::InvalidAuthToken => "INVALID_AUTH_TOKEN",
-            Self::AccessDenied => "ACCESS_DENIED",
-            Self::MissingAccess => "MISSING_ACCESS",
             Self::MissingPermissions => "MISSING_PERMISSIONS",
             Self::NotFound => "NOT_FOUND",
             Self::UnknownUser => "UNKNOWN_USER",
@@ -58,14 +53,13 @@ impl ApiErrorCode {
             Self::UnknownMessage => "UNKNOWN_MESSAGE",
             Self::UnknownInvite => "UNKNOWN_INVITE",
             Self::UnknownMember => "UNKNOWN_MEMBER",
-            Self::UnknownRole => "UNKNOWN_ROLE",
             Self::CannotSendEmptyMessage => "CANNOT_SEND_EMPTY_MESSAGE",
             Self::CannotEditOtherUserMessage => "CANNOT_EDIT_OTHER_USER_MESSAGE",
             Self::UserBannedFromGuild => "USER_BANNED_FROM_GUILD",
             Self::Conflict => "CONFLICT",
-            Self::UsernameAlreadyTaken => "USERNAME_ALREADY_TAKEN",
-            Self::EmailAlreadyInUse => "EMAIL_ALREADY_IN_USE",
-            Self::EmailUnavailableOnInstance => "EMAIL_UNAVAILABLE_ON_INSTANCE",
+            Self::RegistrationClosed => "REGISTRATION_CLOSED",
+            Self::MaxInvites => "MAX_INVITES",
+            Self::MaxGuilds => "MAX_GUILDS",
             Self::InternalServerError => "INTERNAL_SERVER_ERROR",
         }
     }
@@ -73,15 +67,15 @@ impl ApiErrorCode {
     pub fn discord_code(self) -> u32 {
         match self {
             Self::InvalidFormBody => 50035,
-            Self::AccessDenied | Self::MissingAccess => 50001,
             Self::MissingPermissions => 50013,
             Self::UnknownChannel => 10003,
             Self::UnknownGuild => 10004,
             Self::UnknownInvite => 10006,
             Self::UnknownMember => 10007,
             Self::UnknownMessage => 10008,
-            Self::UnknownRole => 10011,
             Self::UnknownUser => 10013,
+            Self::MaxGuilds => 30001,
+            Self::MaxInvites => 30016,
             Self::CannotEditOtherUserMessage => 50005,
             Self::CannotSendEmptyMessage => 50006,
             Self::UserBannedFromGuild => 40007,
@@ -90,10 +84,52 @@ impl ApiErrorCode {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationCode {
+    InvalidLoginOrPassword,
+    UsernameLengthInvalid,
+    UsernameInvalidCharacters,
+    UsernameReservedValue,
+    UsernameCannotContainReservedTerms,
+    UsernameAlreadyTaken,
+    GlobalNameLengthInvalid,
+    PasswordLengthInvalid,
+    EmailIsRequired,
+    InvalidEmailFormat,
+    EmailAlreadyInUse,
+    ContentExceedsMaxLength,
+    ColorValueTooHigh,
+    StringLengthInvalid,
+    InvalidFormat,
+}
+
+impl ValidationCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidLoginOrPassword => "INVALID_LOGIN_OR_PASSWORD",
+            Self::UsernameLengthInvalid => "USERNAME_LENGTH_INVALID",
+            Self::UsernameInvalidCharacters => "USERNAME_INVALID_CHARACTERS",
+            Self::UsernameReservedValue => "USERNAME_RESERVED_VALUE",
+            Self::UsernameCannotContainReservedTerms => "USERNAME_CANNOT_CONTAIN_RESERVED_TERMS",
+            Self::UsernameAlreadyTaken => "USERNAME_ALREADY_TAKEN",
+            Self::GlobalNameLengthInvalid => "GLOBAL_NAME_LENGTH_INVALID",
+            Self::PasswordLengthInvalid => "PASSWORD_LENGTH_INVALID",
+            Self::EmailIsRequired => "EMAIL_IS_REQUIRED",
+            Self::InvalidEmailFormat => "INVALID_EMAIL_FORMAT",
+            Self::EmailAlreadyInUse => "EMAIL_ALREADY_IN_USE",
+            Self::ContentExceedsMaxLength => "CONTENT_EXCEEDS_MAX_LENGTH",
+            Self::ColorValueTooHigh => "COLOR_VALUE_TOO_HIGH",
+            Self::StringLengthInvalid => "STRING_LENGTH_INVALID",
+            Self::InvalidFormat => "INVALID_FORMAT",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ValidationError {
     pub path: String,
-    pub code: String,
+    pub code: &'static str,
     pub message: String,
 }
 
@@ -104,7 +140,9 @@ struct ApiErrorMeta {
     message: String,
 }
 
-fn slice_is_empty(errors: &&[ValidationError]) -> bool { errors.is_empty() }
+fn slice_is_empty(errors: &&[ValidationError]) -> bool {
+    errors.is_empty()
+}
 
 #[derive(Serialize)]
 struct FluxerErrorBody<'a> {
@@ -131,6 +169,7 @@ pub enum AppError {
     },
 }
 
+#[allow(dead_code)]
 impl AppError {
     pub fn coded(status: StatusCode, code: ApiErrorCode, message: impl Into<String>) -> Self {
         Self::Coded {
@@ -143,7 +182,7 @@ impl AppError {
 
     pub fn validation(
         path: impl Into<String>,
-        code: impl Into<String>,
+        code: ValidationCode,
         message: impl Into<String>,
     ) -> Self {
         Self::Coded {
@@ -152,10 +191,158 @@ impl AppError {
             message: "Invalid form body.".to_string(),
             errors: vec![ValidationError {
                 path: path.into(),
-                code: code.into(),
+                code: code.as_str(),
                 message: message.into(),
             }],
         }
+    }
+
+    pub fn invalid_form_body() -> Self {
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidFormBody,
+            "Invalid form body.",
+        )
+    }
+
+    pub fn missing_auth() -> Self {
+        Self::coded(
+            StatusCode::UNAUTHORIZED,
+            ApiErrorCode::MissingAuthorization,
+            "Missing or invalid authorization header.",
+        )
+    }
+
+    pub fn invalid_token(message: impl Into<String>) -> Self {
+        Self::coded(
+            StatusCode::UNAUTHORIZED,
+            ApiErrorCode::InvalidAuthToken,
+            message,
+        )
+    }
+
+    pub fn unauthorized() -> Self {
+        Self::coded(
+            StatusCode::UNAUTHORIZED,
+            ApiErrorCode::Unauthorized,
+            "Unauthorized",
+        )
+    }
+
+    pub fn missing_permissions() -> Self {
+        Self::coded(
+            StatusCode::FORBIDDEN,
+            ApiErrorCode::MissingPermissions,
+            "You don't have the permissions required to perform this action.",
+        )
+    }
+
+    pub fn missing_permissions_with(message: impl Into<String>) -> Self {
+        Self::coded(
+            StatusCode::FORBIDDEN,
+            ApiErrorCode::MissingPermissions,
+            message,
+        )
+    }
+
+    pub fn registration_closed(message: impl Into<String>) -> Self {
+        Self::coded(
+            StatusCode::FORBIDDEN,
+            ApiErrorCode::RegistrationClosed,
+            message,
+        )
+    }
+
+    pub fn unknown_user() -> Self {
+        Self::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownUser,
+            "Unknown user",
+        )
+    }
+
+    pub fn unknown_guild() -> Self {
+        Self::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownGuild,
+            "Unknown guild",
+        )
+    }
+
+    pub fn unknown_channel() -> Self {
+        Self::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownChannel,
+            "Unknown channel",
+        )
+    }
+
+    pub fn unknown_message() -> Self {
+        Self::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownMessage,
+            "Unknown message",
+        )
+    }
+
+    pub fn unknown_invite() -> Self {
+        Self::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownInvite,
+            "Unknown invite",
+        )
+    }
+
+    pub fn unknown_member() -> Self {
+        Self::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownMember,
+            "Unknown member",
+        )
+    }
+
+    pub fn banned_from_guild() -> Self {
+        Self::coded(
+            StatusCode::FORBIDDEN,
+            ApiErrorCode::UserBannedFromGuild,
+            "This user is banned from this community.",
+        )
+    }
+
+    pub fn empty_message() -> Self {
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::CannotSendEmptyMessage,
+            "You can't send an empty message.",
+        )
+    }
+
+    pub fn cannot_edit_other_message() -> Self {
+        Self::coded(
+            StatusCode::FORBIDDEN,
+            ApiErrorCode::CannotEditOtherUserMessage,
+            "You can't edit another user's message.",
+        )
+    }
+
+    pub fn max_guilds() -> Self {
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::MaxGuilds,
+            "You have reached the maximum number of communities.",
+        )
+    }
+
+    pub fn max_invites() -> Self {
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::MaxInvites,
+            "Maximum number of invites reached for this community.",
+        )
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal(message.into())
     }
 }
 
@@ -215,7 +402,7 @@ impl IntoResponse for AppError {
 }
 
 pub async fn adapt_error_dialect(mut req: Request, next: Next) -> Response {
-    let dialect = ClientDialect::from_http(req.uri().path(), req.headers());
+    let dialect = ClientDialect::from_http(req.headers());
     req.extensions_mut().insert(dialect);
 
     let res = next.run(req).await;

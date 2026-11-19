@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
+use crate::constants::guild::{DEFAULT_VOICE_BITRATE, DEFAULT_VOICE_CONNECTION_LIMIT};
 use crate::models::serde_helpers::serialize_u64_as_string;
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -84,9 +85,9 @@ impl ChannelResponse {
             content_warning_text: None,
             rate_limit_per_user: 0,
             last_pin_timestamp: None,
-            bitrate: is_voice.then_some(64000),
+            bitrate: is_voice.then_some(DEFAULT_VOICE_BITRATE),
             user_limit: is_voice.then_some(0),
-            voice_connection_limit: is_voice.then_some(5),
+            voice_connection_limit: is_voice.then_some(DEFAULT_VOICE_CONNECTION_LIMIT),
             rtc_region: is_voice.then_some(None),
             rtc_p2p: is_voice.then_some(false),
             permission_overwrites,

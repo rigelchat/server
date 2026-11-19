@@ -3,6 +3,7 @@ use sqlx::FromRow;
 
 use crate::constants::dialect::ClientDialect;
 use crate::constants::flags::UserFlags;
+use crate::constants::user::DEFAULT_AFK_TIMEOUT;
 use crate::models::serde_helpers::millis_to_iso;
 
 #[derive(Debug, Clone, FromRow)]
@@ -388,7 +389,7 @@ impl Default for UserSettings {
             locale: "en-US".to_string(),
             regional_format: extras.regional_format,
             theme: "dark".to_string(),
-            afk_timeout: 600,
+            afk_timeout: DEFAULT_AFK_TIMEOUT,
             developer_mode: false,
             synced_preferences: String::new(),
             background_gradient_preset: None,

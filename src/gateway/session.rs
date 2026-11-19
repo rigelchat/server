@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::extract::ws::{CloseFrame, Message};
@@ -14,9 +14,13 @@ pub struct GatewaySession {
     pub dialect: ClientDialect,
     pub user_id: Option<String>,
     pub auth_session_id: Option<String>,
+    pub status: String,
+    pub afk: bool,
+    pub mobile: bool,
     pub sender: mpsc::Sender<Message>,
     pub sequence: AtomicU64,
     pub guilds: HashSet<String>,
+    pub member_list_subscriptions: HashMap<String, (String, [i64; 2])>,
 }
 
 impl GatewaySession {
@@ -26,9 +30,13 @@ impl GatewaySession {
             dialect,
             user_id: None,
             auth_session_id: None,
+            status: "online".to_string(),
+            afk: false,
+            mobile: false,
             sender,
             sequence: AtomicU64::new(0),
             guilds: HashSet::new(),
+            member_list_subscriptions: HashMap::new(),
         }
     }
 

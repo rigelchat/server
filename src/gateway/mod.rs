@@ -18,7 +18,7 @@ use zstd::stream::raw::{Decoder as RawZstdDecoder, Operation};
 
 use crate::AppState;
 use crate::constants::dialect::ClientDialect;
-use crate::constants::gateway::{HEARTBEAT_INTERVAL, Opcode, close_codes};
+use crate::constants::gateway::{HEARTBEAT_INTERVAL, MAX_PAYLOAD_BYTES, Opcode, close_codes};
 use crate::gateway::handlers::presence::PresenceUpdatePayload;
 use crate::gateway::session::GatewaySession;
 use crate::models::gateway::{
@@ -127,7 +127,20 @@ async fn handle_socket(ws: WebSocket, state: AppState, dialect: ClientDialect) {
 
     if let Some(session) = removed {
         if let Some(uid) = session.user_id {
-            if !has_other_session {
+            if has_other_session {
+                handlers::presence::dispatch_sessions_replace(&state, &uid).await;
+                let pub_status = handlers::presence::user_public_status(&state, &uid).await;
+                let custom_status =
+                    handlers::presence::fetch_user_custom_status(&state, &uid).await;
+                handlers::presence::broadcast_presence(
+                    &state,
+                    &uid,
+                    &session.guilds,
+                    pub_status,
+                    custom_status.as_ref(),
+                )
+                .await;
+            } else {
                 handlers::presence::broadcast_presence(
                     &state,
                     &uid,
@@ -136,6 +149,9 @@ async fn handle_socket(ws: WebSocket, state: AppState, dialect: ClientDialect) {
                     None,
                 )
                 .await;
+            }
+            for gid in &session.guilds {
+                handlers::lazy_request::refresh_guild_member_lists(&state, gid).await;
             }
         }
     }
@@ -153,6 +169,10 @@ fn decode_binary_frame(bin: &[u8], decoder: Option<&mut RawZstdDecoder>) -> Opti
             match decoder.run_on_buffers(src, &mut temp) {
                 Ok(status) => {
                     out.extend_from_slice(&temp[..status.bytes_written]);
+                    if out.len() > MAX_PAYLOAD_BYTES {
+                        error!("Decompressed gateway frame exceeds max payload limit");
+                        return None;
+                    }
                     src = &src[status.bytes_read..];
                     if src.is_empty() || (status.bytes_read == 0 && status.bytes_written == 0) {
                         if let Ok(text) = String::from_utf8(out) {

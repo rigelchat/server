@@ -66,3 +66,23 @@ bitflags! {
         const VIEW_CHANNEL_MEMBERS = 1 << 54;
     }
 }
+
+impl PermissionFlags {
+    pub const DEFAULT_EVERYONE: Self = Self::from_bits_truncate(
+        Self::CREATE_INSTANT_INVITE.bits()
+            | Self::ADD_REACTIONS.bits()
+            | Self::STREAM.bits()
+            | Self::VIEW_CHANNEL.bits()
+            | Self::SEND_MESSAGES.bits()
+            | Self::EMBED_LINKS.bits()
+            | Self::ATTACH_FILES.bits()
+            | Self::READ_MESSAGE_HISTORY.bits()
+            | Self::USE_EXTERNAL_EMOJIS.bits()
+            | Self::CONNECT.bits()
+            | Self::SPEAK.bits()
+            | Self::USE_VAD.bits()
+            | Self::CHANGE_NICKNAME.bits()
+            | Self::USE_EXTERNAL_STICKERS.bits()
+            | Self::VIEW_CHANNEL_MEMBERS.bits(),
+    );
+}

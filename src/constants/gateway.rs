@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const HEARTBEAT_INTERVAL: u32 = 41250;
+pub const MAX_PAYLOAD_BYTES: usize = 16_384;
 
 #[derive(Serialize)]
 #[serde(rename_all = "kebab-case")]

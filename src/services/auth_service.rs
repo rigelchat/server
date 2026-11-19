@@ -1,16 +1,16 @@
-use axum::http::StatusCode;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use chrono::Utc;
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::config::{LoginMode, RegistrationMode, TagStyle};
 use crate::constants::flags::UserFlags;
-use crate::error::{ApiErrorCode, AppError};
+use crate::constants::limits::{MAX_GLOBAL_NAME_LENGTH, MAX_PASSWORD_LENGTH, MAX_USERNAME_LENGTH};
+use crate::constants::user::VALID_THEMES;
+use crate::error::{AppError, ValidationCode};
 use crate::models::rest::auth::{LoginRequest, LoginResponse, RegisterRequest};
 use crate::models::user::{PartialUser, UserRow};
 use crate::utils::{snowflake::DISCORD_SNOWFLAKE, token};
-
-const VALID_THEMES: [&str; 5] = ["dark", "dark_legacy", "coal", "light", "system"];
 
 fn normalize_login_identifier(raw: &str) -> String {
     let trimmed = raw.trim();
@@ -28,17 +28,17 @@ fn normalize_login_identifier(raw: &str) -> String {
 }
 
 fn validate_username(username: &str) -> Result<(), AppError> {
-    if username.is_empty() || username.len() > 32 {
+    if username.is_empty() || username.len() > MAX_USERNAME_LENGTH {
         return Err(AppError::validation(
             "username",
-            "USERNAME_LENGTH_INVALID",
+            ValidationCode::UsernameLengthInvalid,
             "Username must be between 1 and 32 characters.",
         ));
     }
     if !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(AppError::validation(
             "username",
-            "USERNAME_INVALID_CHARACTERS",
+            ValidationCode::UsernameInvalidCharacters,
             "Username can only contain Latin letters, numbers, and underscores.",
         ));
     }
@@ -47,14 +47,14 @@ fn validate_username(username: &str) -> Result<(), AppError> {
     if lower == "everyone" || lower == "here" {
         return Err(AppError::validation(
             "username",
-            "USERNAME_RESERVED_VALUE",
+            ValidationCode::UsernameReservedValue,
             "Username can't be \"everyone\" or \"here\".",
         ));
     }
     if lower.contains("fluxer") || lower.contains("system message") {
         return Err(AppError::validation(
             "username",
-            "USERNAME_CANNOT_CONTAIN_RESERVED_TERMS",
+            ValidationCode::UsernameCannotContainReservedTerms,
             "Username can't contain reserved terms.",
         ));
     }
@@ -125,7 +125,7 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
     let raw_identifier = payload.identifier().ok_or_else(|| {
         AppError::validation(
             "login",
-            "INVALID_LOGIN_OR_PASSWORD",
+            ValidationCode::InvalidLoginOrPassword,
             "Invalid username or password.",
         )
     })?;
@@ -142,7 +142,7 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
     .ok_or_else(|| {
         AppError::validation(
             "login",
-            "INVALID_LOGIN_OR_PASSWORD",
+            ValidationCode::InvalidLoginOrPassword,
             "Invalid username or password.",
         )
     })?;
@@ -150,7 +150,7 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
     let password_hash = user.password_hash.as_deref().ok_or_else(|| {
         AppError::validation(
             "login",
-            "INVALID_LOGIN_OR_PASSWORD",
+            ValidationCode::InvalidLoginOrPassword,
             "Invalid username or password.",
         )
     })?;
@@ -168,7 +168,7 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
     if !valid {
         return Err(AppError::validation(
             "login",
-            "INVALID_LOGIN_OR_PASSWORD",
+            ValidationCode::InvalidLoginOrPassword,
             "Invalid username or password.",
         ));
     }
@@ -185,7 +185,7 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
         .execute(&mut *tx)
         .await?;
 
-    let signed = token::sign(&user.id, &state.config.auth_secret);
+    let signed = token::sign(&user.id, &state.config.auth.secret);
 
     sqlx::query("INSERT INTO user_sessions (id, user_id, created_at) VALUES (?, ?, ?)")
         .bind(&signed.session_id)
@@ -209,16 +209,73 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
 }
 
 pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<LoginResponse, AppError> {
+    match state.config.auth.registration_mode {
+        RegistrationMode::Closed => {
+            return Err(AppError::registration_closed("Registration is closed on this instance."));
+        }
+        RegistrationMode::InviteOnly => {
+            let code = payload
+                .invite_code
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .ok_or_else(|| {
+                    AppError::registration_closed("Registration requires a valid invite.")
+                })?;
+            crate::services::invite_service::get_invite(state, code)
+                .await
+                .map_err(|_| {
+                    AppError::registration_closed("Registration requires a valid invite.")
+                })?;
+        }
+        RegistrationMode::Open => {}
+    }
+
+    let email_to_store: Option<String> = match state.config.auth.login_mode {
+        LoginMode::Email => {
+            let raw = payload.email.as_deref().map(str::trim).unwrap_or("");
+            if raw.is_empty() {
+                return Err(AppError::validation(
+                    "email",
+                    ValidationCode::EmailIsRequired,
+                    "Email is required.",
+                ));
+            }
+            if !raw.contains('@') || raw.len() > 254 {
+                return Err(AppError::validation(
+                    "email",
+                    ValidationCode::InvalidEmailFormat,
+                    "Invalid email address format.",
+                ));
+            }
+            let lower = raw.to_ascii_lowercase();
+            let exists: Option<(String,)> =
+                sqlx::query_as("SELECT id FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1")
+                    .bind(&lower)
+                    .fetch_optional(&state.db)
+                    .await?;
+            if exists.is_some() {
+                return Err(AppError::validation(
+                    "email",
+                    ValidationCode::EmailAlreadyInUse,
+                    "Email is already in use.",
+                ));
+            }
+            Some(lower)
+        }
+        LoginMode::Username => None,
+    };
+
     let global_name = payload
         .global_name
         .map(|g| g.trim().to_string())
         .filter(|g| !g.is_empty());
 
     if let Some(ref g) = global_name {
-        if g.len() > 32 {
+        if g.len() > MAX_GLOBAL_NAME_LENGTH {
             return Err(AppError::validation(
                 "global_name",
-                "GLOBAL_NAME_LENGTH_INVALID",
+                ValidationCode::GlobalNameLengthInvalid,
                 "Display name must be at most 32 characters.",
             ));
         }
@@ -248,10 +305,10 @@ pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<Logi
     };
 
     let password = payload.password.as_deref().unwrap_or("");
-    if password.is_empty() || password.len() > 256 {
+    if password.is_empty() || password.len() > MAX_PASSWORD_LENGTH {
         return Err(AppError::validation(
             "password",
-            "PASSWORD_LENGTH_INVALID",
+            ValidationCode::PasswordLengthInvalid,
             "Password must be between 1 and 256 characters.",
         ));
     }
@@ -271,18 +328,11 @@ pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<Logi
     })
     .await
     .map_err(|err| {
-        AppError::coded(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiErrorCode::InternalServerError,
-            format!("Password hashing task failed: {err}"),
+        AppError::internal(format!("Password hashing task failed: {err}"),
         )
     })?
     .map_err(|err| {
-        AppError::coded(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiErrorCode::InternalServerError,
-            err,
-        )
+        AppError::internal(err)
     })?;
 
     let mut tx = state.db.begin().await?;
@@ -297,7 +347,7 @@ pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<Logi
         if payload.username.as_deref().is_some_and(|u| !u.trim().is_empty()) {
             return Err(AppError::validation(
                 "username",
-                "USERNAME_ALREADY_TAKEN",
+                ValidationCode::UsernameAlreadyTaken,
                 "This username is already taken.",
             ));
         }
@@ -319,19 +369,32 @@ pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<Logi
 
     let user_id = DISCORD_SNOWFLAKE.generate(None).to_string();
     let created_at = Utc::now().timestamp_millis() as u64;
-    let discriminator = "0000".to_string();
+    let discriminator = match state.config.auth.tag_style {
+        TagStyle::None => "0000".to_string(),
+        TagStyle::Random => {
+            let bytes = Uuid::new_v4();
+            let raw = u32::from_le_bytes([
+                bytes.as_bytes()[0],
+                bytes.as_bytes()[1],
+                bytes.as_bytes()[2],
+                bytes.as_bytes()[3],
+            ]);
+            format!("{:04}", (raw % 9999) + 1)
+        }
+    };
 
     sqlx::query(
         r#"
         INSERT INTO users
             (id, created_at, bot, public_flags, username, email, verified, password_hash, global_name, discriminator)
-        VALUES (?, ?, FALSE, ?, ?, NULL, TRUE, ?, ?, ?)
+        VALUES (?, ?, FALSE, ?, ?, ?, TRUE, ?, ?, ?)
         "#,
     )
     .bind(&user_id)
     .bind(created_at)
     .bind(public_flags)
     .bind(&username)
+    .bind(&email_to_store)
     .bind(&password_hash)
     .bind(&global_name)
     .bind(&discriminator)
@@ -349,7 +412,7 @@ pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<Logi
         .execute(&mut *tx)
         .await?;
 
-    let signed = token::sign(&user_id, &state.config.auth_secret);
+    let signed = token::sign(&user_id, &state.config.auth.secret);
 
     sqlx::query("INSERT INTO user_sessions (id, user_id, created_at) VALUES (?, ?, ?)")
         .bind(&signed.session_id)

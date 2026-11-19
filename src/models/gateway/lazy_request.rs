@@ -16,44 +16,76 @@ pub struct LazyRequestPayload {
 #[derive(Debug, Deserialize)]
 pub struct GuildSubscription {
     pub member_list_channels: Option<HashMap<String, Vec<Vec<i64>>>>,
+    pub members: Option<Vec<String>>,
+}
+
+pub enum LazyListAction {
+    Subscribe {
+        guild_id: String,
+        channel_id: String,
+        range: [i64; 2],
+    },
+    Unsubscribe {
+        guild_id: String,
+    },
+    SubscribeMembers {
+        guild_id: String,
+        user_ids: Vec<String>,
+    },
 }
 
 impl LazyRequestPayload {
-    pub fn extract(self) -> Option<(String, String, [i64; 2])> {
-        let mut range = [0i64, 99i64];
+    pub fn into_actions(self) -> Vec<LazyListAction> {
+        let mut actions = Vec::new();
 
         if let Some(subs) = self.subscriptions {
-            let (guild_id, sub) = subs.into_iter().next()?;
-            let mut channel_id = "everyone".to_string();
-
-            if let Some(channels) = sub.member_list_channels {
-                if let Some((cid, ranges)) = channels.into_iter().next() {
-                    channel_id = cid;
-                    if let Some(first) = ranges.first() {
-                        if first.len() >= 2 {
-                            range = [first[0], first[1]];
+            for (guild_id, sub) in subs {
+                if let Some(user_ids) = sub.members {
+                    if !user_ids.is_empty() {
+                        actions.push(LazyListAction::SubscribeMembers {
+                            guild_id: guild_id.clone(),
+                            user_ids,
+                        });
+                    }
+                }
+                if let Some(channels) = sub.member_list_channels {
+                    if channels.is_empty() {
+                        actions.push(LazyListAction::Unsubscribe { guild_id });
+                        continue;
+                    }
+                    for (channel_id, ranges) in channels {
+                        if let Some(first) = ranges.first().filter(|r| r.len() >= 2) {
+                            actions.push(LazyListAction::Subscribe {
+                                guild_id: guild_id.clone(),
+                                channel_id,
+                                range: [first[0], first[1]],
+                            });
+                        } else {
+                            actions.push(LazyListAction::Unsubscribe {
+                                guild_id: guild_id.clone(),
+                            });
                         }
                     }
                 }
             }
-            return Some((guild_id, channel_id, range));
+            return actions;
         }
 
-        let guild_id = self.guild_id?;
-        let mut channel_id = "everyone".to_string();
-
-        if let Some(channels) = self.channels {
-            if let Some((cid, ranges)) = channels.into_iter().next() {
-                channel_id = cid;
-                if let Some(first) = ranges.first() {
-                    if first.len() >= 2 {
-                        range = [first[0], first[1]];
+        if let Some(guild_id) = self.guild_id {
+            if let Some(channels) = self.channels {
+                for (channel_id, ranges) in channels {
+                    if let Some(first) = ranges.first().filter(|r| r.len() >= 2) {
+                        actions.push(LazyListAction::Subscribe {
+                            guild_id: guild_id.clone(),
+                            channel_id,
+                            range: [first[0], first[1]],
+                        });
                     }
                 }
             }
         }
 
-        Some((guild_id, channel_id, range))
+        actions
     }
 }
 

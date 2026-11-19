@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 
-use axum::http::StatusCode;
 use chrono::Utc;
 use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::constants::flags::PermissionFlags;
-use crate::error::{ApiErrorCode, AppError};
+use crate::constants::limits::{MAX_INVITES_PER_GUILD, MAX_INVITE_AGE_SECONDS, MAX_INVITE_USES};
+use crate::error::AppError;
 use crate::models::invite::{
     CreateInviteRequest, CreatedInvite, InviteChannel, InviteGuild, InviteResponse, InviteType,
 };
@@ -59,22 +59,14 @@ async fn fetch_invite_details(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| {
-        AppError::coded(
-            StatusCode::NOT_FOUND,
-            ApiErrorCode::UnknownInvite,
-            "Unknown invite",
-        )
+        AppError::unknown_invite()
     })?;
 
     let now = Utc::now().timestamp_millis() as u64;
     if row.expires_at.is_some_and(|exp| now > exp)
         || (row.max_uses > 0 && row.uses >= row.max_uses)
     {
-        return Err(AppError::coded(
-            StatusCode::NOT_FOUND,
-            ApiErrorCode::UnknownInvite,
-            "Unknown invite",
-        ));
+        return Err(AppError::unknown_invite());
     }
 
     let member_count: i64 =
@@ -144,19 +136,23 @@ pub async fn create_channel_invite(
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| {
-            AppError::coded(
-                StatusCode::NOT_FOUND,
-                ApiErrorCode::UnknownChannel,
-                "Unknown channel",
-            )
+            AppError::unknown_channel()
         })?;
 
     guild_service::require_member(state, &guild_id, user_id).await?;
 
+    let invite_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invites WHERE guild_id = ?")
+        .bind(&guild_id)
+        .fetch_one(&state.db)
+        .await?;
+    if invite_count as u64 >= MAX_INVITES_PER_GUILD {
+        return Err(AppError::max_invites());
+    }
+
     let code = Uuid::new_v4().simple().to_string()[..8].to_string();
     let created_at = Utc::now().timestamp_millis() as u64;
-    let max_uses = payload.max_uses.unwrap_or(0).min(100);
-    let max_age = payload.max_age.unwrap_or(0).min(604800);
+    let max_uses = payload.max_uses.unwrap_or(0).min(MAX_INVITE_USES);
+    let max_age = payload.max_age.unwrap_or(0).min(MAX_INVITE_AGE_SECONDS);
     let expires_at = (max_age > 0).then(|| created_at + (max_age as u64) * 1000);
 
     sqlx::query(
@@ -229,11 +225,7 @@ pub async fn delete_invite(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| {
-        AppError::coded(
-            StatusCode::NOT_FOUND,
-            ApiErrorCode::UnknownInvite,
-            "Unknown invite",
-        )
+        AppError::unknown_invite()
     })?;
 
     if row.inviter_id != user_id && row.owner_id != user_id {
@@ -258,11 +250,7 @@ pub async fn delete_invite(
         let combined = perms.into_iter().fold(0u64, |acc, p| acc | p);
         let flags = PermissionFlags::from_bits_truncate(combined);
         if !flags.intersects(PermissionFlags::MANAGE_GUILD | PermissionFlags::ADMINISTRATOR) {
-            return Err(AppError::coded(
-                StatusCode::FORBIDDEN,
-                ApiErrorCode::MissingPermissions,
-                "You don't have the permissions required to perform this action.",
-            ));
+            return Err(AppError::missing_permissions());
         }
     }
 

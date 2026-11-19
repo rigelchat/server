@@ -8,7 +8,7 @@ pub enum ClientDialect {
 }
 
 impl ClientDialect {
-    pub fn from_http(path: &str, headers: &HeaderMap) -> Self {
+    pub fn from_http(headers: &HeaderMap) -> Self {
         for name in headers.keys() {
             if name.as_str().starts_with("x-fluxer-") {
                 return Self::Fluxer;
@@ -26,23 +26,6 @@ impl ClientDialect {
         }
 
         if headers.contains_key("x-super-properties") {
-            return Self::Discord;
-        }
-
-        if let Some(auth) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
-            if auth.starts_with("Bot ") {
-                return Self::Discord;
-            }
-        }
-
-        if path == "/api/v1" || path.starts_with("/api/v1/") {
-            return Self::Fluxer;
-        }
-        if path == "/api/v9"
-            || path.starts_with("/api/v9/")
-            || path == "/api/v10"
-            || path.starts_with("/api/v10/")
-        {
             return Self::Discord;
         }
 

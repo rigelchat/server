@@ -4,13 +4,12 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{Path, State},
-    http::StatusCode,
     routing::{get, post},
 };
 
 use crate::AppState;
 use crate::constants::dialect::ClientDialect;
-use crate::error::{ApiErrorCode, AppError};
+use crate::error::AppError;
 use crate::extractors::AuthUser;
 use crate::models::channel::ChannelResponse;
 use crate::models::invite::{CreateInviteRequest, CreatedInvite};
@@ -43,11 +42,7 @@ async fn create_channel_invite(
         CreateInviteRequest::default()
     } else {
         serde_json::from_slice(&body).map_err(|_| {
-            AppError::coded(
-                StatusCode::BAD_REQUEST,
-                ApiErrorCode::InvalidFormBody,
-                "Invalid form body.",
-            )
+            AppError::invalid_form_body()
         })?
     };
 
