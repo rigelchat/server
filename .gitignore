@@ -3,7 +3,6 @@
 
 # Env & local overrides
 .env
-.env.*
 *.local
 
 # Runtime downloaded assets
