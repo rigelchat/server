@@ -11,7 +11,7 @@ use crate::extractors::AuthUser;
 use crate::models::rest::discovery::{
     DiscoveryCategoryResponse, DiscoverySearchQuery, GuildDiscoveryResponse,
 };
-use crate::services::guild_service;
+use crate::services::{discovery_service, member_service};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -24,7 +24,7 @@ async fn get_discovery_guilds(
     State(state): State<AppState>,
     Query(params): Query<DiscoverySearchQuery>,
 ) -> Result<Json<GuildDiscoveryResponse>, AppError> {
-    let res = guild_service::get_discovery_guilds(&state, params).await?;
+    let res = discovery_service::get_discovery_guilds(&state, params).await?;
     Ok(Json(res))
 }
 
@@ -33,7 +33,7 @@ async fn join_discovery_guild(
     auth: AuthUser,
     Path(guild_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    guild_service::add_member_to_guild(&state, &auth.user_id, &guild_id).await?;
+    member_service::add_member_to_guild(&state, &auth.user_id, &guild_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

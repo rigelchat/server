@@ -126,7 +126,7 @@ impl AppConfig {
             public_ws_url: require_env("PUBLIC_WS_URL"),
             cors_allowed_origins,
             database_url: require_env("DATABASE_URL"),
-            db_max_connections: env_parse("DB_MAX_CONNECTIONS", 5),
+            db_max_connections: env_parse("DB_MAX_CONNECTIONS", 16),
             auth: AuthConfig {
                 secret: require_env("AUTH_SECRET"),
                 login_mode,

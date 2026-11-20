@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
+use crate::constants::dialect::ClientDialect;
 use crate::models::channel::ChannelResponse;
 use crate::models::guild_member::{GatewayGuildMember, GuildMemberResponse};
 use crate::models::role::Role;
@@ -48,6 +49,8 @@ pub struct Guild {
     pub embed_splash_height: Option<u32>,
     pub vanity_url_code: Option<String>,
     pub owner_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<bool>,
     pub system_channel_id: Option<String>,
     pub system_channel_flags: u32,
     pub rules_channel_id: Option<String>,
@@ -105,6 +108,7 @@ impl From<BaseGuild> for Guild {
             embed_splash_height: None,
             vanity_url_code: g.vanity_url_code,
             owner_id: g.owner_id,
+            owner: None,
             system_channel_id: g.system_channel_id,
             system_channel_flags: g.system_channel_flags,
             rules_channel_id: g.rules_channel_id,
@@ -132,6 +136,15 @@ impl From<BaseGuild> for Guild {
             approximate_member_count: None,
             approximate_presence_count: None,
         }
+    }
+}
+
+impl Guild {
+    pub fn with_dialect_for_user(mut self, dialect: ClientDialect, user_id: &str) -> Self {
+        if dialect == ClientDialect::Discord {
+            self.owner = Some(self.owner_id == user_id);
+        }
+        self
     }
 }
 

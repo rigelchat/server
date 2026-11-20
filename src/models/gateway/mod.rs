@@ -33,9 +33,17 @@ pub struct HelloPayload {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct IdentifyPresence {
+    pub status: Option<String>,
+    pub afk: Option<bool>,
+    pub mobile: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct IdentifyPayload {
     pub token: String,
     pub properties: serde_json::Value,
     pub intents: Option<u64>,
     pub shard: Option<[u32; 2]>,
+    pub presence: Option<IdentifyPresence>,
 }

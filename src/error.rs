@@ -27,7 +27,9 @@ pub enum ApiErrorCode {
     UnknownMessage,
     UnknownInvite,
     UnknownMember,
+    InvalidChannelType,
     CannotSendEmptyMessage,
+    CannotSendMessagesInNonTextChannel,
     CannotEditOtherUserMessage,
     UserBannedFromGuild,
     Conflict,
@@ -53,7 +55,9 @@ impl ApiErrorCode {
             Self::UnknownMessage => "UNKNOWN_MESSAGE",
             Self::UnknownInvite => "UNKNOWN_INVITE",
             Self::UnknownMember => "UNKNOWN_MEMBER",
+            Self::InvalidChannelType => "INVALID_CHANNEL_TYPE",
             Self::CannotSendEmptyMessage => "CANNOT_SEND_EMPTY_MESSAGE",
+            Self::CannotSendMessagesInNonTextChannel => "CANNOT_SEND_MESSAGES_IN_NON_TEXT_CHANNEL",
             Self::CannotEditOtherUserMessage => "CANNOT_EDIT_OTHER_USER_MESSAGE",
             Self::UserBannedFromGuild => "USER_BANNED_FROM_GUILD",
             Self::Conflict => "CONFLICT",
@@ -67,6 +71,8 @@ impl ApiErrorCode {
     pub fn discord_code(self) -> u32 {
         match self {
             Self::InvalidFormBody => 50035,
+            Self::Unauthorized | Self::MissingAuthorization => 40001,
+            Self::InvalidAuthToken => 50014,
             Self::MissingPermissions => 50013,
             Self::UnknownChannel => 10003,
             Self::UnknownGuild => 10004,
@@ -76,6 +82,8 @@ impl ApiErrorCode {
             Self::UnknownUser => 10013,
             Self::MaxGuilds => 30001,
             Self::MaxInvites => 30016,
+            Self::InvalidChannelType => 50024,
+            Self::CannotSendMessagesInNonTextChannel => 50008,
             Self::CannotEditOtherUserMessage => 50005,
             Self::CannotSendEmptyMessage => 50006,
             Self::UserBannedFromGuild => 40007,
@@ -102,6 +110,7 @@ pub enum ValidationCode {
     ColorValueTooHigh,
     StringLengthInvalid,
     InvalidFormat,
+    CannotLeaveGuildAsOwner,
 }
 
 impl ValidationCode {
@@ -122,6 +131,7 @@ impl ValidationCode {
             Self::ColorValueTooHigh => "COLOR_VALUE_TOO_HIGH",
             Self::StringLengthInvalid => "STRING_LENGTH_INVALID",
             Self::InvalidFormat => "INVALID_FORMAT",
+            Self::CannotLeaveGuildAsOwner => "CANNOT_LEAVE_GUILD_AS_OWNER",
         }
     }
 }
@@ -314,6 +324,22 @@ impl AppError {
             StatusCode::BAD_REQUEST,
             ApiErrorCode::CannotSendEmptyMessage,
             "You can't send an empty message.",
+        )
+    }
+
+    pub fn cannot_send_in_non_text_channel() -> Self {
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::CannotSendMessagesInNonTextChannel,
+            "You can't send messages in a non-text channel.",
+        )
+    }
+
+    pub fn invalid_channel_type() -> Self {
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidChannelType,
+            "Invalid channel type.",
         )
     }
 

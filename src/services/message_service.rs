@@ -3,13 +3,17 @@ use serde_json::json;
 use sqlx::FromRow;
 
 use crate::AppState;
+use crate::constants::flags::PermissionFlags;
 use crate::constants::gateway::events;
-use crate::constants::limits::{DEFAULT_MESSAGES_PAGE_LIMIT, MAX_MESSAGES_PAGE_LIMIT, MAX_MESSAGE_LENGTH};
+use crate::constants::limits::{
+    DEFAULT_MESSAGES_PAGE_LIMIT, MAX_MESSAGE_LENGTH, MAX_MESSAGES_PAGE_LIMIT,
+};
 use crate::error::{AppError, ValidationCode};
+use crate::models::channel::ChannelType;
 use crate::models::message::{
     GatewayMessageEvent, GetMessagesQuery, Message, MessageDbRow, MessageMember, MessageType,
 };
-use crate::services::guild_service;
+use crate::services::{member_service, permission_service};
 use crate::utils::snowflake::DISCORD_SNOWFLAKE;
 
 #[derive(FromRow)]
@@ -24,9 +28,7 @@ async fn get_channel_meta(state: &AppState, channel_id: &str) -> Result<ChannelM
         .bind(channel_id)
         .fetch_optional(&state.db)
         .await?
-        .ok_or_else(|| {
-            AppError::unknown_channel()
-        })
+        .ok_or_else(AppError::unknown_channel)
 }
 
 async fn fetch_message_member(
@@ -84,9 +86,7 @@ async fn fetch_message(state: &AppState, message_id: &str) -> Result<Message, Ap
     .bind(message_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| {
-        AppError::unknown_message()
-    })?;
+    .ok_or_else(AppError::unknown_message)?;
 
     Ok(Message::from(row))
 }
@@ -108,35 +108,58 @@ pub async fn get_messages(
     query: GetMessagesQuery,
 ) -> Result<Vec<Message>, AppError> {
     let meta = get_channel_meta(state, channel_id).await?;
-    guild_service::require_member(state, &meta.guild_id, user_id).await?;
+    member_service::require_member(state, &meta.guild_id, user_id).await?;
+    if meta.channel_type == ChannelType::GuildCategory as u32 {
+        return Err(AppError::invalid_channel_type());
+    }
 
-    let limit = query.limit.unwrap_or(DEFAULT_MESSAGES_PAGE_LIMIT).clamp(1, MAX_MESSAGES_PAGE_LIMIT);
+    let perms = permission_service::require_channel_permission(
+        state,
+        &meta.guild_id,
+        channel_id,
+        user_id,
+        PermissionFlags::VIEW_CHANNEL,
+    )
+    .await?;
+
+    if !perms.contains(PermissionFlags::READ_MESSAGE_HISTORY) {
+        return Ok(vec![]);
+    }
+
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_MESSAGES_PAGE_LIMIT)
+        .clamp(1, MAX_MESSAGES_PAGE_LIMIT);
 
     let rows = if let Some(around) = &query.around {
-        let half_older = (limit / 2).max(1);
-        let half_newer = limit.saturating_sub(half_older).max(1);
+        let half_newer = limit / 2;
+        let mut newer = if half_newer > 0 {
+            let mut n = sqlx::query_as::<_, MessageDbRow>(&format!(
+                "{SELECT_MSG_COLS} WHERE m.channel_id = ? AND CAST(m.id AS UNSIGNED) > CAST(? AS UNSIGNED) ORDER BY CAST(m.id AS UNSIGNED) ASC LIMIT ?"
+            ))
+            .bind(channel_id)
+            .bind(around)
+            .bind(half_newer)
+            .fetch_all(&state.db)
+            .await?;
+            n.reverse();
+            n
+        } else {
+            Vec::new()
+        };
 
-        let mut newer = sqlx::query_as::<_, MessageDbRow>(&format!(
-            "{SELECT_MSG_COLS} WHERE m.channel_id = ? AND CAST(m.id AS UNSIGNED) > CAST(? AS UNSIGNED) ORDER BY CAST(m.id AS UNSIGNED) ASC LIMIT ?"
-        ))
-        .bind(channel_id)
-        .bind(around)
-        .bind(half_newer)
-        .fetch_all(&state.db)
-        .await?;
-        newer.reverse();
+        let remaining = limit.saturating_sub(newer.len() as u32).max(1);
 
         let older = sqlx::query_as::<_, MessageDbRow>(&format!(
             "{SELECT_MSG_COLS} WHERE m.channel_id = ? AND CAST(m.id AS UNSIGNED) <= CAST(? AS UNSIGNED) ORDER BY CAST(m.id AS UNSIGNED) DESC LIMIT ?"
         ))
         .bind(channel_id)
         .bind(around)
-        .bind(half_older)
+        .bind(remaining)
         .fetch_all(&state.db)
         .await?;
 
         newer.extend(older);
-        newer.truncate(limit as usize);
         newer
     } else if let Some(after) = &query.after {
         let mut rows = sqlx::query_as::<_, MessageDbRow>(&format!(
@@ -191,10 +214,24 @@ pub async fn create_message(
     }
 
     let meta = get_channel_meta(state, channel_id).await?;
-    guild_service::require_member(state, &meta.guild_id, user_id).await?;
+    member_service::require_member(state, &meta.guild_id, user_id).await?;
+    if meta.channel_type == ChannelType::GuildCategory as u32 {
+        return Err(AppError::cannot_send_in_non_text_channel());
+    }
+
+    permission_service::require_channel_permission(
+        state,
+        &meta.guild_id,
+        channel_id,
+        user_id,
+        PermissionFlags::VIEW_CHANNEL | PermissionFlags::SEND_MESSAGES,
+    )
+    .await?;
 
     let message_id = DISCORD_SNOWFLAKE.generate(None).to_string();
     let timestamp = Utc::now().timestamp_millis() as u64;
+
+    let mut tx = state.db.begin().await?;
 
     sqlx::query(
         "INSERT INTO messages (id, channel_id, author_id, content, timestamp, type) VALUES (?, ?, ?, ?, ?, ?)",
@@ -205,8 +242,16 @@ pub async fn create_message(
     .bind(&content)
     .bind(timestamp)
     .bind(MessageType::Default as u32)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+
+    sqlx::query("UPDATE channels SET last_message_id = ? WHERE id = ?")
+        .bind(&message_id)
+        .bind(channel_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
 
     let mut msg = fetch_message(state, &message_id).await?;
     msg.nonce = nonce;
@@ -219,9 +264,14 @@ pub async fn create_message(
         member,
     };
 
-    state
-        .dispatch_guild(events::MESSAGE_CREATE, &event, &meta.guild_id)
-        .await;
+    permission_service::dispatch_channel(
+        state,
+        &meta.guild_id,
+        channel_id,
+        events::MESSAGE_CREATE,
+        &event,
+    )
+    .await;
 
     Ok(msg)
 }
@@ -246,7 +296,15 @@ pub async fn edit_message(
     }
 
     let meta = get_channel_meta(state, channel_id).await?;
-    guild_service::require_member(state, &meta.guild_id, user_id).await?;
+    member_service::require_member(state, &meta.guild_id, user_id).await?;
+    permission_service::require_channel_permission(
+        state,
+        &meta.guild_id,
+        channel_id,
+        user_id,
+        PermissionFlags::VIEW_CHANNEL,
+    )
+    .await?;
 
     let author_id = sqlx::query_scalar::<_, String>(
         "SELECT author_id FROM messages WHERE id = ? AND channel_id = ?",
@@ -255,9 +313,7 @@ pub async fn edit_message(
     .bind(channel_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| {
-        AppError::unknown_message()
-    })?;
+    .ok_or_else(AppError::unknown_message)?;
 
     if author_id != user_id {
         return Err(AppError::cannot_edit_other_message());
@@ -281,9 +337,14 @@ pub async fn edit_message(
         member,
     };
 
-    state
-        .dispatch_guild(events::MESSAGE_UPDATE, &event, &meta.guild_id)
-        .await;
+    permission_service::dispatch_channel(
+        state,
+        &meta.guild_id,
+        channel_id,
+        events::MESSAGE_UPDATE,
+        &event,
+    )
+    .await;
 
     Ok(updated)
 }
@@ -295,7 +356,15 @@ pub async fn delete_message(
     user_id: &str,
 ) -> Result<(), AppError> {
     let meta = get_channel_meta(state, channel_id).await?;
-    guild_service::require_member(state, &meta.guild_id, user_id).await?;
+    member_service::require_member(state, &meta.guild_id, user_id).await?;
+    let perms = permission_service::require_channel_permission(
+        state,
+        &meta.guild_id,
+        channel_id,
+        user_id,
+        PermissionFlags::VIEW_CHANNEL,
+    )
+    .await?;
 
     let author_id = sqlx::query_scalar::<_, String>(
         "SELECT author_id FROM messages WHERE id = ? AND channel_id = ?",
@@ -304,30 +373,51 @@ pub async fn delete_message(
     .bind(channel_id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| {
-        AppError::unknown_message()
-    })?;
+    .ok_or_else(AppError::unknown_message)?;
 
-    if author_id != user_id {
+    if author_id != user_id && !perms.contains(PermissionFlags::MANAGE_MESSAGES) {
         return Err(AppError::missing_permissions());
     }
 
+    let mut tx = state.db.begin().await?;
+
     sqlx::query("DELETE FROM messages WHERE id = ?")
         .bind(message_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
 
-    state
-        .dispatch_guild(
-            events::MESSAGE_DELETE,
-            &json!({
-                "id": message_id,
-                "channel_id": channel_id,
-                "guild_id": meta.guild_id,
-            }),
-            &meta.guild_id,
+    sqlx::query(
+        r#"
+        UPDATE channels
+        SET last_message_id = (
+            SELECT m.id FROM messages m
+            WHERE m.channel_id = ?
+            ORDER BY CAST(m.id AS UNSIGNED) DESC
+            LIMIT 1
         )
-        .await;
+        WHERE id = ? AND last_message_id = ?
+        "#,
+    )
+    .bind(channel_id)
+    .bind(channel_id)
+    .bind(message_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    permission_service::dispatch_channel(
+        state,
+        &meta.guild_id,
+        channel_id,
+        events::MESSAGE_DELETE,
+        &json!({
+            "id": message_id,
+            "channel_id": channel_id,
+            "guild_id": meta.guild_id,
+        }),
+    )
+    .await;
 
     Ok(())
 }

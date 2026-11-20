@@ -10,10 +10,10 @@ mod services;
 mod state;
 mod utils;
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use axum::{Router, http::HeaderValue};
-use tokio::{net::TcpListener, sync::RwLock};
+use tokio::net::TcpListener;
 use tower_http::{
     cors::{AllowOrigin, Any as CorsAny, CorsLayer},
     services::ServeDir,
@@ -23,6 +23,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::AppConfig;
+use crate::gateway::hub::GatewayHub;
 use crate::state::AppState;
 
 #[tokio::main]
@@ -62,11 +63,10 @@ async fn main() {
     };
 
     let addr = format!("{}:{}", config.host, config.port);
-    let state = AppState {
-        config,
-        db,
-        sessions: Arc::new(RwLock::new(HashMap::new())),
-    };
+    let hub = GatewayHub::new();
+    hub.spawn_heartbeat_reaper();
+
+    let state = AppState { config, db, hub };
 
     let app = Router::new()
         .nest_service("/static", ServeDir::new("static"))
@@ -78,5 +78,34 @@ async fn main() {
 
     let listener = TcpListener::bind(&addr).await.unwrap();
     info!("API listening at http://{}", listener.local_addr().unwrap());
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .unwrap();
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    info!("Shutdown signal received, draining server...");
 }

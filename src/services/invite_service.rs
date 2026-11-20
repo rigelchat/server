@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use chrono::Utc;
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -8,11 +6,12 @@ use crate::AppState;
 use crate::constants::flags::PermissionFlags;
 use crate::constants::limits::{MAX_INVITES_PER_GUILD, MAX_INVITE_AGE_SECONDS, MAX_INVITE_USES};
 use crate::error::AppError;
+use crate::models::channel::ChannelType;
 use crate::models::invite::{
     CreateInviteRequest, CreatedInvite, InviteChannel, InviteGuild, InviteResponse, InviteType,
 };
 use crate::models::serde_helpers::millis_to_iso;
-use crate::services::{guild_service, user_service};
+use crate::services::{member_service, permission_service, user_service};
 
 #[derive(FromRow)]
 struct InviteDetailsRow {
@@ -34,6 +33,7 @@ struct InviteDetailsRow {
 #[derive(FromRow)]
 struct InviteDeleteRow {
     guild_id: String,
+    channel_id: String,
     inviter_id: String,
     owner_id: String,
 }
@@ -58,9 +58,7 @@ async fn fetch_invite_details(
     .bind(code)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| {
-        AppError::unknown_invite()
-    })?;
+    .ok_or_else(AppError::unknown_invite)?;
 
     let now = Utc::now().timestamp_millis() as u64;
     if row.expires_at.is_some_and(|exp| now > exp)
@@ -75,17 +73,10 @@ async fn fetch_invite_details(
             .fetch_one(&state.db)
             .await?;
 
-    let online_count = {
-        let sessions = state.sessions.read().await;
-        sessions
-            .values()
-            .filter(|s| s.guilds.contains(&row.guild_id))
-            .filter_map(|s| s.user_id.as_ref())
-            .collect::<HashSet<_>>()
-            .len()
-    };
-
-    let inviter = user_service::get_partial_user(state, &row.inviter_id).await.ok();
+    let online_count = state.count_guild_online(&row.guild_id).await as usize;
+    let inviter = user_service::get_partial_user(state, &row.inviter_id)
+        .await
+        .ok();
 
     let invite = InviteResponse {
         code: row.code.clone(),
@@ -131,15 +122,26 @@ pub async fn create_channel_invite(
     user_id: &str,
     payload: CreateInviteRequest,
 ) -> Result<CreatedInvite, AppError> {
-    let guild_id = sqlx::query_scalar::<_, String>("SELECT guild_id FROM channels WHERE id = ?")
-        .bind(channel_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| {
-            AppError::unknown_channel()
-        })?;
+    let (guild_id, channel_type): (String, u32) =
+        sqlx::query_as("SELECT guild_id, type FROM channels WHERE id = ?")
+            .bind(channel_id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(AppError::unknown_channel)?;
 
-    guild_service::require_member(state, &guild_id, user_id).await?;
+    if channel_type == ChannelType::GuildCategory as u32 {
+        return Err(AppError::invalid_channel_type());
+    }
+
+    member_service::require_member(state, &guild_id, user_id).await?;
+    permission_service::require_channel_permission(
+        state,
+        &guild_id,
+        channel_id,
+        user_id,
+        PermissionFlags::VIEW_CHANNEL | PermissionFlags::CREATE_INSTANT_INVITE,
+    )
+    .await?;
 
     let invite_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invites WHERE guild_id = ?")
         .bind(&guild_id)
@@ -191,10 +193,10 @@ pub async fn accept_invite(
     user_id: &str,
 ) -> Result<InviteResponse, AppError> {
     let (row, mut invite) = fetch_invite_details(state, code).await?;
-    let already_member = guild_service::is_member(state, &row.guild_id, user_id).await?;
+    let already_member = member_service::is_member(state, &row.guild_id, user_id).await?;
 
     if !already_member {
-        guild_service::add_member_to_guild(state, user_id, &row.guild_id).await?;
+        member_service::add_member_to_guild(state, user_id, &row.guild_id).await?;
         sqlx::query("UPDATE invites SET uses = uses + 1 WHERE code = ?")
             .bind(code)
             .execute(&state.db)
@@ -215,7 +217,7 @@ pub async fn delete_invite(
 ) -> Result<(), AppError> {
     let row = sqlx::query_as::<_, InviteDeleteRow>(
         r#"
-        SELECT i.guild_id, i.inviter_id, g.owner_id
+        SELECT i.guild_id, i.channel_id, i.inviter_id, g.owner_id
         FROM invites i
         INNER JOIN guilds g ON g.id = i.guild_id
         WHERE i.code = ?
@@ -224,33 +226,24 @@ pub async fn delete_invite(
     .bind(code)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| {
-        AppError::unknown_invite()
-    })?;
+    .ok_or_else(AppError::unknown_invite)?;
 
     if row.inviter_id != user_id && row.owner_id != user_id {
-        guild_service::require_member(state, &row.guild_id, user_id).await?;
+        member_service::require_member(state, &row.guild_id, user_id).await?;
+        let guild_perms =
+            permission_service::compute_guild_permissions(state, &row.guild_id, user_id).await?;
 
-        let perms: Vec<u64> = sqlx::query_scalar(
-            r#"
-            SELECT r.permissions FROM roles r
-            WHERE r.guild_id = ? AND (
-                r.id = ?
-                OR r.id IN (SELECT gmr.role_id FROM guild_member_roles gmr WHERE gmr.guild_id = ? AND gmr.user_id = ?)
+        if !guild_perms.intersects(PermissionFlags::MANAGE_GUILD | PermissionFlags::ADMINISTRATOR) {
+            let ch_perms = permission_service::compute_user_channel_permissions(
+                state,
+                &row.guild_id,
+                &row.channel_id,
+                user_id,
             )
-            "#,
-        )
-        .bind(&row.guild_id)
-        .bind(&row.guild_id)
-        .bind(&row.guild_id)
-        .bind(user_id)
-        .fetch_all(&state.db)
-        .await?;
-
-        let combined = perms.into_iter().fold(0u64, |acc, p| acc | p);
-        let flags = PermissionFlags::from_bits_truncate(combined);
-        if !flags.intersects(PermissionFlags::MANAGE_GUILD | PermissionFlags::ADMINISTRATOR) {
-            return Err(AppError::missing_permissions());
+            .await?;
+            if !ch_perms.contains(PermissionFlags::MANAGE_CHANNELS) {
+                return Err(AppError::missing_permissions());
+            }
         }
     }
 

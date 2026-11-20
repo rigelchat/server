@@ -74,3 +74,25 @@ pub fn verify(token: &str, secret: &str) -> Result<TokenClaims, String> {
         session_id: session_id.to_string(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sign_and_verify_roundtrip() {
+        let secret = "super_secret_test_key";
+        let data = sign("1234567890", secret);
+        let claims = verify(&data.token, secret).expect("token should verify");
+        assert_eq!(claims.user_id, "1234567890");
+        assert_eq!(claims.session_id, data.session_id);
+    }
+
+    #[test]
+    fn reject_tampered_or_wrong_secret() {
+        let data = sign("42", "secret_a");
+        assert!(verify(&data.token, "secret_b").is_err());
+        assert!(verify(&format!("{}x", data.token), "secret_a").is_err());
+        assert!(verify("not.enough", "secret_a").is_err());
+    }
+}

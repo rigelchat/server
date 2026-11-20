@@ -1,5 +1,10 @@
 pub mod auth_service;
+pub mod channel_service;
+pub mod discovery_service;
 pub mod guild_service;
 pub mod invite_service;
+pub mod member_service;
 pub mod message_service;
+pub mod permission_service;
+pub mod role_service;
 pub mod user_service;

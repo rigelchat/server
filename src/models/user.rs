@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
@@ -68,6 +70,8 @@ pub struct CurrentUser {
     pub verified: bool,
     pub has_verified_phone: bool,
     pub mfa_enabled: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bot: bool,
     pub authenticator_types: Vec<u8>,
     pub nsfw_allowed: bool,
     pub flags: u32,
@@ -136,6 +140,7 @@ impl CurrentUser {
             verified: user.verified,
             has_verified_phone: false,
             mfa_enabled: false,
+            bot: user.bot,
             authenticator_types: vec![],
             nsfw_allowed: true,
             flags: user.public_flags,
@@ -186,6 +191,21 @@ impl CurrentUser {
             self.public_flags = Some(self.flags);
         }
         self
+    }
+}
+
+impl From<&CurrentUser> for PartialUser {
+    fn from(u: &CurrentUser) -> Self {
+        Self {
+            id: u.id.clone(),
+            username: u.username.clone(),
+            discriminator: u.discriminator.clone(),
+            global_name: u.global_name.clone(),
+            avatar: u.avatar.clone(),
+            avatar_color: u.avatar_color,
+            bot: u.bot,
+            flags: u.flags,
+        }
     }
 }
 
@@ -429,6 +449,44 @@ impl Default for UserSettings {
     }
 }
 
+pub fn reconcile_guild_folders(folders: &mut Vec<GuildFolder>, actual_guild_ids: &[String]) {
+    let actual: HashSet<&str> = actual_guild_ids.iter().map(String::as_str).collect();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    folders.retain_mut(|folder| {
+        folder
+            .guild_ids
+            .retain(|gid| actual.contains(gid.as_str()) && seen.insert(gid.clone()));
+        folder.id == -1 || !folder.guild_ids.is_empty()
+    });
+
+    let missing: Vec<String> = actual_guild_ids
+        .iter()
+        .filter(|gid| !seen.contains(gid.as_str()))
+        .cloned()
+        .collect();
+
+    if let Some(uncat) = folders.iter_mut().find(|f| f.id == -1) {
+        if !missing.is_empty() {
+            let mut updated = missing;
+            updated.append(&mut uncat.guild_ids);
+            uncat.guild_ids = updated;
+        }
+    } else {
+        folders.insert(
+            0,
+            GuildFolder {
+                id: -1,
+                name: None,
+                color: 0,
+                flags: 0,
+                icon: "folder".to_string(),
+                guild_ids: missing,
+            },
+        );
+    }
+}
+
 impl UserSettings {
     pub fn from_row(row: UserSettingsRow, guild_ids: Vec<String>) -> Self {
         let extras: UserSettingsExtras = row
@@ -437,16 +495,8 @@ impl UserSettings {
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
 
-        let guild_folders = extras.guild_folders.unwrap_or_else(|| {
-            vec![GuildFolder {
-                id: -1,
-                name: None,
-                color: 0,
-                flags: 0,
-                icon: "folder".to_string(),
-                guild_ids,
-            }]
-        });
+        let mut guild_folders = extras.guild_folders.unwrap_or_default();
+        reconcile_guild_folders(&mut guild_folders, &guild_ids);
 
         Self {
             status: row.status,
@@ -504,4 +554,48 @@ pub struct GuildFolder {
     pub flags: u32,
     pub icon: String,
     pub guild_ids: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconcile_keeps_valid_dedupes_and_prepends_new() {
+        let mut folders = vec![
+            GuildFolder {
+                id: 1,
+                name: Some("Gaming".to_string()),
+                color: 0,
+                flags: 0,
+                icon: "folder".to_string(),
+                guild_ids: vec!["g1".to_string(), "g_left".to_string()],
+            },
+            GuildFolder {
+                id: 2,
+                name: Some("EmptyAfterLeave".to_string()),
+                color: 0,
+                flags: 0,
+                icon: "folder".to_string(),
+                guild_ids: vec!["g_left_2".to_string()],
+            },
+            GuildFolder {
+                id: -1,
+                name: None,
+                color: 0,
+                flags: 0,
+                icon: "folder".to_string(),
+                guild_ids: vec!["g1".to_string(), "g2".to_string()],
+            },
+        ];
+
+        let actual = vec!["g1".to_string(), "g2".to_string(), "g3".to_string()];
+        reconcile_guild_folders(&mut folders, &actual);
+
+        assert_eq!(folders.len(), 2);
+        assert_eq!(folders[0].id, 1);
+        assert_eq!(folders[0].guild_ids, vec!["g1".to_string()]);
+        assert_eq!(folders[1].id, -1);
+        assert_eq!(folders[1].guild_ids, vec!["g3".to_string(), "g2".to_string()]);
+    }
 }

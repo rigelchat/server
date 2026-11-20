@@ -13,7 +13,7 @@ use crate::error::AppError;
 use crate::extractors::AuthUser;
 use crate::models::channel::ChannelResponse;
 use crate::models::invite::{CreateInviteRequest, CreatedInvite};
-use crate::services::{guild_service, invite_service};
+use crate::services::{channel_service, invite_service};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -27,7 +27,7 @@ async fn get_channel(
     auth: AuthUser,
     Path(channel_id): Path<String>,
 ) -> Result<Json<ChannelResponse>, AppError> {
-    let channel = guild_service::get_channel(&state, &channel_id, &auth.user_id).await?;
+    let channel = channel_service::get_channel(&state, &channel_id, &auth.user_id).await?;
     Ok(Json(channel))
 }
 

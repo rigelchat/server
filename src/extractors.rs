@@ -1,11 +1,12 @@
 use axum::{
-    extract::{FromRef, FromRequestParts},
+    Json,
+    extract::{FromRef, FromRequest, FromRequestParts, Request, rejection::JsonRejection},
     http::{header::AUTHORIZATION, request::Parts},
 };
 
 use crate::{
     constants::dialect::ClientDialect,
-    error::AppError,
+    error::{AppError, ValidationCode},
     state::AppState,
     utils::token::{self, TokenClaims},
 };
@@ -22,6 +23,27 @@ where
         }
 
         Ok(ClientDialect::from_http(&parts.headers))
+    }
+}
+
+pub struct AppJson<T>(pub T);
+
+impl<S, T> FromRequest<S> for AppJson<T>
+where
+    Json<T>: FromRequest<S, Rejection = JsonRejection>,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(Self(value)),
+            Err(rejection) => Err(AppError::validation(
+                "root",
+                ValidationCode::InvalidFormat,
+                rejection.to_string(),
+            )),
+        }
     }
 }
 
@@ -44,9 +66,7 @@ where
             .headers
             .get(AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| {
-                AppError::missing_auth()
-            })?;
+            .ok_or_else(AppError::missing_auth)?;
 
         let token = raw_header
             .strip_prefix("Bearer ")
@@ -57,12 +77,13 @@ where
         let TokenClaims {
             user_id,
             session_id,
-        } = token::verify(token, &state.config.auth.secret).map_err(|err| {
-            AppError::invalid_token(err)
-        })?;
+        } = token::verify(token, &state.config.auth.secret).map_err(AppError::invalid_token)?;
 
-        if !crate::services::auth_service::is_session_active(&state, &session_id, &user_id).await? {
-            return Err(AppError::invalid_token("Invalid or expired authorization token"));
+        if !crate::services::auth_service::is_session_active(&state, &session_id, &user_id).await?
+        {
+            return Err(AppError::invalid_token(
+                "Invalid or expired authorization token",
+            ));
         }
 
         Ok(Self {

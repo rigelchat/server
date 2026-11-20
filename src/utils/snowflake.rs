@@ -79,8 +79,8 @@ impl Snowflake {
         let timestamp = opts.timestamp.unwrap_or_else(|| {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .expect("Time went backwards")
-                .as_millis() as u64
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(self.epoch)
         });
 
         let worker_id = opts.worker_id.unwrap_or(self.worker_id) & MAXIMUM_WORKER_ID;
@@ -91,7 +91,7 @@ impl Snowflake {
             return current & MAXIMUM_INCREMENT;
         }) as u64;
 
-        return ((timestamp - self.epoch) << 22) | (worker_id << 17) | (process_id << 12) | increment;
+        return (timestamp.saturating_sub(self.epoch) << 22) | (worker_id << 17) | (process_id << 12) | increment;
     }
 
     pub fn deconstruct(&self, id: u64) -> DeconstructedSnowflake {

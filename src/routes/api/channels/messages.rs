@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::AppState;
 use crate::error::AppError;
-use crate::extractors::AuthUser;
+use crate::extractors::{AppJson, AuthUser};
 use crate::models::message::{GetMessagesQuery, Message};
 use crate::models::serde_helpers::deserialize_opt_string_or_int;
 use crate::services::message_service;
@@ -46,7 +46,7 @@ async fn create_message(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(channel_id): Path<String>,
-    Json(payload): Json<CreateMessageRequest>,
+    AppJson(payload): AppJson<CreateMessageRequest>,
 ) -> Result<Json<Message>, AppError> {
     let msg = message_service::create_message(
         &state,
@@ -63,7 +63,7 @@ async fn edit_message(
     State(state): State<AppState>,
     auth: AuthUser,
     Path((channel_id, message_id)): Path<(String, String)>,
-    Json(payload): Json<EditMessageRequest>,
+    AppJson(payload): AppJson<EditMessageRequest>,
 ) -> Result<Json<Message>, AppError> {
     let updated = message_service::edit_message(
         &state,

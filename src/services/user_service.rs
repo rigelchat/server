@@ -93,7 +93,7 @@ pub async fn update_user(
             let trimmed = name.trim();
             if trimmed.is_empty() {
                 user_sep.push_bind_unseparated(Option::<String>::None);
-            } else if trimmed.len() > MAX_GLOBAL_NAME_LENGTH {
+            } else if trimmed.chars().count() > MAX_GLOBAL_NAME_LENGTH {
                 return Err(AppError::validation(
                     "global_name",
                     ValidationCode::GlobalNameLengthInvalid,
@@ -133,7 +133,7 @@ pub async fn update_user(
     if let Some(bio) = &payload.bio {
         let value = bio.as_deref().map(str::trim).filter(|s| !s.is_empty());
         if let Some(text) = value {
-            if text.len() > MAX_BIO_LENGTH {
+            if text.chars().count() > MAX_BIO_LENGTH {
                 return Err(AppError::validation(
                     "bio",
                     ValidationCode::ContentExceedsMaxLength,
@@ -149,7 +149,7 @@ pub async fn update_user(
     if let Some(pronouns) = &payload.pronouns {
         let value = pronouns.as_deref().map(str::trim).filter(|s| !s.is_empty());
         if let Some(text) = value {
-            if text.len() > MAX_PRONOUNS_LENGTH {
+            if text.chars().count() > MAX_PRONOUNS_LENGTH {
                 return Err(AppError::validation(
                     "pronouns",
                     ValidationCode::ContentExceedsMaxLength,
@@ -191,6 +191,9 @@ pub async fn update_user(
     tx.commit().await?;
 
     let updated = get_current_user(state, user_id).await?;
+    if has_user_updates {
+        state.hub.update_partial_user(&PartialUser::from(&updated));
+    }
     if has_user_updates || has_profile_updates {
         state.dispatch_user(events::USER_UPDATE, &updated, user_id).await;
         if has_user_updates {
@@ -290,7 +293,7 @@ pub async fn update_profile(
     if let Some(bio) = &payload.bio {
         let value = bio.as_deref().map(str::trim).filter(|s| !s.is_empty());
         if let Some(text) = value {
-            if text.len() > MAX_BIO_LENGTH {
+            if text.chars().count() > MAX_BIO_LENGTH {
                 return Err(AppError::validation(
                     "bio",
                     ValidationCode::ContentExceedsMaxLength,
@@ -306,7 +309,7 @@ pub async fn update_profile(
     if let Some(pronouns) = &payload.pronouns {
         let value = pronouns.as_deref().map(str::trim).filter(|s| !s.is_empty());
         if let Some(text) = value {
-            if text.len() > MAX_PRONOUNS_LENGTH {
+            if text.chars().count() > MAX_PRONOUNS_LENGTH {
                 return Err(AppError::validation(
                     "pronouns",
                     ValidationCode::ContentExceedsMaxLength,
@@ -377,9 +380,14 @@ pub async fn get_settings(state: &AppState, user_id: &str) -> Result<UserSetting
             .await
             .unwrap_or_default();
 
-    Ok(row
-        .map(|r| UserSettings::from_row(r, guild_ids))
-        .unwrap_or_default())
+    Ok(match row {
+        Some(r) => UserSettings::from_row(r, guild_ids),
+        None => {
+            let mut s = UserSettings::default();
+            crate::models::user::reconcile_guild_folders(&mut s.guild_folders, &guild_ids);
+            s
+        }
+    })
 }
 
 pub async fn update_settings(
@@ -561,12 +569,10 @@ pub async fn update_settings(
     }
 
     if let Some(new_status) = &payload.status {
-        let mut sessions = state.sessions.write().await;
-        for session in sessions.values_mut() {
-            if session.user_id.as_deref() == Some(user_id) {
-                session.status = new_status.clone();
-            }
-        }
+        state.hub.set_user_status(user_id, new_status);
+    }
+    if custom_status_changed {
+        state.hub.set_custom_status(user_id, settings.custom_status.clone());
     }
 
     if status_changed || custom_status_changed {

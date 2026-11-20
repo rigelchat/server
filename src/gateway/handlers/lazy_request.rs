@@ -5,13 +5,16 @@ use tracing::error;
 
 use crate::AppState;
 use crate::constants::dialect::ClientDialect;
+use crate::constants::flags::PermissionFlags;
 use crate::constants::gateway::events;
+use crate::models::channel::{ChannelOverwriteRow, PermissionOverwrite};
 use crate::models::gateway::lazy_request::{
     GuildMemberListUpdate, LazyListAction, LazyRequestPayload, MemberListClientStatus,
     MemberListGroup, MemberListItem, MemberListMember, MemberListPresence, MemberListSyncOp,
 };
 use crate::models::guild_member::{GuildMemberRole, GuildMemberUserRef};
 use crate::models::user::{CustomStatus, PartialUser, UserSettingsExtras};
+use crate::services::permission_service::{self, RolePerm};
 
 use super::presence;
 
@@ -142,21 +145,37 @@ impl GuildMemberListSnapshot {
     }
 }
 
-async fn fetch_snapshot(state: &AppState, guild_id: &str) -> Option<GuildMemberListSnapshot> {
-    let live_states: HashMap<String, (Vec<String>, bool, bool)> = {
-        let sessions = state.sessions.read().await;
-        let mut map: HashMap<String, (Vec<String>, bool, bool)> = HashMap::new();
-        for s in sessions.values() {
-            let Some(uid) = &s.user_id else {
-                continue;
-            };
-            let entry = map.entry(uid.clone()).or_insert_with(|| (Vec::new(), true, false));
-            entry.0.push(s.status.clone());
-            entry.1 &= s.afk;
-            entry.2 |= s.mobile;
-        }
-        map
-    };
+async fn fetch_snapshot(
+    state: &AppState,
+    guild_id: &str,
+    channel_id: &str,
+) -> Option<GuildMemberListSnapshot> {
+    let owner_id: String = sqlx::query_scalar("SELECT owner_id FROM guilds WHERE id = ?")
+        .bind(guild_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()?;
+
+    let guild_roles: Vec<RolePerm> =
+        sqlx::query_as("SELECT id, permissions FROM roles WHERE guild_id = ?")
+            .bind(guild_id)
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default();
+
+    let overwrites: Vec<PermissionOverwrite> = sqlx::query_as::<_, ChannelOverwriteRow>(
+        "SELECT channel_id, type, target_id, allow, deny FROM channel_permission_overwrites WHERE channel_id = ?",
+    )
+    .bind(channel_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(PermissionOverwrite::from)
+    .collect();
+
+    let live_states = state.hub.guild_live_states(guild_id);
 
     let member_rows = match sqlx::query_as::<_, LazyMemberRow>(
         r#"
@@ -200,14 +219,29 @@ async fn fetch_snapshot(state: &AppState, guild_id: &str) -> Option<GuildMemberL
     let mut offline_members = Vec::new();
 
     for row in member_rows {
-        let (status, afk, mobile) = match live_states.get(&row.user_id) {
-            Some((statuses, all_afk, any_mobile)) => {
-                let combined = presence::combined_status(statuses.iter().map(String::as_str));
-                let pub_st = presence::public_status(combined);
-                (pub_st, *all_afk && !any_mobile, *any_mobile)
-            }
-            None => ("offline", false, false),
-        };
+        let roles = roles_by_user.remove(&row.user_id).unwrap_or_default();
+        let base = permission_service::compute_base_permissions(
+            &owner_id,
+            guild_id,
+            &row.user_id,
+            &guild_roles,
+            &roles,
+        );
+        let ch_perms = permission_service::compute_channel_permissions(
+            base,
+            guild_id,
+            &row.user_id,
+            &roles,
+            &overwrites,
+        );
+        if !ch_perms.contains(PermissionFlags::VIEW_CHANNEL) {
+            continue;
+        }
+
+        let (status, afk, mobile) = live_states
+            .get(&row.user_id)
+            .copied()
+            .unwrap_or(("offline", false, false));
 
         let is_visibly_online = status != "offline";
         let custom_status = if is_visibly_online {
@@ -219,7 +253,6 @@ async fn fetch_snapshot(state: &AppState, guild_id: &str) -> Option<GuildMemberL
             None
         };
 
-        let roles = roles_by_user.remove(&row.user_id).unwrap_or_default();
         let member = SnapshotMember {
             user: PartialUser {
                 id: row.user_id,
@@ -259,99 +292,139 @@ pub async fn handle(session_id: &str, state: &AppState, payload: LazyRequestPayl
         return;
     }
 
-    let mut to_send: Vec<(String, String, [i64; 2], ClientDialect)> = Vec::new();
-    let mut member_presences: Vec<(String, Vec<String>, ClientDialect)> = Vec::new();
+    let Some(session) = state.hub.get(session_id) else {
+        return;
+    };
+    let Some(user_id) = session.user_id() else {
+        return;
+    };
 
-    {
-        let mut sessions = state.sessions.write().await;
-        let Some(session) = sessions.get_mut(session_id) else {
-            return;
-        };
-        if session.user_id.is_none() {
-            return;
-        }
+    let dialect = session.dialect();
+    let mut to_send: Vec<(String, String, [i64; 2])> = Vec::new();
+    let mut member_presences: Vec<(String, Vec<String>)> = Vec::new();
 
-        for action in actions {
-            match action {
-                LazyListAction::Subscribe {
-                    guild_id,
-                    channel_id,
-                    range,
-                } => {
-                    if !session.guilds.contains(&guild_id) {
-                        continue;
-                    }
-                    session
-                        .member_list_subscriptions
-                        .insert(guild_id.clone(), (channel_id.clone(), range));
-                    to_send.push((guild_id, channel_id, range, session.dialect));
+    for action in actions {
+        match action {
+            LazyListAction::Subscribe {
+                guild_id,
+                channel_id,
+                range,
+            } => {
+                if !session.has_guild(&guild_id) {
+                    continue;
                 }
-                LazyListAction::Unsubscribe { guild_id } => {
-                    session.member_list_subscriptions.remove(&guild_id);
+                let allowed = permission_service::compute_user_channel_permissions(
+                    state,
+                    &guild_id,
+                    &channel_id,
+                    &user_id,
+                )
+                .await
+                .is_ok_and(|p| {
+                    p.contains(
+                        PermissionFlags::VIEW_CHANNEL | PermissionFlags::VIEW_CHANNEL_MEMBERS,
+                    )
+                });
+                if !allowed {
+                    session.remove_member_list_subscription(&guild_id);
+                    continue;
                 }
-                LazyListAction::SubscribeMembers { guild_id, user_ids } => {
-                    if session.guilds.contains(&guild_id) {
-                        member_presences.push((guild_id, user_ids, session.dialect));
-                    }
+                session.set_member_list_subscription(guild_id.clone(), channel_id.clone(), range);
+                to_send.push((guild_id, channel_id, range));
+            }
+            LazyListAction::Unsubscribe { guild_id } => {
+                session.remove_member_list_subscription(&guild_id);
+            }
+            LazyListAction::SubscribeMembers { guild_id, user_ids } => {
+                if session.has_guild(&guild_id) {
+                    member_presences.push((guild_id, user_ids));
                 }
             }
         }
     }
 
-    for (guild_id, user_ids, dialect) in member_presences {
-        for uid in user_ids.into_iter().take(1000) {
-            let payload =
-                presence::build_presence_payload(state, &uid, Some(&guild_id), dialect).await;
-            let sessions = state.sessions.read().await;
-            if let Some(session) = sessions.get(session_id) {
-                session.dispatch(events::PRESENCE_UPDATE, payload).await;
-            }
+    for (guild_id, user_ids) in member_presences {
+        let requested: Vec<String> = user_ids.into_iter().take(1000).collect();
+        if requested.is_empty() {
+            continue;
+        }
+
+        let mut qb = sqlx::QueryBuilder::<sqlx::MySql>::new(
+            "SELECT user_id FROM guild_members WHERE guild_id = ",
+        );
+        qb.push_bind(&guild_id);
+        qb.push(" AND user_id IN (");
+        let mut sep = qb.separated(", ");
+        for uid in &requested {
+            sep.push_bind(uid);
+        }
+        qb.push(")");
+
+        let valid_ids: Vec<String> = qb
+            .build_query_as::<(String,)>()
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(uid,)| uid)
+            .collect();
+
+        let payloads =
+            presence::build_presence_payloads(state, &valid_ids, Some(&guild_id), dialect).await;
+        for payload in payloads {
+            session.dispatch(events::PRESENCE_UPDATE, payload);
         }
     }
 
-    for (guild_id, channel_id, range, dialect) in to_send {
-        let Some(snapshot) = fetch_snapshot(state, &guild_id).await else {
+    for (guild_id, channel_id, range) in to_send {
+        let Some(snapshot) = fetch_snapshot(state, &guild_id, &channel_id).await else {
             continue;
         };
         let update = snapshot.build_update(&guild_id, &channel_id, range, dialect);
-        let sessions = state.sessions.read().await;
-        if let Some(session) = sessions.get(session_id) {
-            session
-                .dispatch(events::GUILD_MEMBER_LIST_UPDATE, update)
-                .await;
-        }
+        session.dispatch(events::GUILD_MEMBER_LIST_UPDATE, update);
     }
 }
 
 pub async fn refresh_guild_member_lists(state: &AppState, guild_id: &str) {
-    let subscribers: Vec<(String, ClientDialect, String, [i64; 2])> = {
-        let sessions = state.sessions.read().await;
-        sessions
-            .values()
-            .filter(|s| s.user_id.is_some() && s.guilds.contains(guild_id))
-            .filter_map(|s| {
-                s.member_list_subscriptions
-                    .get(guild_id)
-                    .map(|(cid, range)| (s.id.clone(), s.dialect, cid.clone(), *range))
-            })
-            .collect()
-    };
-
+    let subscribers = state.hub.guild_member_list_subscribers(guild_id);
     if subscribers.is_empty() {
         return;
     }
 
-    let Some(snapshot) = fetch_snapshot(state, guild_id).await else {
-        return;
-    };
+    let mut snapshots: HashMap<String, Option<GuildMemberListSnapshot>> = HashMap::new();
 
-    let sessions = state.sessions.read().await;
-    for (sid, dialect, channel_id, range) in subscribers {
-        if let Some(session) = sessions.get(&sid) {
+    for (session, dialect, channel_id, range) in subscribers {
+        let Some(uid) = session.user_id() else {
+            continue;
+        };
+        let allowed = permission_service::compute_user_channel_permissions(
+            state,
+            guild_id,
+            &channel_id,
+            &uid,
+        )
+        .await
+        .is_ok_and(|p| {
+            p.contains(PermissionFlags::VIEW_CHANNEL | PermissionFlags::VIEW_CHANNEL_MEMBERS)
+        });
+
+        if !allowed {
+            session.remove_member_list_subscription(guild_id);
+            continue;
+        }
+
+        let snap_opt = match snapshots.get(&channel_id) {
+            Some(cached) => cached.as_ref(),
+            None => {
+                let fetched = fetch_snapshot(state, guild_id, &channel_id).await;
+                snapshots.insert(channel_id.clone(), fetched);
+                snapshots.get(&channel_id).and_then(|o| o.as_ref())
+            }
+        };
+
+        if let Some(snapshot) = snap_opt {
             let update = snapshot.build_update(guild_id, &channel_id, range, dialect);
-            session
-                .dispatch(events::GUILD_MEMBER_LIST_UPDATE, update)
-                .await;
+            session.dispatch(events::GUILD_MEMBER_LIST_UPDATE, update);
         }
     }
 }

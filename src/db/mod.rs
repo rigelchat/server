@@ -1,28 +1,6 @@
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions};
 use tracing::info;
 
-async fn ensure_column(
-    pool: &MySqlPool,
-    table: &str,
-    column: &str,
-    definition: &str,
-) -> Result<(), sqlx::Error> {
-    let exists: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
-    )
-    .bind(table)
-    .bind(column)
-    .fetch_one(pool)
-    .await?;
-
-    if exists == 0 {
-        let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
-        sqlx::query(&sql).execute(pool).await?;
-    }
-
-    Ok(())
-}
-
 pub async fn init(database_url: &str, max_connections: u32) -> Result<MySqlPool, sqlx::Error> {
     let pool = MySqlPoolOptions::new()
         .max_connections(max_connections.max(1))
@@ -262,31 +240,6 @@ pub async fn init(database_url: &str, max_connections: u32) -> Result<MySqlPool,
         )
         "#,
     )
-    .execute(&pool)
-    .await?;
-
-    // Idempotent column migrations for pre-existing tables.
-    sqlx::query("ALTER TABLE users MODIFY COLUMN email VARCHAR(255) DEFAULT NULL")
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE users MODIFY COLUMN discriminator VARCHAR(4) NOT NULL DEFAULT '0000'")
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE user_profiles MODIFY COLUMN bio VARCHAR(320) DEFAULT NULL")
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE user_profiles MODIFY COLUMN pronouns VARCHAR(40) DEFAULT NULL")
-        .execute(&pool)
-        .await?;
-    ensure_column(&pool, "user_settings", "extra_settings", "TEXT DEFAULT NULL").await?;
-
-    let default_perms = crate::constants::flags::PermissionFlags::DEFAULT_EVERYONE.bits();
-    sqlx::query(
-        "UPDATE roles SET permissions = permissions | ? WHERE id = guild_id AND (permissions & ?) != ?",
-    )
-    .bind(default_perms)
-    .bind(default_perms)
-    .bind(default_perms)
     .execute(&pool)
     .await?;
 

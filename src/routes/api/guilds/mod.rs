@@ -10,10 +10,10 @@ use serde::Deserialize;
 
 use crate::AppState;
 use crate::error::AppError;
-use crate::extractors::AuthUser;
+use crate::extractors::{AppJson, AuthUser};
 use crate::models::guild::Guild;
 use crate::models::role::Role;
-use crate::services::guild_service;
+use crate::services::{guild_service, role_service};
 
 #[derive(Deserialize)]
 struct CreateGuildRequest {
@@ -32,7 +32,7 @@ pub fn router() -> Router<AppState> {
 async fn create_guild(
     State(state): State<AppState>,
     auth: AuthUser,
-    Json(payload): Json<CreateGuildRequest>,
+    AppJson(payload): AppJson<CreateGuildRequest>,
 ) -> Result<Json<Guild>, AppError> {
     let guild = guild_service::create_guild(&state, &payload.name, &auth.user_id).await?;
     Ok(Json(guild))
@@ -52,6 +52,6 @@ async fn get_roles(
     auth: AuthUser,
     Path(guild_id): Path<String>,
 ) -> Result<Json<Vec<Role>>, AppError> {
-    let roles = guild_service::get_guild_roles(&state, &guild_id, &auth.user_id).await?;
+    let roles = role_service::get_guild_roles(&state, &guild_id, &auth.user_id).await?;
     Ok(Json(roles))
 }

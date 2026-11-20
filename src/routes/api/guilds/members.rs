@@ -9,7 +9,7 @@ use crate::AppState;
 use crate::error::AppError;
 use crate::extractors::AuthUser;
 use crate::models::guild_member::GuildMemberResponse;
-use crate::services::guild_service;
+use crate::services::member_service;
 
 #[derive(Deserialize)]
 struct ListMembersQuery {
@@ -30,7 +30,7 @@ async fn get_members(
     Path(guild_id): Path<String>,
     Query(query): Query<ListMembersQuery>,
 ) -> Result<Json<Vec<GuildMemberResponse>>, AppError> {
-    let members = guild_service::get_guild_members(
+    let members = member_service::get_guild_members(
         &state,
         &guild_id,
         &auth.user_id,
@@ -47,7 +47,7 @@ async fn get_current_member(
     Path(guild_id): Path<String>,
 ) -> Result<Json<GuildMemberResponse>, AppError> {
     let member =
-        guild_service::get_guild_member(&state, &guild_id, &auth.user_id, &auth.user_id).await?;
+        member_service::get_guild_member(&state, &guild_id, &auth.user_id, &auth.user_id).await?;
     Ok(Json(member))
 }
 
@@ -57,6 +57,6 @@ async fn get_member(
     Path((guild_id, user_id)): Path<(String, String)>,
 ) -> Result<Json<GuildMemberResponse>, AppError> {
     let member =
-        guild_service::get_guild_member(&state, &guild_id, &auth.user_id, &user_id).await?;
+        member_service::get_guild_member(&state, &guild_id, &auth.user_id, &user_id).await?;
     Ok(Json(member))
 }

@@ -1,48 +1,35 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use serde::Serialize;
 use sqlx::mysql::MySqlPool;
-use tokio::sync::RwLock;
 
 use crate::config::AppConfig;
 use crate::constants::dialect::ClientDialect;
-use crate::gateway::session::GatewaySession;
+use crate::gateway::hub::GatewayHub;
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<AppConfig>,
     pub db: MySqlPool,
-    pub sessions: Arc<RwLock<HashMap<String, GatewaySession>>>,
+    pub hub: GatewayHub,
 }
 
 impl AppState {
     pub async fn online_user_ids(&self) -> HashSet<String> {
-        let sessions = self.sessions.read().await;
-        sessions
-            .values()
-            .filter_map(|s| s.user_id.clone())
-            .collect()
+        self.hub.online_user_ids()
+    }
+
+    pub async fn count_guild_online(&self, guild_id: &str) -> u64 {
+        self.hub.count_guild_online(guild_id)
     }
 
     pub async fn add_user_guild(&self, user_id: &str, guild_id: &str) {
-        let mut sessions = self.sessions.write().await;
-        for session in sessions.values_mut() {
-            if session.user_id.as_deref() == Some(user_id) {
-                session.guilds.insert(guild_id.to_string());
-            }
-        }
+        self.hub.add_user_guild(user_id, guild_id);
     }
 
     pub async fn remove_user_guild(&self, user_id: &str, guild_id: &str) {
-        let mut sessions = self.sessions.write().await;
-        for session in sessions.values_mut() {
-            if session.user_id.as_deref() == Some(user_id) {
-                session.guilds.remove(guild_id);
-            }
-        }
+        self.hub.remove_user_guild(user_id, guild_id);
     }
 
     pub async fn dispatch_user<T: Serialize>(&self, event_name: &str, data: &T, user_id: &str) {
@@ -54,11 +41,8 @@ impl AppState {
             }
         };
 
-        let sessions = self.sessions.read().await;
-        for session in sessions.values() {
-            if session.user_id.as_deref() == Some(user_id) {
-                session.dispatch(event_name, value.clone()).await;
-            }
+        for session in self.hub.sessions_for_user(user_id) {
+            session.dispatch(event_name, value.clone());
         }
     }
 
@@ -67,12 +51,9 @@ impl AppState {
         F: FnMut(ClientDialect) -> T,
         T: Serialize,
     {
-        let sessions = self.sessions.read().await;
-        for session in sessions.values() {
-            if session.user_id.as_deref() == Some(user_id) {
-                let payload = build(session.dialect);
-                session.dispatch(event_name, payload).await;
-            }
+        for session in self.hub.sessions_for_user(user_id) {
+            let payload = build(session.dialect());
+            session.dispatch(event_name, payload);
         }
     }
 
@@ -85,11 +66,8 @@ impl AppState {
             }
         };
 
-        let sessions = self.sessions.read().await;
-        for session in sessions.values() {
-            if session.guilds.contains(guild_id) {
-                session.dispatch(event_name, value.clone()).await;
-            }
+        for session in self.hub.sessions_for_guild(guild_id) {
+            session.dispatch(event_name, value.clone());
         }
     }
 }

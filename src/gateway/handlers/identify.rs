@@ -10,11 +10,12 @@ use crate::constants::API_VERSION;
 use crate::constants::dialect::ClientDialect;
 use crate::constants::gateway::{close_codes, events};
 use crate::models::gateway::IdentifyPayload;
-use crate::models::gateway::ready::{ DiscordReadyData, DiscordReadyGuild, PartialApplication, ReadyData,
-    RtcRegion, UnavailableGuild,
+use crate::models::gateway::ready::{
+    DiscordReadyData, DiscordReadyGuild, PartialApplication, ReadyData, RtcRegion,
+    UnavailableGuild,
 };
 use crate::models::guild::{DiscordGuildCreate, GatewayGuild};
-use crate::models::user::{CurrentUser, GuildFolder, PartialUser, UserProfileRow, UserRow};
+use crate::models::user::{CurrentUser, PartialUser, UserProfileRow, UserRow};
 use crate::services::{auth_service, guild_service, user_service};
 use crate::utils::token::{TokenClaims, verify};
 
@@ -24,29 +25,19 @@ fn hash_session_id(id: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(id.as_bytes()))
 }
 
-async fn close_session(state: &AppState, session_id: &str, close: (u16, &'static str)) {
-    let sessions = state.sessions.read().await;
-    if let Some(session) = sessions.get(session_id) {
-        session.close(close).await;
-    }
-}
-
 pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload) {
-    let dialect = {
-        let sessions = state.sessions.read().await;
-        let Some(session) = sessions.get(session_id) else {
-            return;
-        };
-        if session.user_id.is_some() {
-            drop(sessions);
-            close_session(state, session_id, close_codes::ALREADY_AUTHENTICATED).await;
-            return;
-        }
-        if payload.intents.is_some() {
-            ClientDialect::Discord
-        } else {
-            session.dialect
-        }
+    let Some(session) = state.hub.get(session_id) else {
+        return;
+    };
+    if session.is_authenticated() {
+        session.close(close_codes::ALREADY_AUTHENTICATED);
+        return;
+    }
+
+    let dialect = if payload.intents.is_some() {
+        ClientDialect::Discord
+    } else {
+        session.dialect()
     };
 
     let raw_token = payload
@@ -63,7 +54,7 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         Ok(claims) => claims,
         Err(err) => {
             error!(error = %err, "Identify token validation failed");
-            close_session(state, session_id, close_codes::AUTHENTICATION_FAILED).await;
+            session.close(close_codes::AUTHENTICATION_FAILED);
             return;
         }
     };
@@ -72,7 +63,7 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         .await
         .unwrap_or(false)
     {
-        close_session(state, session_id, close_codes::AUTHENTICATION_FAILED).await;
+        session.close(close_codes::AUTHENTICATION_FAILED);
         return;
     }
 
@@ -84,12 +75,12 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         Ok(Some(u)) => u,
         Ok(None) => {
             error!(user_id = %user_id, "Identify failed: user does not exist");
-            close_session(state, session_id, close_codes::AUTHENTICATION_FAILED).await;
+            session.close(close_codes::AUTHENTICATION_FAILED);
             return;
         }
         Err(err) => {
             error!(error = %err, "Database error during identify");
-            close_session(state, session_id, close_codes::UNKNOWN_ERROR).await;
+            session.close(close_codes::UNKNOWN_ERROR);
             return;
         }
     };
@@ -131,16 +122,6 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
             }
         };
 
-    {
-        let mut sessions = state.sessions.write().await;
-        if let Some(session) = sessions.get_mut(session_id) {
-            session.dialect = dialect;
-            session.user_id = Some(user_id.clone());
-            session.auth_session_id = Some(auth_session_id.clone());
-            session.guilds = guild_ids.iter().cloned().collect();
-        }
-    }
-
     let profile = sqlx::query_as::<_, UserProfileRow>(
         "SELECT bio, pronouns, accent_color, theme_color_primary, theme_color_secondary FROM user_profiles WHERE id = ?",
     )
@@ -150,30 +131,54 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
     .ok()
     .flatten();
 
-    let mut user_settings = user_service::get_settings(state, &user_id)
+    let user_settings = user_service::get_settings(state, &user_id)
         .await
         .unwrap_or_default();
 
-    {
-        let mut sessions = state.sessions.write().await;
-        if let Some(session) = sessions.get_mut(session_id) {
-            session.status = user_settings.status.clone();
-        }
-    }
+    let saved_status = user_settings.status.clone();
+    let prop_mobile = payload
+        .properties
+        .get("mobile")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
-    user_settings.guild_folders = vec![GuildFolder {
-        id: -1,
-        name: None,
-        color: 0,
-        flags: 0,
-        icon: "folder".to_string(),
-        guild_ids: guild_ids.clone(),
-    }];
+    let (initial_status, initial_afk, initial_mobile) = if let Some(pres) = &payload.presence {
+        let chosen_status = match pres.status.as_deref() {
+            Some("dnd") => "dnd".to_string(),
+            Some("idle") => "idle".to_string(),
+            Some("invisible") => "invisible".to_string(),
+            Some("offline") => "offline".to_string(),
+            Some("online") if saved_status == "online" => "online".to_string(),
+            _ => saved_status,
+        };
+        (
+            chosen_status,
+            pres.afk.unwrap_or(false),
+            pres.mobile.unwrap_or(prop_mobile),
+        )
+    } else {
+        (saved_status, false, prop_mobile)
+    };
 
     let custom_status = user_settings.custom_status.clone();
     let is_bot = user_row.bot;
     let user_summary = PartialUser::from(&user_row);
     let current_user = CurrentUser::from_row(user_row, profile).with_dialect(dialect);
+
+    let Some(session) = state.hub.authenticate(
+        session_id,
+        dialect,
+        user_id.clone(),
+        auth_session_id.clone(),
+        initial_status,
+        initial_afk,
+        initial_mobile,
+        &guild_ids,
+        user_summary.clone(),
+        custom_status.clone(),
+    ) else {
+        return;
+    };
 
     debug!(user_id = %user_id, ?dialect, "User identified, sending READY");
 
@@ -213,15 +218,12 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
                 users: vec![user_summary],
             };
 
-            let sessions = state.sessions.read().await;
-            if let Some(session) = sessions.get(session_id) {
-                session.dispatch(events::READY, ready).await;
-            }
+            session.dispatch(events::READY, ready);
         }
         ClientDialect::Discord => {
             let mut full_guilds: Vec<DiscordGuildCreate> = Vec::with_capacity(guild_ids.len());
             for gid in &guild_ids {
-                match guild_service::build_full_gateway_guild(state, gid).await {
+                match guild_service::build_full_gateway_guild(state, gid, &user_id).await {
                     Ok(g) => full_guilds.push(DiscordGuildCreate::from(g)),
                     Err(err) => error!(error = %err, guild_id = %gid, "Failed to build discord guild"),
                 }
@@ -258,13 +260,10 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
                 }),
             };
 
-            let sessions = state.sessions.read().await;
-            if let Some(session) = sessions.get(session_id) {
-                session.dispatch(events::READY, ready).await;
-                if is_bot {
-                    for g in full_guilds {
-                        session.dispatch(events::GUILD_CREATE, g).await;
-                    }
+            session.dispatch(events::READY, ready);
+            if is_bot {
+                for g in full_guilds {
+                    session.dispatch(events::GUILD_CREATE, g);
                 }
             }
         }

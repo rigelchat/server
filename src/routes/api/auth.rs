@@ -7,7 +7,7 @@ use axum::{
 
 use crate::AppState;
 use crate::error::AppError;
-use crate::extractors::AuthUser;
+use crate::extractors::{AppJson, AuthUser};
 use crate::models::rest::auth::{
     LoginRequest, LoginResponse, RegisterRequest, UsernameAvailabilityQuery,
     UsernameAvailabilityResponse, UsernameSuggestionsRequest, UsernameSuggestionsResponse,
@@ -25,7 +25,7 @@ pub fn router() -> Router<AppState> {
 
 async fn login(
     State(state): State<AppState>,
-    Json(payload): Json<LoginRequest>,
+    AppJson(payload): AppJson<LoginRequest>,
 ) -> Result<Json<LoginResponse>, AppError> {
     let res = auth_service::login(&state, payload).await?;
     Ok(Json(res))
@@ -33,7 +33,7 @@ async fn login(
 
 async fn register(
     State(state): State<AppState>,
-    Json(payload): Json<RegisterRequest>,
+    AppJson(payload): AppJson<RegisterRequest>,
 ) -> Result<Json<LoginResponse>, AppError> {
     let res = auth_service::register(&state, payload).await?;
     Ok(Json(res))
@@ -53,7 +53,7 @@ async fn username_availability(
 }
 
 async fn username_suggestions(
-    Json(payload): Json<UsernameSuggestionsRequest>,
+    AppJson(payload): AppJson<UsernameSuggestionsRequest>,
 ) -> Json<UsernameSuggestionsResponse> {
     let suggestion = auth_service::suggest_username_from_display(&payload.global_name);
     Json(UsernameSuggestionsResponse {
