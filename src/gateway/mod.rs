@@ -128,11 +128,25 @@ async fn handle_socket(ws: WebSocket, state: AppState, zstd_stream: bool) {
                         break;
                     }
                     process_gateway_message(&text, &recv_session_id, &recv_state).await;
+                    if recv_state
+                        .hub
+                        .get(&recv_session_id)
+                        .is_none_or(|s| s.is_closed())
+                    {
+                        break;
+                    }
                 }
                 Message::Binary(bin) => {
                     match decode_binary_frame(&bin, zstd_decoder.as_mut()) {
                         Ok(text) => {
-                            process_gateway_message(&text, &recv_session_id, &recv_state).await
+                            process_gateway_message(&text, &recv_session_id, &recv_state).await;
+                            if recv_state
+                                .hub
+                                .get(&recv_session_id)
+                                .is_none_or(|s| s.is_closed())
+                            {
+                                break;
+                            }
                         }
                         Err(code) => {
                             recv_state.hub.close_session(&recv_session_id, code);
@@ -245,16 +259,16 @@ fn decode_binary_frame(
 }
 
 async fn process_gateway_message(text: &str, session_id: &str, state: &AppState) {
-    debug!(payload = %text, "Received gateway message");
-
     let payload = match serde_json::from_str::<GatewayPayload>(text) {
         Ok(p) => p,
         Err(err) => {
-            error!(error = %err, raw = %text, "Failed to parse GatewayPayload");
+            error!(error = %err, bytes = text.len(), "Failed to parse GatewayPayload");
             state.hub.close_session(session_id, close_codes::DECODE_ERROR);
             return;
         }
     };
+
+    debug!(op = ?payload.op, bytes = text.len(), "Received gateway message");
 
     if !matches!(payload.op, Opcode::Identify | Opcode::Heartbeat) {
         let authenticated = state

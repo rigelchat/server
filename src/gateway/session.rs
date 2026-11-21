@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use axum::extract::ws::{CloseFrame, Message};
 use serde::Serialize;
@@ -29,6 +29,7 @@ pub struct GatewaySession {
     connected_at_ms: u64,
     last_heartbeat_ms: AtomicU64,
     close_tx: watch::Sender<bool>,
+    closed: AtomicBool,
     state: RwLock<SessionState>,
 }
 
@@ -43,6 +44,7 @@ impl GatewaySession {
             connected_at_ms: now,
             last_heartbeat_ms: AtomicU64::new(now),
             close_tx,
+            closed: AtomicBool::new(false),
             state: RwLock::new(SessionState {
                 user_id: None,
                 auth_session_id: None,
@@ -217,6 +219,10 @@ impl GatewaySession {
         let _ = rx.wait_for(|&closed| closed).await;
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
     pub fn send(&self, op: Opcode, d: Option<serde_json::Value>) {
         let payload = GatewayPayload::new(op, d);
         self.send_raw(&payload);
@@ -249,6 +255,7 @@ impl GatewaySession {
     }
 
     pub fn close(&self, (code, reason): (u16, &'static str)) {
+        self.closed.store(true, Ordering::Release);
         let frame = CloseFrame {
             code,
             reason: reason.into(),
@@ -259,6 +266,7 @@ impl GatewaySession {
     }
 
     fn trigger_force_close(&self) {
+        self.closed.store(true, Ordering::Release);
         let _ = self.close_tx.send(true);
     }
 

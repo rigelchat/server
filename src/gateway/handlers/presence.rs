@@ -206,38 +206,46 @@ pub async fn handle(session_id: &str, state: &AppState, payload: PresenceUpdateP
     }
 
     let custom_status = if let Some(cs_opt) = payload.custom_status {
-        let existing_extra: Option<String> =
-            sqlx::query_scalar("SELECT extra_settings FROM user_settings WHERE id = ?")
+        let parsed_custom = match cs_opt.map(CustomStatusInput::try_into_custom_status).transpose() {
+            Ok(cs) => cs,
+            Err(_) => return,
+        };
+        match state.db.begin().await {
+            Ok(mut tx) => {
+                let existing_extra: Option<String> = sqlx::query_scalar(
+                    "SELECT extra_settings FROM user_settings WHERE id = ? FOR UPDATE",
+                )
                 .bind(&user_id)
-                .fetch_optional(&state.db)
+                .fetch_optional(&mut *tx)
                 .await
                 .ok()
                 .flatten()
                 .flatten();
 
-        let mut extras: UserSettingsExtras = existing_extra
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
+                let mut extras: UserSettingsExtras = existing_extra
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
 
-        extras.custom_status = match cs_opt.map(CustomStatusInput::try_into_custom_status).transpose() {
-            Ok(cs) => cs,
-            Err(_) => return,
-        };
-        if let Ok(json_str) = serde_json::to_string(&extras) {
-            if let Err(err) = sqlx::query("UPDATE user_settings SET extra_settings = ? WHERE id = ?")
-                .bind(&json_str)
-                .bind(&user_id)
-                .execute(&state.db)
-                .await
-            {
-                error!(error = %err, "Failed to update custom_status in user_settings");
+                extras.custom_status = parsed_custom.clone();
+                if let Ok(json_str) = serde_json::to_string(&extras) {
+                    if let Err(err) = sqlx::query("UPDATE user_settings SET extra_settings = ? WHERE id = ?")
+                        .bind(&json_str)
+                        .bind(&user_id)
+                        .execute(&mut *tx)
+                        .await
+                    {
+                        error!(error = %err, "Failed to update custom_status in user_settings");
+                    }
+                }
+                if let Err(err) = tx.commit().await {
+                    error!(error = %err, "Failed to commit custom_status update");
+                }
             }
+            Err(err) => error!(error = %err, "Failed to begin custom_status transaction"),
         }
-        state
-            .hub
-            .set_custom_status(&user_id, extras.custom_status.clone());
-        extras.custom_status
+        state.hub.set_custom_status(&user_id, parsed_custom.clone());
+        parsed_custom
     } else {
         state.hub.get_custom_status(&user_id)
     };

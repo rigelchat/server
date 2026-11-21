@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::Cursor;
 use std::path::Path;
+use std::time::Duration;
 
 use flate2::read::GzDecoder;
 use tar::Archive;
@@ -25,7 +26,13 @@ pub fn spawn_emoji_sync() {
 async fn download_twemoji() -> Result<(), String> {
     info!("Twemoji assets missing, downloading SVGs into {EMOJI_DIR}...");
 
-    let bytes = reqwest::get(TWEMOJI_ARCHIVE_URL)
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let bytes = client
+        .get(TWEMOJI_ARCHIVE_URL)
+        .send()
         .await
         .map_err(|e| e.to_string())?
         .error_for_status()
@@ -54,6 +61,9 @@ fn extract_svgs(tar_gz: &[u8]) -> Result<usize, String> {
 
     for entry_res in entries {
         let mut entry = entry_res.map_err(|e| e.to_string())?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
 
         let target = {
             let path = entry.path().map_err(|e| e.to_string())?;

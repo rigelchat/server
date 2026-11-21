@@ -6,7 +6,7 @@ use crate::AppState;
 use crate::constants::guild::{
     DEFAULT_PRIMARY_LANGUAGE, DiscoveryCategory, FEATURE_DISCOVERABLE, VerificationLevel,
 };
-use crate::constants::limits::{DEFAULT_DISCOVERY_LIMIT, MAX_DISCOVERY_LIMIT};
+use crate::constants::limits::{DEFAULT_DISCOVERY_LIMIT, MAX_DISCOVERY_LIMIT, MAX_SEARCH_QUERY_LENGTH};
 use crate::error::AppError;
 use crate::models::rest::discoverable_guilds::{
     DiscoverableGuild as RestDiscoverableGuild, DiscoverableGuildsResponse,
@@ -46,13 +46,22 @@ async fn fetch_discoverable_rows(
         "#,
     );
 
-    if let Some(q) = search.map(str::trim).filter(|s| !s.is_empty()) {
-        let pattern = format!("%{}%", q.to_ascii_lowercase());
+    if let Some(q) = search
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(MAX_SEARCH_QUERY_LENGTH).collect::<String>())
+    {
+        let escaped = q
+            .to_ascii_lowercase()
+            .replace('!', "!!")
+            .replace('%', "!%")
+            .replace('_', "!_");
+        let pattern = format!("%{escaped}%");
         qb.push(" AND (LOWER(g.name) LIKE ");
         qb.push_bind(pattern.clone());
-        qb.push(" OR LOWER(COALESCE(g.description, '')) LIKE ");
+        qb.push(" ESCAPE '!' OR LOWER(COALESCE(g.description, '')) LIKE ");
         qb.push_bind(pattern);
-        qb.push(")");
+        qb.push(" ESCAPE '!')");
     }
 
     qb.push(" GROUP BY g.id ORDER BY member_count DESC, g.name ASC");

@@ -86,11 +86,14 @@ pub async fn create_guild(state: &AppState, name: &str, owner_id: &str) -> Resul
         ));
     }
 
-    let (owner_flags,): (u32,) = sqlx::query_as("SELECT public_flags FROM users WHERE id = ?")
-        .bind(owner_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(AppError::unauthorized)?;
+    let mut tx = state.db.begin().await?;
+
+    let (owner_flags,): (u32,) =
+        sqlx::query_as("SELECT public_flags FROM users WHERE id = ? FOR UPDATE")
+            .bind(owner_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(AppError::unauthorized)?;
 
     if state.config.features.guild_creation_policy == GuildCreationPolicy::Staff
         && !UserFlags::from_bits_truncate(owner_flags).contains(UserFlags::STAFF)
@@ -103,7 +106,7 @@ pub async fn create_guild(state: &AppState, name: &str, owner_id: &str) -> Resul
     let joined_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM guild_members WHERE user_id = ?")
             .bind(owner_id)
-            .fetch_one(&state.db)
+            .fetch_one(&mut *tx)
             .await?;
     if joined_count >= MAX_GUILDS_PER_USER {
         return Err(AppError::max_guilds());
@@ -124,8 +127,6 @@ pub async fn create_guild(state: &AppState, name: &str, owner_id: &str) -> Resul
         (&system_channel_id, ChannelType::GuildText, 0u32, Some(&text_category_id), "general"),
         (&afk_channel_id, ChannelType::GuildVoice, 0u32, Some(&voice_category_id), "General"),
     ];
-
-    let mut tx = state.db.begin().await?;
 
     sqlx::query(
         "INSERT INTO guilds (id, created_at, owner_id, name, system_channel_id) VALUES (?, ?, ?, ?, ?)",

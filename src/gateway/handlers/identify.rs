@@ -7,6 +7,7 @@ use tracing::{debug, error};
 
 use crate::AppState;
 use crate::constants::gateway::{close_codes, events};
+use crate::constants::limits::MAX_SESSION_PROPERTY_LENGTH;
 use crate::constants::user::PresenceStatus;
 use crate::models::gateway::IdentifyPayload;
 use crate::models::gateway::ready::{ReadyData, RtcRegion};
@@ -75,16 +76,22 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         }
     };
 
-    let os = payload
+    let os: String = payload
         .properties
         .get("os")
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let browser = payload
+        .unwrap_or("unknown")
+        .chars()
+        .take(MAX_SESSION_PROPERTY_LENGTH)
+        .collect();
+    let browser: String = payload
         .properties
         .get("browser")
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+        .unwrap_or("unknown")
+        .chars()
+        .take(MAX_SESSION_PROPERTY_LENGTH)
+        .collect();
 
     if let Err(err) = sqlx::query(
         "UPDATE user_sessions SET last_used_at = ?, os = ?, platform = ? WHERE id = ?",

@@ -9,6 +9,7 @@ use crate::config::{LoginMode, RegistrationMode, TagStyle};
 use crate::constants::flags::UserFlags;
 use crate::constants::limits::{
     MAX_EMAIL_LENGTH, MAX_GLOBAL_NAME_LENGTH, MAX_PASSWORD_LENGTH, MAX_USERNAME_LENGTH,
+    MAX_USERNAME_SUGGESTION_SEED_LENGTH,
 };
 use crate::constants::user::{DEFAULT_DISCRIMINATOR, DEFAULT_THEME, VALID_THEMES};
 use crate::error::{AppError, ValidationCode};
@@ -76,8 +77,12 @@ fn validate_username(username: &str) -> Result<(), AppError> {
 }
 
 pub fn suggest_username_from_display(global_name: &str) -> String {
-    let sanitized: String = global_name
+    let bounded: String = global_name
         .trim()
+        .chars()
+        .take(MAX_USERNAME_SUGGESTION_SEED_LENGTH)
+        .collect();
+    let sanitized: String = bounded
         .to_ascii_lowercase()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
@@ -136,6 +141,14 @@ pub async fn logout(state: &AppState, user_id: &str, session_id: &str) -> Result
 }
 
 pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginResponse, AppError> {
+    if payload.password.is_empty() || payload.password.len() > MAX_PASSWORD_LENGTH {
+        return Err(AppError::validation(
+            "login",
+            ValidationCode::InvalidLoginOrPassword,
+            "Invalid username or password.",
+        ));
+    }
+
     let raw_identifier = payload.identifier().ok_or_else(|| {
         AppError::validation(
             "login",
@@ -167,13 +180,12 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
         }
     };
 
-    let hash_owned = match user.as_ref().and_then(|u| u.password_hash.as_deref()) {
-        Some(h) => h.to_string(),
+    let (user, hash_owned) = match user.and_then(|mut u| u.password_hash.take().map(|h| (u, h))) {
+        Some(pair) => pair,
         None => {
-            let dummy = DUMMY_PASSWORD_HASH.clone();
             let password_owned = payload.password;
             let _ = tokio::task::spawn_blocking(move || {
-                if let Ok(parsed) = PasswordHash::new(&dummy) {
+                if let Ok(parsed) = PasswordHash::new(&DUMMY_PASSWORD_HASH) {
                     let _ = Argon2::default().verify_password(password_owned.as_bytes(), &parsed);
                 }
             })
@@ -185,7 +197,6 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
             ));
         }
     };
-    let user = user.expect("user exists when password_hash is Some");
 
     let password_owned = payload.password;
     let valid = tokio::task::spawn_blocking(move || {

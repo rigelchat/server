@@ -439,16 +439,18 @@ pub async fn update_settings(
     user_id: &str,
     payload: UpdateSettingsRequest,
 ) -> Result<UserSettings, AppError> {
+    let mut tx = state.db.begin().await?;
+
     sqlx::query("INSERT IGNORE INTO user_settings (id) VALUES (?)")
         .bind(user_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
 
     let existing_row = sqlx::query_as::<_, UserSettingsRow>(
-        "SELECT status, afk_timeout, locale, theme, background_gradient_preset, developer_mode, synced_preferences, extra_settings FROM user_settings WHERE id = ?",
+        "SELECT status, afk_timeout, locale, theme, background_gradient_preset, developer_mode, synced_preferences, extra_settings FROM user_settings WHERE id = ? FOR UPDATE",
     )
     .bind(user_id)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await?;
 
     let mut extras: UserSettingsExtras = existing_row
@@ -742,8 +744,10 @@ pub async fn update_settings(
     if has_col_updates {
         query.push(" WHERE id = ");
         query.push_bind(user_id);
-        query.build().execute(&state.db).await?;
+        query.build().execute(&mut *tx).await?;
     }
+
+    tx.commit().await?;
 
     let settings = get_settings(state, user_id).await?;
     state

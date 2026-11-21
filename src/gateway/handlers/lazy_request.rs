@@ -134,6 +134,18 @@ async fn fetch_snapshot(
     guild_id: &str,
     channel_id: &str,
 ) -> Option<GuildMemberListSnapshot> {
+    let channel_in_guild: Option<(i32,)> =
+        sqlx::query_as("SELECT 1 FROM channels WHERE id = ? AND guild_id = ? LIMIT 1")
+            .bind(channel_id)
+            .bind(guild_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    if channel_in_guild.is_none() {
+        return None;
+    }
+
     let owner_id: String = sqlx::query_scalar("SELECT owner_id FROM guilds WHERE id = ?")
         .bind(guild_id)
         .fetch_optional(&state.db)
@@ -283,6 +295,20 @@ pub async fn handle(session_id: &str, state: &AppState, payload: LazyRequestPayl
                 if !session.has_guild(&guild_id) {
                     continue;
                 }
+                let channel_in_guild = sqlx::query_scalar::<_, i32>(
+                    "SELECT 1 FROM channels WHERE id = ? AND guild_id = ? LIMIT 1",
+                )
+                .bind(&channel_id)
+                .bind(&guild_id)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+                if !channel_in_guild {
+                    session.remove_member_list_subscription(&guild_id);
+                    continue;
+                }
                 let start = range[0].max(0);
                 let end = range[1]
                     .max(start)
@@ -319,7 +345,12 @@ pub async fn handle(session_id: &str, state: &AppState, payload: LazyRequestPayl
     }
 
     for (guild_id, user_ids) in member_presences {
-        let requested: Vec<String> = user_ids.into_iter().take(MAX_LAZY_SUBSCRIBED_MEMBERS).collect();
+        let mut seen = HashSet::new();
+        let requested: Vec<String> = user_ids
+            .into_iter()
+            .filter(|id| seen.insert(id.clone()))
+            .take(MAX_LAZY_SUBSCRIBED_MEMBERS)
+            .collect();
         if requested.is_empty() {
             continue;
         }
