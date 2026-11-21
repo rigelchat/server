@@ -59,6 +59,8 @@ chmod +x rigel-server
 ```bash
 git clone https://github.com/rigelchat/server.git
 cd server
+cp .env.example .env
+# Edit .env with your DATABASE_URL, AUTH_SECRET, and public URLs
 cargo run --release
 ```
 
