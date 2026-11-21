@@ -94,3 +94,57 @@ pub fn parse_timestamp_iso(
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct DoubleOpt {
+        #[serde(default, deserialize_with = "deserialize_double_option")]
+        val: Option<Option<String>>,
+    }
+
+    #[derive(Deserialize, Debug, PartialEq)]
+    struct NonceBox {
+        #[serde(default, deserialize_with = "deserialize_opt_string_or_int")]
+        nonce: Option<String>,
+    }
+
+    #[test]
+    fn double_option_distinguishes_omitted_and_null() {
+        let omitted: DoubleOpt = serde_json::from_str("{}").unwrap();
+        let nulled: DoubleOpt = serde_json::from_str(r#"{"val":null}"#).unwrap();
+        let set: DoubleOpt = serde_json::from_str(r#"{"val":"hi"}"#).unwrap();
+        assert_eq!(omitted.val, None);
+        assert_eq!(nulled.val, Some(None));
+        assert_eq!(set.val, Some(Some("hi".to_string())));
+    }
+
+    #[test]
+    fn string_or_int_parses_all_variants() {
+        assert_eq!(
+            serde_json::from_str::<NonceBox>(r#"{"nonce":12345}"#).unwrap().nonce.as_deref(),
+            Some("12345")
+        );
+        assert_eq!(
+            serde_json::from_str::<NonceBox>(r#"{"nonce":"abc"}"#).unwrap().nonce.as_deref(),
+            Some("abc")
+        );
+        assert_eq!(serde_json::from_str::<NonceBox>(r#"{}"#).unwrap().nonce, None);
+    }
+
+    #[test]
+    fn parse_timestamp_iso_validates_inputs() {
+        assert_eq!(parse_timestamp_iso("exp", serde_json::Value::Null).unwrap(), None);
+        assert_eq!(parse_timestamp_iso("exp", serde_json::json!("  ")).unwrap(), None);
+        assert_eq!(
+            parse_timestamp_iso("exp", serde_json::json!("2026-01-01T00:00:00Z")).unwrap(),
+            Some("2026-01-01T00:00:00Z".to_string())
+        );
+        assert!(parse_timestamp_iso("exp", serde_json::json!(1_700_000_000_000i64)).unwrap().is_some());
+        assert!(parse_timestamp_iso("exp", serde_json::json!("not-a-date")).is_err());
+        assert!(parse_timestamp_iso("exp", serde_json::json!(true)).is_err());
+    }
+}

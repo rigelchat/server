@@ -98,3 +98,35 @@ pub enum MessageType {
     Reply = 19,
     ThreadStarterMessage = 21,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_serializes_discord_compatible_fields() {
+        let msg = Message::from(MessageDbRow {
+            id: "100".to_string(),
+            channel_id: "200".to_string(),
+            content: Some("hello".to_string()),
+            timestamp: 1_700_000_000_000,
+            edited_timestamp: None,
+            kind: 0,
+            flags: 0,
+            author_id: "300".to_string(),
+            username: "alice".to_string(),
+            discriminator: "0000".to_string(),
+            global_name: None,
+            avatar: None,
+            bot: false,
+            public_flags: 0,
+        });
+
+        let val = serde_json::to_value(&msg).unwrap();
+        assert_eq!(val["type"], 0);
+        assert_eq!(val["content"], "hello");
+        assert_eq!(val["author"]["id"], "300");
+        assert!(val.get("nonce").is_none());
+        assert!(val["author"].get("bot").is_none());
+    }
+}

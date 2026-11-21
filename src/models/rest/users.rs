@@ -165,3 +165,39 @@ impl CustomStatusInput {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_status_validation_checks_text_emoji_and_expiry() {
+        let ok = CustomStatusInput {
+            text: Some("  Coding  ".to_string()),
+            expires_at: Some(serde_json::json!("2026-12-31T23:59:59Z")),
+            emoji_id: Some("123456789012345678".to_string()),
+            emoji_name: Some("rocket".to_string()),
+        }
+        .try_into_custom_status()
+        .unwrap();
+        assert_eq!(ok.text.as_deref(), Some("Coding"));
+
+        let too_long = CustomStatusInput {
+            text: Some("x".repeat(MAX_CUSTOM_STATUS_TEXT_LENGTH + 1)),
+            expires_at: None,
+            emoji_id: None,
+            emoji_name: None,
+        }
+        .try_into_custom_status();
+        assert!(too_long.is_err());
+
+        let bad_id = CustomStatusInput {
+            text: None,
+            expires_at: None,
+            emoji_id: Some("not-a-snowflake".to_string()),
+            emoji_name: None,
+        }
+        .try_into_custom_status();
+        assert!(bad_id.is_err());
+    }
+}

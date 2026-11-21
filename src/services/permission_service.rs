@@ -589,4 +589,17 @@ mod tests {
 
         assert_eq!(visible, vec!["cat_empty", "cat_mixed", "ch_public"]);
     }
+
+    #[test]
+    fn member_deny_overrides_role_allow() {
+        let base = PermissionFlags::VIEW_CHANNEL | PermissionFlags::SEND_MESSAGES;
+        let roles = vec!["r1".to_string()];
+        let overwrites = vec![
+            ow_role("r1", PermissionFlags::SEND_MESSAGES, PermissionFlags::empty()),
+            ow_member("u1", PermissionFlags::empty(), PermissionFlags::SEND_MESSAGES),
+        ];
+        let perms = compute_channel_permissions(base, "g1", "u1", &roles, &overwrites);
+        assert!(perms.contains(PermissionFlags::VIEW_CHANNEL));
+        assert!(!perms.contains(PermissionFlags::SEND_MESSAGES));
+    }
 }

@@ -104,4 +104,12 @@ mod tests {
         assert!(verify(&format!("{}x", data.token), "secret_a").is_err());
         assert!(verify("not.enough", "secret_a").is_err());
     }
+
+    #[test]
+    fn strip_auth_prefix_handles_bearer_bot_and_whitespace() {
+        assert_eq!(strip_auth_prefix("  Bearer abc.def.ghi  "), "abc.def.ghi");
+        assert_eq!(strip_auth_prefix("Bot  tok123 "), "tok123");
+        assert_eq!(strip_auth_prefix("raw_token"), "raw_token");
+    }
 }
+
