@@ -84,7 +84,7 @@ openssl rand -base64 32
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `DATABASE_URL` | **Yes** | — | MySQL/MariaDB connection string (`mysql://user:password@host:3306/rigel`). |
-| `DB_MAX_CONNECTIONS` | No | `5` | Maximum number of pooled database connections. |
+| `DB_MAX_CONNECTIONS` | No | `16` | Maximum number of pooled database connections. |
 
 ### Authentication
 
@@ -93,7 +93,7 @@ openssl rand -base64 32
 | `AUTH_SECRET` | **Yes** | — | Secret key used to sign session tokens (HMAC-SHA256). Rotating it invalidates all existing sessions. |
 | `AUTH_LOGIN_MODE` | No | `username` | `username` (email-less accounts) or `email` (requires and stores unique email addresses). |
 | `AUTH_TAG_STYLE` | No | `none` | `none` (fixed `0000` discriminator) or `random` (assigns a random 4-digit tag on registration). |
-| `AUTH_REGISTRATION_MODE` | No | `open` | `open` (anyone can register), `invite_only` (requires a valid `invite_code`), or `closed` (disables registration). |
+| `AUTH_REGISTRATION_MODE` | No | `open` | `open` (anyone can register) or `closed` (disables registration). |
 
 ### Instance Branding & Legal
 
@@ -117,7 +117,7 @@ openssl rand -base64 32
 | Variable | Required | Default | Values / Description |
 | --- | --- | --- | --- |
 | `GUILD_CREATION_POLICY` | No | `staff` | `staff` (only users with the `STAFF` flag can create guilds) or `everyone` (any registered user can create guilds). |
-| `ENABLE_ATTACHMENTS` | No | `false` | Advertises attachment upload capability in discovery metadata. |
+| `ENABLE_ATTACHMENTS` | No | `false` | Advertises attachment upload capability in `/api/.well-known/fluxer` metadata (upload endpoints are not yet implemented). |
 | `ENABLE_AUTO_EMOJI_SYNC` | No | `true` | Automatically downloads Twemoji SVG assets into `static/emoji/` in the background on startup if missing. |
 
 ---
