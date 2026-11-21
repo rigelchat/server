@@ -107,8 +107,7 @@ async fn fetch_invite_details(
         inviter,
         member_count: Some(member_count),
         presence_count: Some(online_count),
-        approximate_member_count: None,
-        approximate_presence_count: None,
+
         expires_at: row.expires_at.map(millis_to_iso),
         temporary: false,
     };
@@ -133,7 +132,6 @@ pub async fn create_channel_invite(
         return Err(AppError::invalid_channel_type());
     }
 
-    member_service::require_member(state, &guild_id, user_id).await?;
     permission_service::require_channel_permission(
         state,
         &guild_id,
@@ -193,18 +191,38 @@ pub async fn accept_invite(
     user_id: &str,
 ) -> Result<InviteResponse, AppError> {
     let (row, mut invite) = fetch_invite_details(state, code).await?;
-    let already_member = member_service::is_member(state, &row.guild_id, user_id).await?;
 
-    if !already_member {
-        member_service::add_member_to_guild(state, user_id, &row.guild_id).await?;
-        sqlx::query("UPDATE invites SET uses = uses + 1 WHERE code = ?")
-            .bind(code)
-            .execute(&state.db)
-            .await?;
+    let mut tx = state.db.begin().await?;
+    let now = Utc::now().timestamp_millis() as u64;
+    let updated = sqlx::query(
+        r#"
+        UPDATE invites
+        SET uses = uses + 1
+        WHERE code = ?
+          AND (max_uses = 0 OR uses < max_uses)
+          AND (expires_at IS NULL OR expires_at >= ?)
+        "#,
+    )
+    .bind(code)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
 
-        if let Some(count) = invite.member_count.as_mut() {
-            *count += 1;
-        }
+    if updated.rows_affected() == 0 {
+        return Err(AppError::unknown_invite());
+    }
+
+    let inserted = member_service::insert_member_tx(&mut tx, user_id, &row.guild_id).await?;
+    if !inserted {
+        tx.rollback().await?;
+        return Ok(invite);
+    }
+
+    tx.commit().await?;
+
+    member_service::on_member_joined(state, user_id, &row.guild_id).await?;
+    if let Some(count) = invite.member_count.as_mut() {
+        *count += 1;
     }
 
     Ok(invite)

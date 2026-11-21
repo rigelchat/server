@@ -13,7 +13,6 @@ use axum::{
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
@@ -21,37 +20,36 @@ use uuid::Uuid;
 use zstd::stream::raw::{Decoder as RawZstdDecoder, Operation};
 
 use crate::AppState;
-use crate::constants::dialect::ClientDialect;
-use crate::constants::gateway::{HEARTBEAT_INTERVAL, MAX_PAYLOAD_BYTES, Opcode, close_codes};
-use crate::gateway::handlers::presence::PresenceUpdatePayload;
+use crate::constants::gateway::{
+    GATEWAY_SEND_QUEUE_CAPACITY, GATEWAY_WRITE_TIMEOUT_SECS, HEARTBEAT_INTERVAL, MAX_PAYLOAD_BYTES,
+    Opcode, ZSTD_DECODE_CHUNK_BYTES, close_codes,
+};
 use crate::gateway::session::GatewaySession;
 use crate::models::gateway::{
-    GatewayPayload, HelloPayload, IdentifyPayload, lazy_request::LazyRequestPayload,
+    GatewayPayload, GatewayQuery, HelloPayload, IdentifyPayload,
+    lazy_request::LazyRequestPayload, presence::PresenceUpdatePayload,
 };
-
-#[derive(Debug, Deserialize)]
-pub struct GatewayQuery {
-    pub v: Option<String>,
-}
 
 pub async fn handler(
     ws: WebSocketUpgrade,
     Query(query): Query<GatewayQuery>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let version = query.v.as_deref().and_then(|v| v.parse::<u8>().ok());
-    let dialect = ClientDialect::from_gateway_version(version);
-    ws.on_upgrade(move |socket| handle_socket(socket, state, dialect))
+    let zstd_stream = query
+        .compress
+        .as_deref()
+        .is_some_and(|c| c.eq_ignore_ascii_case("zstd-stream"));
+    ws.on_upgrade(move |socket| handle_socket(socket, state, zstd_stream))
 }
 
-async fn handle_socket(ws: WebSocket, state: AppState, dialect: ClientDialect) {
+async fn handle_socket(ws: WebSocket, state: AppState, zstd_stream: bool) {
     debug!("New WebSocket connection established");
 
     let (mut socket_sender, mut socket_receiver) = ws.split();
     let session_id = Uuid::new_v4().to_string();
-    let (tx, mut rx) = mpsc::channel::<Message>(512);
+    let (tx, mut rx) = mpsc::channel::<Message>(GATEWAY_SEND_QUEUE_CAPACITY);
 
-    let session = Arc::new(GatewaySession::new(session_id.clone(), dialect, tx));
+    let session = Arc::new(GatewaySession::new(session_id.clone(), tx));
     state.hub.register(Arc::clone(&session));
 
     session.send(
@@ -62,9 +60,37 @@ async fn handle_socket(ws: WebSocket, state: AppState, dialect: ClientDialect) {
     );
 
     let mut send_task = tokio::spawn(async move {
+        let mut zstd_encoder = if zstd_stream {
+            zstd::stream::write::Encoder::new(Vec::new(), 3)
+                .map_err(|err| error!(error = %err, "Failed to initialize zstd encoder"))
+                .ok()
+        } else {
+            None
+        };
+
         while let Some(msg) = rx.recv().await {
             let is_close = matches!(msg, Message::Close(_));
-            match tokio::time::timeout(Duration::from_secs(5), socket_sender.send(msg)).await {
+            let outgoing = match (msg, zstd_encoder.as_mut()) {
+                (Message::Text(text), Some(encoder)) => {
+                    use std::io::Write;
+                    if let Err(err) = encoder
+                        .write_all(text.as_bytes())
+                        .and_then(|_| encoder.flush())
+                    {
+                        error!(error = %err, "Failed to zstd-compress gateway frame");
+                        break;
+                    }
+                    let compressed = std::mem::take(encoder.get_mut());
+                    Message::Binary(compressed.into())
+                }
+                (other, _) => other,
+            };
+            match tokio::time::timeout(
+                Duration::from_secs(GATEWAY_WRITE_TIMEOUT_SECS),
+                socket_sender.send(outgoing),
+            )
+            .await
+            {
                 Ok(Ok(())) if !is_close => {}
                 _ => break,
             }
@@ -75,9 +101,13 @@ async fn handle_socket(ws: WebSocket, state: AppState, dialect: ClientDialect) {
     let recv_state = state.clone();
 
     let mut recv_task = tokio::spawn(async move {
-        let mut zstd_decoder = RawZstdDecoder::new()
-            .map_err(|err| error!(error = %err, "Failed to initialize RawZstdDecoder"))
-            .ok();
+        let mut zstd_decoder = if zstd_stream {
+            RawZstdDecoder::new()
+                .map_err(|err| error!(error = %err, "Failed to initialize RawZstdDecoder"))
+                .ok()
+        } else {
+            None
+        };
 
         while let Some(msg_res) = socket_receiver.next().await {
             let msg = match msg_res {
@@ -148,7 +178,7 @@ async fn handle_socket(ws: WebSocket, state: AppState, dialect: ClientDialect) {
                     handlers::lazy_request::refresh_guild_member_lists(&state, gid).await;
                 }
             }
-        } else {
+        } else if removed.prev_live_state.0 != "offline" {
             handlers::presence::broadcast_presence_with_user(
                 &state,
                 &removed.user_id,
@@ -178,7 +208,7 @@ fn decode_binary_frame(
 
     if let Some(decoder) = decoder {
         let mut out = Vec::new();
-        let mut temp = [0u8; 4096];
+        let mut temp = [0u8; ZSTD_DECODE_CHUNK_BYTES];
         let mut src = bin;
 
         loop {
@@ -196,7 +226,7 @@ fn decode_binary_frame(
                             close_codes::DECODE_ERROR
                         });
                     }
-                    if status.bytes_read == 0 && status.bytes_written == 0 {
+                    if !src.is_empty() && status.bytes_read == 0 && status.bytes_written == 0 {
                         error!("Zstd decoder stalled on gateway frame");
                         return Err(close_codes::DECODE_ERROR);
                     }
@@ -279,5 +309,43 @@ async fn process_gateway_message(text: &str, session_id: &str, state: &AppState)
         other => {
             warn!(opcode = ?other, "Unhandled gateway opcode");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_binary_frame_handles_exact_4096_boundary() {
+        let prefix = r#"{"op":1,"d":""#;
+        let suffix = r#""}"#;
+        let filler = "a".repeat(4096 - prefix.len() - suffix.len());
+        let payload = format!("{prefix}{filler}{suffix}");
+        assert_eq!(payload.len(), 4096);
+
+        let compressed = zstd::stream::encode_all(payload.as_bytes(), 3).unwrap();
+        let mut decoder = RawZstdDecoder::new().unwrap();
+        let decoded = decode_binary_frame(&compressed, Some(&mut decoder))
+            .expect("4096-byte payload should decode cleanly");
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn decode_binary_frame_rejects_decompression_bomb() {
+        let oversized = vec![b'x'; MAX_PAYLOAD_BYTES + 100];
+        let compressed = zstd::stream::encode_all(&oversized[..], 3).unwrap();
+        assert!(compressed.len() < MAX_PAYLOAD_BYTES);
+
+        let mut decoder = RawZstdDecoder::new().unwrap();
+        let err = decode_binary_frame(&compressed, Some(&mut decoder)).unwrap_err();
+        assert_eq!(err, close_codes::DECODE_ERROR);
+    }
+
+    #[test]
+    fn decode_binary_frame_uncompressed_fallback() {
+        let text = r#"{"op":1}"#;
+        let decoded = decode_binary_frame(text.as_bytes(), None).unwrap();
+        assert_eq!(decoded, text);
     }
 }

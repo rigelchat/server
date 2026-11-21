@@ -8,7 +8,6 @@ use axum::{
 };
 
 use crate::AppState;
-use crate::constants::dialect::ClientDialect;
 use crate::error::AppError;
 use crate::extractors::AuthUser;
 use crate::models::channel::ChannelResponse;
@@ -34,19 +33,16 @@ async fn get_channel(
 async fn create_channel_invite(
     State(state): State<AppState>,
     auth: AuthUser,
-    dialect: ClientDialect,
     Path(channel_id): Path<String>,
     body: Bytes,
 ) -> Result<Json<CreatedInvite>, AppError> {
     let payload: CreateInviteRequest = if body.is_empty() {
         CreateInviteRequest::default()
     } else {
-        serde_json::from_slice(&body).map_err(|_| {
-            AppError::invalid_form_body()
-        })?
+        serde_json::from_slice(&body).map_err(|_| AppError::invalid_form_body())?
     };
 
     let invite =
         invite_service::create_channel_invite(&state, &channel_id, &auth.user_id, payload).await?;
-    Ok(Json(invite.with_dialect(dialect)))
+    Ok(Json(invite))
 }

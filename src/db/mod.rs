@@ -133,6 +133,7 @@ pub async fn init(database_url: &str, max_connections: u32) -> Result<MySqlPool,
             guild_id VARCHAR(20) NOT NULL,
             parent_id VARCHAR(20) DEFAULT NULL,
             name TEXT NOT NULL,
+            last_message_id VARCHAR(20) DEFAULT NULL,
             FOREIGN KEY (guild_id) REFERENCES guilds(id) ON DELETE CASCADE,
             FOREIGN KEY (parent_id) REFERENCES channels(id) ON DELETE SET NULL
         )
@@ -243,5 +244,55 @@ pub async fn init(database_url: &str, max_connections: u32) -> Result<MySqlPool,
     .execute(&pool)
     .await?;
 
+    let has_last_message_id: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'channels'
+          AND COLUMN_NAME = 'last_message_id'
+        "#,
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    if has_last_message_id.0 == 0 {
+        sqlx::query("ALTER TABLE channels ADD COLUMN last_message_id VARCHAR(20) DEFAULT NULL")
+            .execute(&pool)
+            .await?;
+    }
+
+    ensure_index(&pool, "guilds", "idx_guilds_discoverable", "discoverable").await?;
+    ensure_index(&pool, "messages", "idx_messages_channel_ts", "channel_id, timestamp").await?;
+
     Ok(pool)
+}
+
+// TODO: revoir ca (normalement, ya pas besoins de tout ca)
+async fn ensure_index(
+    pool: &MySqlPool,
+    table: &str,
+    index_name: &str,
+    columns_sql: &str,
+) -> Result<(), sqlx::Error> {
+    let exists: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)
+        FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = ?
+          AND INDEX_NAME = ?
+        "#,
+    )
+    .bind(table)
+    .bind(index_name)
+    .fetch_one(pool)
+    .await?;
+
+    if exists.0 == 0 {
+        let ddl = format!("CREATE INDEX {index_name} ON {table} ({columns_sql})");
+        sqlx::query(&ddl).execute(pool).await?;
+    }
+
+    Ok(())
 }

@@ -10,10 +10,10 @@ use crate::constants::limits::{
 };
 use crate::error::{AppError, ValidationCode};
 use crate::models::channel::ChannelType;
-use crate::models::message::{
-    GatewayMessageEvent, GetMessagesQuery, Message, MessageDbRow, MessageMember, MessageType,
-};
-use crate::services::{member_service, permission_service};
+use crate::models::gateway::events::{GatewayMessageEvent, MessageMember};
+use crate::models::message::{Message, MessageDbRow, MessageType};
+use crate::models::rest::messages::GetMessagesQuery;
+use crate::services::permission_service;
 use crate::utils::snowflake::DISCORD_SNOWFLAKE;
 
 #[derive(FromRow)]
@@ -35,6 +35,7 @@ async fn fetch_message_member(
     state: &AppState,
     guild_id: &str,
     user_id: &str,
+    preloaded_roles: Option<Vec<String>>,
 ) -> Option<MessageMember> {
     let row: Option<(Option<String>, u64)> = sqlx::query_as(
         "SELECT nick, joined_at FROM guild_members WHERE guild_id = ? AND user_id = ?",
@@ -47,27 +48,20 @@ async fn fetch_message_member(
     .flatten();
 
     let (nick, joined_at) = row?;
-    let roles: Vec<String> = sqlx::query_scalar(
-        "SELECT role_id FROM guild_member_roles WHERE guild_id = ? AND user_id = ? AND role_id != ?",
-    )
-    .bind(guild_id)
-    .bind(user_id)
-    .bind(guild_id)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    let roles = match preloaded_roles {
+        Some(r) => r,
+        None => sqlx::query_scalar(
+            "SELECT role_id FROM guild_member_roles WHERE guild_id = ? AND user_id = ? AND role_id != ?",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .bind(guild_id)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default(),
+    };
 
-    Some(MessageMember {
-        nick,
-        avatar: None,
-        banner: None,
-        accent_color: None,
-        roles,
-        joined_at,
-        mute: false,
-        deaf: false,
-        communication_disabled_until: None,
-    })
+    Some(MessageMember::new(nick, roles, joined_at))
 }
 
 async fn fetch_message(state: &AppState, message_id: &str) -> Result<Message, AppError> {
@@ -107,12 +101,11 @@ pub async fn get_messages(
     user_id: &str,
     query: GetMessagesQuery,
 ) -> Result<Vec<Message>, AppError> {
-    let meta = get_channel_meta(state, channel_id).await?;
-    member_service::require_member(state, &meta.guild_id, user_id).await?;
-    if meta.channel_type == ChannelType::GuildCategory as u32 {
-        return Err(AppError::invalid_channel_type());
-    }
+    crate::utils::snowflake::validate_snowflake_opt("before", query.before.as_deref())?;
+    crate::utils::snowflake::validate_snowflake_opt("after", query.after.as_deref())?;
+    crate::utils::snowflake::validate_snowflake_opt("around", query.around.as_deref())?;
 
+    let meta = get_channel_meta(state, channel_id).await?;
     let perms = permission_service::require_channel_permission(
         state,
         &meta.guild_id,
@@ -121,6 +114,9 @@ pub async fn get_messages(
         PermissionFlags::VIEW_CHANNEL,
     )
     .await?;
+    if meta.channel_type == ChannelType::GuildCategory as u32 {
+        return Err(AppError::invalid_channel_type());
+    }
 
     if !perms.contains(PermissionFlags::READ_MESSAGE_HISTORY) {
         return Ok(vec![]);
@@ -214,12 +210,7 @@ pub async fn create_message(
     }
 
     let meta = get_channel_meta(state, channel_id).await?;
-    member_service::require_member(state, &meta.guild_id, user_id).await?;
-    if meta.channel_type == ChannelType::GuildCategory as u32 {
-        return Err(AppError::cannot_send_in_non_text_channel());
-    }
-
-    permission_service::require_channel_permission(
+    let (perm_ctx, member_roles, _) = permission_service::require_channel_permission_with_ctx(
         state,
         &meta.guild_id,
         channel_id,
@@ -227,6 +218,9 @@ pub async fn create_message(
         PermissionFlags::VIEW_CHANNEL | PermissionFlags::SEND_MESSAGES,
     )
     .await?;
+    if meta.channel_type == ChannelType::GuildCategory as u32 {
+        return Err(AppError::cannot_send_in_non_text_channel());
+    }
 
     let message_id = DISCORD_SNOWFLAKE.generate(None).to_string();
     let timestamp = Utc::now().timestamp_millis() as u64;
@@ -256,7 +250,7 @@ pub async fn create_message(
     let mut msg = fetch_message(state, &message_id).await?;
     msg.nonce = nonce;
 
-    let member = fetch_message_member(state, &meta.guild_id, user_id).await;
+    let member = fetch_message_member(state, &meta.guild_id, user_id, member_roles).await;
     let event = GatewayMessageEvent {
         message: msg.clone(),
         channel_type: meta.channel_type,
@@ -264,10 +258,11 @@ pub async fn create_message(
         member,
     };
 
-    permission_service::dispatch_channel(
+    permission_service::dispatch_channel_with_ctx(
         state,
         &meta.guild_id,
         channel_id,
+        perm_ctx.as_ref(),
         events::MESSAGE_CREATE,
         &event,
     )
@@ -296,8 +291,7 @@ pub async fn edit_message(
     }
 
     let meta = get_channel_meta(state, channel_id).await?;
-    member_service::require_member(state, &meta.guild_id, user_id).await?;
-    permission_service::require_channel_permission(
+    let (perm_ctx, member_roles, _) = permission_service::require_channel_permission_with_ctx(
         state,
         &meta.guild_id,
         channel_id,
@@ -329,7 +323,7 @@ pub async fn edit_message(
         .await?;
 
     let updated = fetch_message(state, message_id).await?;
-    let member = fetch_message_member(state, &meta.guild_id, user_id).await;
+    let member = fetch_message_member(state, &meta.guild_id, user_id, member_roles).await;
     let event = GatewayMessageEvent {
         message: updated.clone(),
         channel_type: meta.channel_type,
@@ -337,10 +331,11 @@ pub async fn edit_message(
         member,
     };
 
-    permission_service::dispatch_channel(
+    permission_service::dispatch_channel_with_ctx(
         state,
         &meta.guild_id,
         channel_id,
+        perm_ctx.as_ref(),
         events::MESSAGE_UPDATE,
         &event,
     )
@@ -356,8 +351,7 @@ pub async fn delete_message(
     user_id: &str,
 ) -> Result<(), AppError> {
     let meta = get_channel_meta(state, channel_id).await?;
-    member_service::require_member(state, &meta.guild_id, user_id).await?;
-    let perms = permission_service::require_channel_permission(
+    let (perm_ctx, _, perms) = permission_service::require_channel_permission_with_ctx(
         state,
         &meta.guild_id,
         channel_id,
@@ -406,10 +400,11 @@ pub async fn delete_message(
 
     tx.commit().await?;
 
-    permission_service::dispatch_channel(
+    permission_service::dispatch_channel_with_ctx(
         state,
         &meta.guild_id,
         channel_id,
+        perm_ctx.as_ref(),
         events::MESSAGE_DELETE,
         &json!({
             "id": message_id,

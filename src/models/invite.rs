@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::constants::dialect::ClientDialect;
 use crate::models::serde_helpers::serialize_millis_iso;
 use crate::models::user::PartialUser;
 
@@ -68,22 +67,8 @@ pub struct InviteResponse {
     pub member_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presence_count: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub approximate_member_count: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub approximate_presence_count: Option<usize>,
     pub expires_at: Option<String>,
     pub temporary: bool,
-}
-
-impl InviteResponse {
-    pub fn with_dialect(mut self, dialect: ClientDialect) -> Self {
-        if dialect == ClientDialect::Discord {
-            self.approximate_member_count = self.member_count.take();
-            self.approximate_presence_count = self.presence_count.take();
-        }
-        self
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -95,11 +80,4 @@ pub struct CreatedInvite {
     pub uses: u32,
     pub max_uses: u32,
     pub max_age: u32,
-}
-
-impl CreatedInvite {
-    pub fn with_dialect(mut self, dialect: ClientDialect) -> Self {
-        self.invite = self.invite.with_dialect(dialect);
-        self
-    }
 }

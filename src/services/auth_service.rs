@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use chrono::Utc;
 use uuid::Uuid;
@@ -5,23 +7,34 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::config::{LoginMode, RegistrationMode, TagStyle};
 use crate::constants::flags::UserFlags;
-use crate::constants::limits::{MAX_GLOBAL_NAME_LENGTH, MAX_PASSWORD_LENGTH, MAX_USERNAME_LENGTH};
-use crate::constants::user::VALID_THEMES;
+use crate::constants::limits::{
+    MAX_EMAIL_LENGTH, MAX_GLOBAL_NAME_LENGTH, MAX_PASSWORD_LENGTH, MAX_USERNAME_LENGTH,
+};
+use crate::constants::user::{DEFAULT_DISCRIMINATOR, DEFAULT_THEME, VALID_THEMES};
 use crate::error::{AppError, ValidationCode};
 use crate::models::rest::auth::{LoginRequest, LoginResponse, RegisterRequest};
 use crate::models::user::{PartialUser, UserRow};
 use crate::utils::{snowflake::DISCORD_SNOWFLAKE, token};
 
-fn normalize_login_identifier(raw: &str) -> String {
+static DUMMY_PASSWORD_HASH: LazyLock<String> = LazyLock::new(|| {
+    Argon2::default()
+        .hash_password(b"rigel-dummy-timing-check")
+        .map(|h| h.to_string())
+        .unwrap_or_default()
+});
+
+fn normalize_login_identifier(raw: &str, login_mode: LoginMode) -> String {
     let trimmed = raw.trim();
     if let Some((name, tag)) = trimmed.rsplit_once('#') {
         if !name.is_empty() && tag.chars().all(|c| c.is_ascii_digit()) {
             return name.to_string();
         }
     }
-    if let Some((local, _host)) = trimmed.split_once('@') {
-        if !local.is_empty() {
-            return local.to_string();
+    if login_mode == LoginMode::Username {
+        if let Some((local, _host)) = trimmed.split_once('@') {
+            if !local.is_empty() {
+                return local.to_string();
+            }
         }
     }
     trimmed.to_string()
@@ -112,12 +125,13 @@ pub async fn is_username_available(state: &AppState, username: &str) -> Result<b
     Ok(existing.is_none())
 }
 
-pub async fn logout(state: &AppState, session_id: &str) -> Result<(), AppError> {
+pub async fn logout(state: &AppState, user_id: &str, session_id: &str) -> Result<(), AppError> {
     sqlx::query("DELETE FROM user_sessions WHERE id = ?")
         .bind(session_id)
         .execute(&state.db)
         .await?;
 
+    state.hub.close_auth_session(user_id, session_id);
     Ok(())
 }
 
@@ -129,33 +143,50 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
             "Invalid username or password.",
         )
     })?;
-    let normalized = normalize_login_identifier(raw_identifier);
+    let normalized = normalize_login_identifier(raw_identifier, state.config.auth.login_mode);
 
-    let user = sqlx::query_as::<_, UserRow>(
-        "SELECT * FROM users WHERE LOWER(username) = LOWER(?) OR LOWER(username) = LOWER(?) OR (email IS NOT NULL AND LOWER(email) = LOWER(?)) LIMIT 1",
-    )
-    .bind(raw_identifier)
-    .bind(&normalized)
-    .bind(raw_identifier)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| {
-        AppError::validation(
-            "login",
-            ValidationCode::InvalidLoginOrPassword,
-            "Invalid username or password.",
-        )
-    })?;
+    let user = match state.config.auth.login_mode {
+        LoginMode::Email => {
+            sqlx::query_as::<_, UserRow>(
+                "SELECT * FROM users WHERE (email IS NOT NULL AND LOWER(email) = LOWER(?)) OR LOWER(username) = LOWER(?) ORDER BY (email IS NOT NULL AND LOWER(email) = LOWER(?)) DESC LIMIT 1",
+            )
+            .bind(raw_identifier)
+            .bind(&normalized)
+            .bind(raw_identifier)
+            .fetch_optional(&state.db)
+            .await?
+        }
+        LoginMode::Username => {
+            sqlx::query_as::<_, UserRow>(
+                "SELECT * FROM users WHERE LOWER(username) = LOWER(?) OR LOWER(username) = LOWER(?) LIMIT 1",
+            )
+            .bind(raw_identifier)
+            .bind(&normalized)
+            .fetch_optional(&state.db)
+            .await?
+        }
+    };
 
-    let password_hash = user.password_hash.as_deref().ok_or_else(|| {
-        AppError::validation(
-            "login",
-            ValidationCode::InvalidLoginOrPassword,
-            "Invalid username or password.",
-        )
-    })?;
+    let hash_owned = match user.as_ref().and_then(|u| u.password_hash.as_deref()) {
+        Some(h) => h.to_string(),
+        None => {
+            let dummy = DUMMY_PASSWORD_HASH.clone();
+            let password_owned = payload.password;
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(parsed) = PasswordHash::new(&dummy) {
+                    let _ = Argon2::default().verify_password(password_owned.as_bytes(), &parsed);
+                }
+            })
+            .await;
+            return Err(AppError::validation(
+                "login",
+                ValidationCode::InvalidLoginOrPassword,
+                "Invalid username or password.",
+            ));
+        }
+    };
+    let user = user.expect("user exists when password_hash is Some");
 
-    let hash_owned = password_hash.to_string();
     let password_owned = payload.password;
     let valid = tokio::task::spawn_blocking(move || {
         PasswordHash::new(&hash_owned)
@@ -209,26 +240,10 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
 }
 
 pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<LoginResponse, AppError> {
-    match state.config.auth.registration_mode {
-        RegistrationMode::Closed => {
-            return Err(AppError::registration_closed("Registration is closed on this instance."));
-        }
-        RegistrationMode::InviteOnly => {
-            let code = payload
-                .invite_code
-                .as_deref()
-                .map(str::trim)
-                .filter(|c| !c.is_empty())
-                .ok_or_else(|| {
-                    AppError::registration_closed("Registration requires a valid invite.")
-                })?;
-            crate::services::invite_service::get_invite(state, code)
-                .await
-                .map_err(|_| {
-                    AppError::registration_closed("Registration requires a valid invite.")
-                })?;
-        }
-        RegistrationMode::Open => {}
+    if state.config.auth.registration_mode == RegistrationMode::Closed {
+        return Err(AppError::registration_closed(
+            "Registration is closed on this instance.",
+        ));
     }
 
     let email_to_store: Option<String> = match state.config.auth.login_mode {
@@ -241,7 +256,7 @@ pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<Logi
                     "Email is required.",
                 ));
             }
-            if !raw.contains('@') || raw.len() > 254 {
+            if !raw.contains('@') || raw.len() > MAX_EMAIL_LENGTH {
                 return Err(AppError::validation(
                     "email",
                     ValidationCode::InvalidEmailFormat,
@@ -317,7 +332,7 @@ pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<Logi
         .theme
         .as_deref()
         .filter(|t| VALID_THEMES.contains(t))
-        .unwrap_or("dark");
+        .unwrap_or(DEFAULT_THEME);
 
     let password_owned = password.to_string();
     let password_hash = tokio::task::spawn_blocking(move || {
@@ -370,7 +385,7 @@ pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<Logi
     let user_id = DISCORD_SNOWFLAKE.generate(None).to_string();
     let created_at = Utc::now().timestamp_millis() as u64;
     let discriminator = match state.config.auth.tag_style {
-        TagStyle::None => "0000".to_string(),
+        TagStyle::None => DEFAULT_DISCRIMINATOR.to_string(),
         TagStyle::Random => {
             let bytes = Uuid::new_v4();
             let raw = u32::from_le_bytes([
@@ -383,7 +398,7 @@ pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<Logi
         }
     };
 
-    sqlx::query(
+    let insert_res = sqlx::query(
         r#"
         INSERT INTO users
             (id, created_at, bot, public_flags, username, email, verified, password_hash, global_name, discriminator)
@@ -399,7 +414,28 @@ pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<Logi
     .bind(&global_name)
     .bind(&discriminator)
     .execute(&mut *tx)
-    .await?;
+    .await;
+
+    if let Err(err) = insert_res {
+        if let sqlx::Error::Database(db_err) = &err {
+            if db_err.is_unique_violation() {
+                let msg = db_err.message();
+                if msg.contains("'email'") || msg.contains(".email'") {
+                    return Err(AppError::validation(
+                        "email",
+                        ValidationCode::EmailAlreadyInUse,
+                        "Email is already in use.",
+                    ));
+                }
+                return Err(AppError::validation(
+                    "username",
+                    ValidationCode::UsernameAlreadyTaken,
+                    "This username is already taken.",
+                ));
+            }
+        }
+        return Err(err.into());
+    }
 
     sqlx::query("INSERT INTO user_settings (id, theme) VALUES (?, ?)")
         .bind(&user_id)
@@ -441,4 +477,36 @@ pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<Logi
             flags: public_flags,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_username_rules() {
+        assert!(validate_username("alice_01").is_ok());
+        assert!(validate_username("").is_err());
+        assert!(validate_username(&"a".repeat(MAX_USERNAME_LENGTH + 1)).is_err());
+        assert!(validate_username("bad-name").is_err());
+        assert!(validate_username("everyone").is_err());
+        assert!(validate_username("HERE").is_err());
+        assert!(validate_username("my_fluxer_bot").is_err());
+    }
+
+    #[test]
+    fn normalize_login_identifier_respects_mode() {
+        assert_eq!(normalize_login_identifier("alice#0000", LoginMode::Username), "alice");
+        assert_eq!(normalize_login_identifier("alice@inst.local", LoginMode::Username), "alice");
+        assert_eq!(
+            normalize_login_identifier("alice@example.com", LoginMode::Email),
+            "alice@example.com"
+        );
+    }
+
+    #[test]
+    fn suggest_username_sanitizes_input() {
+        assert_eq!(suggest_username_from_display("Jean Dupont!"), "jean_dupont");
+        assert!(suggest_username_from_display("!!!").starts_with("user_"));
+    }
 }

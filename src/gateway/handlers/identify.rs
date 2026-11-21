@@ -6,15 +6,11 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, error};
 
 use crate::AppState;
-use crate::constants::API_VERSION;
-use crate::constants::dialect::ClientDialect;
 use crate::constants::gateway::{close_codes, events};
+use crate::constants::user::PresenceStatus;
 use crate::models::gateway::IdentifyPayload;
-use crate::models::gateway::ready::{
-    DiscordReadyData, DiscordReadyGuild, PartialApplication, ReadyData, RtcRegion,
-    UnavailableGuild,
-};
-use crate::models::guild::{DiscordGuildCreate, GatewayGuild};
+use crate::models::gateway::ready::{ReadyData, RtcRegion};
+use crate::models::guild::GatewayGuild;
 use crate::models::user::{CurrentUser, PartialUser, UserProfileRow, UserRow};
 use crate::services::{auth_service, guild_service, user_service};
 use crate::utils::token::{TokenClaims, verify};
@@ -33,12 +29,6 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         session.close(close_codes::ALREADY_AUTHENTICATED);
         return;
     }
-
-    let dialect = if payload.intents.is_some() {
-        ClientDialect::Discord
-    } else {
-        session.dialect()
-    };
 
     let raw_token = payload
         .token
@@ -142,14 +132,23 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    let saved_parsed = PresenceStatus::parse(&saved_status).unwrap_or(PresenceStatus::Online);
     let (initial_status, initial_afk, initial_mobile) = if let Some(pres) = &payload.presence {
-        let chosen_status = match pres.status.as_deref() {
-            Some("dnd") => "dnd".to_string(),
-            Some("idle") => "idle".to_string(),
-            Some("invisible") => "invisible".to_string(),
-            Some("offline") => "offline".to_string(),
-            Some("online") if saved_status == "online" => "online".to_string(),
-            _ => saved_status,
+        if !user_row.bot && pres.status.as_deref().is_some_and(|s| s != saved_status) {
+            debug!(
+                user_id = %user_id,
+                identify_status = ?pres.status,
+                saved_status = %saved_status,
+                "Ignoring identify presence status in favor of persisted user_settings.status"
+            );
+        }
+        let chosen_status = if user_row.bot {
+            match pres.status.as_deref().and_then(PresenceStatus::parse) {
+                Some(PresenceStatus::Offline) | None => PresenceStatus::Online,
+                Some(st) => st,
+            }
+        } else {
+            saved_parsed
         };
         (
             chosen_status,
@@ -157,17 +156,15 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
             pres.mobile.unwrap_or(prop_mobile),
         )
     } else {
-        (saved_status, false, prop_mobile)
+        (saved_parsed, false, prop_mobile)
     };
 
     let custom_status = user_settings.custom_status.clone();
-    let is_bot = user_row.bot;
     let user_summary = PartialUser::from(&user_row);
-    let current_user = CurrentUser::from_row(user_row, profile).with_dialect(dialect);
+    let current_user = CurrentUser::from_row(user_row, profile);
 
     let Some(session) = state.hub.authenticate(
         session_id,
-        dialect,
         user_id.clone(),
         auth_session_id.clone(),
         initial_status,
@@ -180,94 +177,44 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         return;
     };
 
-    debug!(user_id = %user_id, ?dialect, "User identified, sending READY");
+    debug!(user_id = %user_id, "User identified, sending READY");
 
-    match dialect {
-        ClientDialect::Fluxer => {
-            let mut guilds: Vec<GatewayGuild> = Vec::with_capacity(guild_ids.len());
-            for gid in &guild_ids {
-                match guild_service::build_gateway_guild(state, gid, &user_id).await {
-                    Ok(g) => guilds.push(g),
-                    Err(err) => error!(error = %err, guild_id = %gid, "Failed to build gateway guild"),
-                }
+    let guilds: Vec<GatewayGuild> =
+        match guild_service::build_gateway_guilds_batch(state, &guild_ids, &user_id).await {
+            Ok(g) => g,
+            Err(err) => {
+                error!(error = %err, "Failed to build gateway guilds batch");
+                vec![]
             }
+        };
 
-            let ready = ReadyData {
-                auth_session_id_hash: hash_session_id(&auth_session_id),
-                session_id: session_id.to_string(),
-                country_code: state.config.instance.country_code.clone(),
-                version: 1,
-                guilds,
-                private_channels: vec![],
-                pinned_dms: vec![],
-                relationships: vec![],
-                presences: presence::build_ready_presences(state, &user_id, &guild_ids).await,
-                read_states: vec![],
-                notes: HashMap::new(),
-                favorite_memes: vec![],
-                webauthn_credentials: vec![],
-                user_guild_settings: vec![],
-                rtc_regions: vec![RtcRegion {
-                    id: "automatic".to_string(),
-                    name: "Automatic".to_string(),
-                    emoji: "🌐".to_string(),
-                }],
-                sessions: presence::build_user_sessions(state, &user_id).await,
-                user: current_user,
-                user_settings,
-                users: vec![user_summary],
-            };
+    let ready = ReadyData {
+        auth_session_id_hash: hash_session_id(&auth_session_id),
+        session_id: session_id.to_string(),
+        country_code: state.config.instance.country_code.clone(),
+        version: 1,
+        guilds,
+        private_channels: vec![],
+        pinned_dms: vec![],
+        relationships: vec![],
+        presences: presence::build_ready_presences(state, &user_id, &guild_ids).await,
+        read_states: vec![],
+        notes: HashMap::new(),
+        favorite_memes: vec![],
+        webauthn_credentials: vec![],
+        user_guild_settings: vec![],
+        rtc_regions: vec![RtcRegion {
+            id: "automatic".to_string(),
+            name: "Automatic".to_string(),
+            emoji: "🌐".to_string(),
+        }],
+        sessions: presence::build_user_sessions(state, &user_id).await,
+        user: current_user,
+        user_settings,
+        users: vec![user_summary],
+    };
 
-            session.dispatch(events::READY, ready);
-        }
-        ClientDialect::Discord => {
-            let mut full_guilds: Vec<DiscordGuildCreate> = Vec::with_capacity(guild_ids.len());
-            for gid in &guild_ids {
-                match guild_service::build_full_gateway_guild(state, gid, &user_id).await {
-                    Ok(g) => full_guilds.push(DiscordGuildCreate::from(g)),
-                    Err(err) => error!(error = %err, guild_id = %gid, "Failed to build discord guild"),
-                }
-            }
-
-            let ready_guilds: Vec<DiscordReadyGuild> = if is_bot {
-                guild_ids
-                    .iter()
-                    .map(|id| {
-                        DiscordReadyGuild::Unavailable(UnavailableGuild {
-                            id: id.clone(),
-                            unavailable: true,
-                        })
-                    })
-                    .collect()
-            } else {
-                full_guilds
-                    .iter()
-                    .cloned()
-                    .map(|g| DiscordReadyGuild::Full(Box::new(g)))
-                    .collect()
-            };
-
-            let ready = DiscordReadyData {
-                v: API_VERSION,
-                user: current_user,
-                guilds: ready_guilds,
-                session_id: session_id.to_string(),
-                resume_gateway_url: format!("{}/gateway", state.config.public_ws_url),
-                shard: payload.shard,
-                application: is_bot.then(|| PartialApplication {
-                    id: user_id.clone(),
-                    flags: 0,
-                }),
-            };
-
-            session.dispatch(events::READY, ready);
-            if is_bot {
-                for g in full_guilds {
-                    session.dispatch(events::GUILD_CREATE, g);
-                }
-            }
-        }
-    }
+    session.dispatch(events::READY, ready);
 
     let pub_status = presence::user_public_status(state, &user_id).await;
     let my_guilds: HashSet<String> = guild_ids.into_iter().collect();
@@ -280,7 +227,10 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         custom_status.as_ref(),
     )
     .await;
-    for gid in &my_guilds {
-        lazy_request::refresh_guild_member_lists(state, gid).await;
-    }
+    futures_util::future::join_all(
+        my_guilds
+            .iter()
+            .map(|gid| lazy_request::refresh_guild_member_lists(state, gid)),
+    )
+    .await;
 }

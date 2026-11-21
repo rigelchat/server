@@ -6,12 +6,13 @@ use axum::{
 };
 
 use crate::AppState;
+use crate::constants::guild::DiscoveryCategory;
 use crate::error::AppError;
 use crate::extractors::AuthUser;
 use crate::models::rest::discovery::{
     DiscoveryCategoryResponse, DiscoverySearchQuery, GuildDiscoveryResponse,
 };
-use crate::services::{discovery_service, member_service};
+use crate::services::discovery_service;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -33,28 +34,18 @@ async fn join_discovery_guild(
     auth: AuthUser,
     Path(guild_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    member_service::add_member_to_guild(&state, &auth.user_id, &guild_id).await?;
+    discovery_service::join_guild(&state, &auth.user_id, &guild_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn get_discovery_categories() -> Json<Vec<DiscoveryCategoryResponse>> {
-    let categories = [
-        (0, "Gaming"),
-        (1, "Music"),
-        (2, "Entertainment"),
-        (3, "Education"),
-        (4, "Science & Technology"),
-        (5, "Content Creator"),
-        (6, "Anime & Manga"),
-        (7, "Movies & TV"),
-        (8, "Other"),
-    ]
-    .into_iter()
-    .map(|(id, name)| DiscoveryCategoryResponse {
-        id,
-        name: name.to_string(),
-    })
-    .collect();
+    let categories = DiscoveryCategory::ALL
+        .into_iter()
+        .map(|cat| DiscoveryCategoryResponse {
+            id: cat as u8,
+            name: cat.display_name().to_string(),
+        })
+        .collect();
 
     Json(categories)
 }

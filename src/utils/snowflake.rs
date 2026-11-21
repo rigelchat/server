@@ -121,3 +121,58 @@ impl Snowflake {
         };
     }
 }
+
+pub fn validate_snowflake(field: &str, value: &str) -> Result<(), crate::error::AppError> {
+    if value.is_empty()
+        || value.len() > 20
+        || !value.bytes().all(|b| b.is_ascii_digit())
+        || value.parse::<u64>().is_err()
+    {
+        return Err(crate::error::AppError::validation(
+            field,
+            crate::error::ValidationCode::InvalidFormat,
+            format!("Invalid snowflake for '{field}'."),
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_snowflake_opt(
+    field: &str,
+    value: Option<&str>,
+) -> Result<(), crate::error::AppError> {
+    if let Some(s) = value {
+        validate_snowflake(field, s)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_and_deconstruct_roundtrip() {
+        let sf = Snowflake::new(1420070400000);
+        let id = sf.generate(Some(GenerateOptions {
+            timestamp: Some(1700000000000),
+            worker_id: Some(3),
+            process_id: Some(7),
+            increment: Some(42),
+        }));
+        let decoded = sf.deconstruct(id);
+        assert_eq!(decoded.timestamp, 1700000000000);
+        assert_eq!(decoded.worker_id, 3);
+        assert_eq!(decoded.process_id, 7);
+        assert_eq!(decoded.increment, 42);
+    }
+
+    #[test]
+    fn validate_snowflake_checks_bounds_and_digits() {
+        assert!(validate_snowflake("after", "123456789012345678").is_ok());
+        assert!(validate_snowflake("after", "").is_err());
+        assert!(validate_snowflake("after", "abc").is_err());
+        assert!(validate_snowflake("after", "99999999999999999999").is_err());
+        assert!(validate_snowflake("after", "123456789012345678901").is_err());
+    }
+}

@@ -2,18 +2,24 @@ use sqlx::{FromRow, MySql, QueryBuilder};
 
 use crate::AppState;
 use crate::constants::gateway::events;
-use crate::constants::limits::{MAX_BIO_LENGTH, MAX_GLOBAL_NAME_LENGTH, MAX_PRONOUNS_LENGTH};
+use crate::constants::limits::{
+    MAX_ASSET_HASH_LENGTH, MAX_BIO_LENGTH, MAX_COLOR_VALUE, MAX_EXPIRES_AT_LENGTH,
+    MAX_EXTRA_SETTINGS_BYTES, MAX_FOLDER_ICON_LENGTH, MAX_FOLDER_NAME_LENGTH,
+    MAX_GLOBAL_NAME_LENGTH, MAX_GRADIENT_PRESET_LENGTH, MAX_GUILD_FOLDERS, MAX_LOCALE_LENGTH,
+    MAX_PRONOUNS_LENGTH, MAX_SETTINGS_LIST_ITEMS, MAX_SYNCED_PREFS_BYTES, MIN_AFK_TIMEOUT,
+};
 use crate::constants::user::{DEFAULT_AFK_TIMEOUT, VALID_STATUSES, VALID_THEMES};
 use crate::error::{AppError, ValidationCode};
 use crate::models::rest::users::{
-    GetProfileQuery, MutualGuild, UpdateProfileRequest, UpdateSettingsRequest, UpdateUserRequest,
-    UserProfileResponse,
+    CustomStatusInput, GetProfileQuery, MutualGuild, UpdateProfileRequest, UpdateSettingsRequest,
+    UpdateUserRequest, UserProfileResponse,
 };
 use crate::models::user::{
-    CurrentUser, CustomStatus, PartialUser, UserProfileData, UserProfileRow, UserRow,
-    UserSettings, UserSettingsExtras, UserSettingsRow,
+    CurrentUser, PartialUser, UserProfileData, UserProfileRow, UserRow, UserSettings,
+    UserSettingsExtras, UserSettingsRow,
 };
 use crate::services::auth_service;
+use crate::utils::snowflake::validate_snowflake;
 
 #[derive(FromRow)]
 struct MutualGuildRow {
@@ -109,21 +115,34 @@ pub async fn update_user(
     }
 
     if let Some(avatar) = &payload.avatar {
+        let value = validate_asset_opt("avatar", avatar.as_deref())?;
         user_sep.push("avatar = ");
-        user_sep.push_bind_unseparated(avatar.clone());
+        user_sep.push_bind_unseparated(value);
         has_user_updates = true;
     }
 
     if let Some(banner) = &payload.banner {
+        let value = validate_asset_opt("banner", banner.as_deref())?;
         user_sep.push("banner = ");
-        user_sep.push_bind_unseparated(banner.clone());
+        user_sep.push_bind_unseparated(value);
         has_user_updates = true;
     }
 
     if has_user_updates {
         user_query.push(" WHERE id = ");
         user_query.push_bind(user_id);
-        user_query.build().execute(&mut *tx).await?;
+        if let Err(err) = user_query.build().execute(&mut *tx).await {
+            if let sqlx::Error::Database(db_err) = &err {
+                if db_err.is_unique_violation() {
+                    return Err(AppError::validation(
+                        "username",
+                        ValidationCode::UsernameAlreadyTaken,
+                        "This username is already taken.",
+                    ));
+                }
+            }
+            return Err(err.into());
+        }
     }
 
     let mut profile_query = QueryBuilder::<MySql>::new("UPDATE user_profiles SET ");
@@ -164,7 +183,7 @@ pub async fn update_user(
 
     if let Some(accent_color) = payload.accent_color {
         if let Some(color) = accent_color {
-            if color > 0x00FF_FFFF {
+            if color > MAX_COLOR_VALUE {
                 return Err(AppError::validation(
                     "accent_color",
                     ValidationCode::ColorValueTooHigh,
@@ -323,14 +342,39 @@ pub async fn update_profile(
     }
 
     if let Some(accent_color) = payload.accent_color {
+        if let Some(color) = accent_color {
+            if color > MAX_COLOR_VALUE {
+                return Err(AppError::validation(
+                    "accent_color",
+                    ValidationCode::ColorValueTooHigh,
+                    "Color value must not exceed 0xffffff.",
+                ));
+            }
+        }
         separated.push("accent_color = ");
         separated.push_bind_unseparated(accent_color);
         has_updates = true;
     }
 
     if let Some(theme_colors) = &payload.theme_colors {
+        if theme_colors.len() > 2 {
+            return Err(AppError::validation(
+                "theme_colors",
+                ValidationCode::InvalidFormat,
+                "theme_colors must contain at most 2 colors.",
+            ));
+        }
         let primary = theme_colors.first().copied().flatten();
         let secondary = theme_colors.get(1).copied().flatten();
+        for color in [primary, secondary].into_iter().flatten() {
+            if color > MAX_COLOR_VALUE {
+                return Err(AppError::validation(
+                    "theme_colors",
+                    ValidationCode::ColorValueTooHigh,
+                    "Color value must not exceed 0xffffff.",
+                ));
+            }
+        }
         separated.push("theme_color_primary = ");
         separated.push_bind_unseparated(primary);
         separated.push("theme_color_secondary = ");
@@ -435,14 +479,27 @@ pub async fn update_settings(
 
     if let Some(afk_timeout) = payload.afk_timeout {
         separated.push("afk_timeout = ");
-        separated.push_bind_unseparated(afk_timeout.clamp(60, DEFAULT_AFK_TIMEOUT));
+        separated.push_bind_unseparated(afk_timeout.clamp(MIN_AFK_TIMEOUT, DEFAULT_AFK_TIMEOUT));
         has_col_updates = true;
     }
 
     if let Some(locale) = &payload.locale {
-        locale_changed = existing_row.locale != *locale;
+        let trimmed = locale.trim();
+        if trimmed.is_empty()
+            || trimmed.len() > MAX_LOCALE_LENGTH
+            || !trimmed
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(AppError::validation(
+                "locale",
+                ValidationCode::InvalidFormat,
+                "Invalid locale format.",
+            ));
+        }
+        locale_changed = existing_row.locale != trimmed;
         separated.push("locale = ");
-        separated.push_bind_unseparated(locale);
+        separated.push_bind_unseparated(trimmed.to_string());
         has_col_updates = true;
     }
 
@@ -460,8 +517,22 @@ pub async fn update_settings(
     }
 
     if let Some(preset) = &payload.background_gradient_preset {
+        let value = preset
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(ref v) = value {
+            if v.len() > MAX_GRADIENT_PRESET_LENGTH || v.chars().any(char::is_control) {
+                return Err(AppError::validation(
+                    "background_gradient_preset",
+                    ValidationCode::StringLengthInvalid,
+                    "background_gradient_preset must not exceed 32 characters.",
+                ));
+            }
+        }
         separated.push("background_gradient_preset = ");
-        separated.push_bind_unseparated(preset.clone());
+        separated.push_bind_unseparated(value);
         has_col_updates = true;
     }
 
@@ -472,8 +543,16 @@ pub async fn update_settings(
     }
 
     if let Some(synced) = &payload.synced_preferences {
+        let value = synced.clone().unwrap_or_default();
+        if value.len() > MAX_SYNCED_PREFS_BYTES {
+            return Err(AppError::validation(
+                "synced_preferences",
+                ValidationCode::ContentExceedsMaxLength,
+                "synced_preferences exceeds maximum size.",
+            ));
+        }
         separated.push("synced_preferences = ");
-        separated.push_bind_unseparated(synced.clone().unwrap_or_default());
+        separated.push_bind_unseparated(value);
         has_col_updates = true;
     }
 
@@ -489,26 +568,83 @@ pub async fn update_settings(
 
     let custom_status_changed = payload.custom_status.is_some();
     if let Some(cs) = payload.custom_status {
-        extras.custom_status = cs.map(CustomStatus::from);
+        extras.custom_status = cs.map(CustomStatusInput::try_into_custom_status).transpose()?;
         has_extra_updates = true;
     }
     if let Some(rf) = payload.regional_format {
-        extras.regional_format = rf;
+        let value = rf
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(ref v) = value {
+            if v.len() > MAX_LOCALE_LENGTH
+                || !v
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(AppError::validation(
+                    "regional_format",
+                    ValidationCode::InvalidFormat,
+                    "Invalid regional_format value.",
+                ));
+            }
+        }
+        extras.regional_format = value;
         has_extra_updates = true;
     }
     if let Some(rt) = payload.status_resets_to {
+        if let Some(ref s) = rt {
+            if !VALID_STATUSES.contains(&s.as_str()) {
+                return Err(AppError::validation(
+                    "status_resets_to",
+                    ValidationCode::InvalidFormat,
+                    "Invalid status_resets_to value.",
+                ));
+            }
+        }
         extras.status_resets_to = rt;
         has_extra_updates = true;
     }
     if let Some(ra) = payload.status_resets_at {
-        extras.status_resets_at = ra.and_then(|v| match v {
-            serde_json::Value::String(s) => Some(s),
-            serde_json::Value::Number(n) => n
-                .as_i64()
-                .and_then(chrono::DateTime::from_timestamp_millis)
-                .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
-            _ => None,
-        });
+        extras.status_resets_at = match ra {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(raw)) => {
+                let s = raw.trim().to_string();
+                if s.is_empty() {
+                    None
+                } else {
+                    if s.len() > MAX_EXPIRES_AT_LENGTH || chrono::DateTime::parse_from_rfc3339(&s).is_err() {
+                        return Err(AppError::validation(
+                            "status_resets_at",
+                            ValidationCode::InvalidFormat,
+                            "Invalid status_resets_at timestamp.",
+                        ));
+                    }
+                    Some(s)
+                }
+            }
+            Some(serde_json::Value::Number(n)) => {
+                let ts = n
+                    .as_i64()
+                    .and_then(chrono::DateTime::from_timestamp_millis)
+                    .ok_or_else(|| {
+                        AppError::validation(
+                            "status_resets_at",
+                            ValidationCode::InvalidFormat,
+                            "Invalid status_resets_at timestamp.",
+                        )
+                    })?;
+                Some(ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+            }
+            Some(_) => {
+                return Err(AppError::validation(
+                    "status_resets_at",
+                    ValidationCode::InvalidFormat,
+                    "Invalid status_resets_at timestamp.",
+                ));
+            }
+        };
         has_extra_updates = true;
     }
 
@@ -530,25 +666,77 @@ pub async fn update_settings(
     set_extra!(allow_mature_content_on_ios, payload.allow_mature_content_on_ios);
     set_extra!(default_guilds_restricted, payload.default_guilds_restricted);
     set_extra!(bot_default_guilds_restricted, payload.bot_default_guilds_restricted);
-    set_extra!(restricted_guilds, payload.restricted_guilds);
-    set_extra!(bot_restricted_guilds, payload.bot_restricted_guilds);
-    set_extra!(trusted_domains, payload.trusted_domains);
+
+    if let Some(guilds) = payload.restricted_guilds {
+        validate_guild_id_list("restricted_guilds", &guilds)?;
+        extras.restricted_guilds = guilds;
+        has_extra_updates = true;
+    }
+    if let Some(guilds) = payload.bot_restricted_guilds {
+        validate_guild_id_list("bot_restricted_guilds", &guilds)?;
+        extras.bot_restricted_guilds = guilds;
+        has_extra_updates = true;
+    }
+    if let Some(domains) = payload.trusted_domains {
+        if domains.len() > MAX_SETTINGS_LIST_ITEMS
+            || domains.iter().any(|d| {
+                d.trim().is_empty()
+                    || d.len() > MAX_ASSET_HASH_LENGTH
+                    || d.chars().any(char::is_control)
+            })
+        {
+            return Err(AppError::validation(
+                "trusted_domains",
+                ValidationCode::InvalidFormat,
+                "Invalid trusted_domains list.",
+            ));
+        }
+        extras.trusted_domains = domains;
+        has_extra_updates = true;
+    }
 
     if let Some(fsf) = payload.friend_source_flags.or(payload.flags) {
         extras.friend_source_flags = fsf;
         has_extra_updates = true;
     }
     if let Some(folders) = payload.guild_folders {
+        if folders.len() > MAX_GUILD_FOLDERS {
+            return Err(AppError::validation(
+                "guild_folders",
+                ValidationCode::InvalidFormat,
+                "Too many guild folders.",
+            ));
+        }
+        for folder in &folders {
+            if folder.name.as_ref().is_some_and(|n| n.chars().count() > MAX_FOLDER_NAME_LENGTH)
+                || folder.icon.len() > MAX_FOLDER_ICON_LENGTH
+                || folder.icon.chars().any(char::is_control)
+            {
+                return Err(AppError::validation(
+                    "guild_folders",
+                    ValidationCode::InvalidFormat,
+                    "Invalid guild folder metadata.",
+                ));
+            }
+            validate_guild_id_list("guild_folders", &folder.guild_ids)?;
+        }
         extras.guild_folders = Some(folders);
         has_extra_updates = true;
     }
 
     if has_extra_updates {
-        if let Ok(json_str) = serde_json::to_string(&extras) {
-            separated.push("extra_settings = ");
-            separated.push_bind_unseparated(json_str);
-            has_col_updates = true;
+        let json_str = serde_json::to_string(&extras)
+            .map_err(|err| AppError::internal(format!("Failed to serialize settings: {err}")))?;
+        if json_str.len() > MAX_EXTRA_SETTINGS_BYTES {
+            return Err(AppError::validation(
+                "settings",
+                ValidationCode::ContentExceedsMaxLength,
+                "Settings payload exceeds maximum allowed size.",
+            ));
         }
+        separated.push("extra_settings = ");
+        separated.push_bind_unseparated(json_str);
+        has_col_updates = true;
     }
 
     if has_col_updates {
@@ -611,4 +799,36 @@ async fn broadcast_presence_from_settings(
     for gid in &guild_ids {
         crate::gateway::handlers::lazy_request::refresh_guild_member_lists(state, gid).await;
     }
+}
+
+fn validate_asset_opt(field: &str, value: Option<&str>) -> Result<Option<String>, AppError> {
+    let Some(trimmed) = value.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if trimmed.len() > MAX_ASSET_HASH_LENGTH
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(AppError::validation(
+            field,
+            ValidationCode::InvalidFormat,
+            format!("Invalid {field} identifier."),
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn validate_guild_id_list(field: &str, ids: &[String]) -> Result<(), AppError> {
+    if ids.len() > MAX_SETTINGS_LIST_ITEMS {
+        return Err(AppError::validation(
+            field,
+            ValidationCode::InvalidFormat,
+            format!("Too many entries in {field}."),
+        ));
+    }
+    for id in ids {
+        validate_snowflake(field, id)?;
+    }
+    Ok(())
 }

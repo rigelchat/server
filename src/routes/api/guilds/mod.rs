@@ -6,19 +6,13 @@ use axum::{
     extract::{Path, State},
     routing::{get, post},
 };
-use serde::Deserialize;
-
 use crate::AppState;
 use crate::error::AppError;
 use crate::extractors::{AppJson, AuthUser};
 use crate::models::guild::Guild;
+use crate::models::rest::guilds::CreateGuildRequest;
 use crate::models::role::Role;
 use crate::services::{guild_service, role_service};
-
-#[derive(Deserialize)]
-struct CreateGuildRequest {
-    name: String,
-}
 
 pub fn router() -> Router<AppState> {
     Router::new()

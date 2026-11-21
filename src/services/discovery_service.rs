@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use sqlx::{FromRow, MySql, QueryBuilder};
 
 use crate::AppState;
-use crate::constants::guild::{DiscoveryCategory, VerificationLevel};
+use crate::constants::guild::{
+    DEFAULT_PRIMARY_LANGUAGE, DiscoveryCategory, FEATURE_DISCOVERABLE, VerificationLevel,
+};
+use crate::constants::limits::{DEFAULT_DISCOVERY_LIMIT, MAX_DISCOVERY_LIMIT};
 use crate::error::AppError;
 use crate::models::rest::discoverable_guilds::{
     DiscoverableGuild as RestDiscoverableGuild, DiscoverableGuildsResponse,
@@ -31,7 +34,7 @@ struct GuildOnlineCountRow {
 async fn fetch_discoverable_rows(
     state: &AppState,
     search: Option<&str>,
-) -> Result<(Vec<DiscoverableGuildRow>, HashMap<String, u64>), AppError> {
+) -> Result<Vec<DiscoverableGuildRow>, AppError> {
     let mut qb = QueryBuilder::<MySql>::new(
         r#"
         SELECT
@@ -54,35 +57,50 @@ async fn fetch_discoverable_rows(
 
     qb.push(" GROUP BY g.id ORDER BY member_count DESC, g.name ASC");
 
-    let rows = qb
+    Ok(qb
         .build_query_as::<DiscoverableGuildRow>()
+        .fetch_all(&state.db)
+        .await?)
+}
+
+async fn fetch_online_counts(
+    state: &AppState,
+    guild_ids: &[String],
+) -> Result<HashMap<String, u64>, AppError> {
+    let mut online_counts = HashMap::new();
+    if guild_ids.is_empty() {
+        return Ok(online_counts);
+    }
+
+    let online_ids = state.online_user_ids().await;
+    if online_ids.is_empty() {
+        return Ok(online_counts);
+    }
+
+    let mut qb = QueryBuilder::<MySql>::new(
+        "SELECT guild_id, COUNT(DISTINCT user_id) AS online_count FROM guild_members WHERE guild_id IN (",
+    );
+    let mut sep = qb.separated(", ");
+    for gid in guild_ids {
+        sep.push_bind(gid);
+    }
+    qb.push(") AND user_id IN (");
+    let mut sep = qb.separated(", ");
+    for uid in &online_ids {
+        sep.push_bind(uid);
+    }
+    qb.push(") GROUP BY guild_id");
+
+    let counts = qb
+        .build_query_as::<GuildOnlineCountRow>()
         .fetch_all(&state.db)
         .await?;
 
-    let online_ids = state.online_user_ids().await;
-    let mut online_counts = HashMap::new();
-
-    if !online_ids.is_empty() && !rows.is_empty() {
-        let mut qb = QueryBuilder::<MySql>::new(
-            "SELECT guild_id, COUNT(DISTINCT user_id) AS online_count FROM guild_members WHERE user_id IN (",
-        );
-        let mut sep = qb.separated(", ");
-        for uid in &online_ids {
-            sep.push_bind(uid);
-        }
-        qb.push(") GROUP BY guild_id");
-
-        let counts = qb
-            .build_query_as::<GuildOnlineCountRow>()
-            .fetch_all(&state.db)
-            .await?;
-
-        for row in counts {
-            online_counts.insert(row.guild_id, row.online_count.max(0) as u64);
-        }
+    for row in counts {
+        online_counts.insert(row.guild_id, row.online_count.max(0) as u64);
     }
 
-    Ok((rows, online_counts))
+    Ok(online_counts)
 }
 
 pub async fn get_discovery_guilds(
@@ -99,16 +117,18 @@ pub async fn get_discovery_guilds(
         }
     }
 
-    let (rows, online_counts) = fetch_discoverable_rows(state, params.query.as_deref()).await?;
+    let rows = fetch_discoverable_rows(state, params.query.as_deref()).await?;
 
     let total = rows.len() as u64;
     let offset = params.offset.unwrap_or(0) as usize;
-    let limit = params.limit.unwrap_or(24).clamp(1, 48) as usize;
+    let limit = params.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT).clamp(1, MAX_DISCOVERY_LIMIT) as usize;
 
-    let guilds: Vec<DiscoverableGuild> = rows
+    let page: Vec<DiscoverableGuildRow> = rows.into_iter().skip(offset).take(limit).collect();
+    let page_ids: Vec<String> = page.iter().map(|r| r.id.clone()).collect();
+    let online_counts = fetch_online_counts(state, &page_ids).await?;
+
+    let guilds: Vec<DiscoverableGuild> = page
         .into_iter()
-        .skip(offset)
-        .take(limit)
         .map(|row| {
             let online_count = online_counts.get(&row.id).copied().unwrap_or(0);
             DiscoverableGuild {
@@ -118,11 +138,11 @@ pub async fn get_discovery_guilds(
                 banner: row.banner,
                 description: row.description,
                 category_type: DiscoveryCategory::Other,
-                primary_language: "en-US".to_string(),
+                primary_language: DEFAULT_PRIMARY_LANGUAGE.to_string(),
                 custom_tags: vec![],
                 member_count: row.member_count.max(0) as u64,
                 online_count,
-                features: vec!["DISCOVERABLE".to_string()],
+                features: vec![FEATURE_DISCOVERABLE.to_string()],
                 badge_ids: vec![],
                 verification_level: VerificationLevel::Low,
             }
@@ -148,7 +168,9 @@ pub async fn get_discovery_guilds(
 pub async fn get_discoverable_guilds(
     state: &AppState,
 ) -> Result<DiscoverableGuildsResponse, AppError> {
-    let (rows, online_counts) = fetch_discoverable_rows(state, None).await?;
+    let rows = fetch_discoverable_rows(state, None).await?;
+    let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+    let online_counts = fetch_online_counts(state, &ids).await?;
 
     let guilds: Vec<RestDiscoverableGuild> = rows
         .into_iter()
@@ -162,7 +184,7 @@ pub async fn get_discoverable_guilds(
                 banner: row.banner,
                 splash: None,
                 discovery_splash: None,
-                features: vec!["DISCOVERABLE".to_string()],
+                features: vec![FEATURE_DISCOVERABLE.to_string()],
                 approximate_presence_count: presence_count,
                 approximate_member_count: row.member_count.max(0) as u64,
                 premium_subscription_count: 0,
@@ -178,4 +200,22 @@ pub async fn get_discoverable_guilds(
         total,
         guilds,
     })
+}
+
+pub async fn join_guild(
+    state: &AppState,
+    user_id: &str,
+    guild_id: &str,
+) -> Result<(), AppError> {
+    let discoverable: Option<bool> =
+        sqlx::query_scalar("SELECT discoverable FROM guilds WHERE id = ?")
+            .bind(guild_id)
+            .fetch_optional(&state.db)
+            .await?;
+
+    if discoverable != Some(true) {
+        return Err(AppError::unknown_guild());
+    }
+
+    crate::services::member_service::add_member_to_guild(state, user_id, guild_id).await
 }

@@ -5,26 +5,10 @@ use axum::{
 };
 
 use crate::{
-    constants::dialect::ClientDialect,
     error::{AppError, ValidationCode},
     state::AppState,
     utils::token::{self, TokenClaims},
 };
-
-impl<S> FromRequestParts<S> for ClientDialect
-where
-    S: Send + Sync,
-{
-    type Rejection = AppError;
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        if let Some(dialect) = parts.extensions.get::<ClientDialect>().copied() {
-            return Ok(dialect);
-        }
-
-        Ok(ClientDialect::from_http(&parts.headers))
-    }
-}
 
 pub struct AppJson<T>(pub T);
 

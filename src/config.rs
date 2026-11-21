@@ -15,7 +15,6 @@ pub enum TagStyle {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegistrationMode {
     Open,
-    InviteOnly,
     Closed,
 }
 
@@ -106,7 +105,6 @@ impl AppConfig {
             .as_deref()
         {
             Some("closed") => RegistrationMode::Closed,
-            Some("invite_only") => RegistrationMode::InviteOnly,
             _ => RegistrationMode::Open,
         };
 
@@ -128,7 +126,15 @@ impl AppConfig {
             database_url: require_env("DATABASE_URL"),
             db_max_connections: env_parse("DB_MAX_CONNECTIONS", 16),
             auth: AuthConfig {
-                secret: require_env("AUTH_SECRET"),
+                secret: {
+                    let s = require_env("AUTH_SECRET");
+                    if s == "replace_with_a_secure_random_secret" || s.len() < 32 {
+                        tracing::warn!(
+                            "AUTH_SECRET is weak or uses the example placeholder; set a random secret of at least 32 characters in production"
+                        );
+                    }
+                    s
+                },
                 login_mode,
                 tag_style,
                 registration_mode,

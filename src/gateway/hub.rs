@@ -2,14 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::constants::dialect::ClientDialect;
-use crate::constants::gateway::{HEARTBEAT_INTERVAL, close_codes};
-use crate::gateway::handlers::presence::{combined_status, public_status};
+use crate::constants::gateway::{
+    HEARTBEAT_TIMEOUT_MS, IDENTIFY_TIMEOUT_MS, REAPER_INTERVAL_SECS, close_codes,
+};
+use crate::constants::user::PresenceStatus;
 use crate::gateway::session::GatewaySession;
 use crate::models::user::{CustomStatus, PartialUser};
 
-const HEARTBEAT_TIMEOUT_MS: u64 = (HEARTBEAT_INTERVAL as u64) * 2 + 5_000;
-const REAPER_INTERVAL_SECS: u64 = 15;
+
 
 pub fn now_millis() -> u64 {
     SystemTime::now()
@@ -18,24 +18,42 @@ pub fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn aggregate_live_state<'a>(
-    items: impl Iterator<Item = (&'a str, bool, bool)>,
+pub fn aggregate_live_state(
+    items: impl Iterator<Item = (PresenceStatus, bool, bool)>,
 ) -> (&'static str, bool, bool) {
-    let mut statuses = Vec::new();
+    let mut any = false;
+    let mut has_dnd = false;
+    let mut has_online = false;
+    let mut has_idle = false;
     let mut all_afk = true;
     let mut any_mobile = false;
 
     for (status, afk, mobile) in items {
-        statuses.push(status);
+        any = true;
+        match status {
+            PresenceStatus::Dnd => has_dnd = true,
+            PresenceStatus::Online => has_online = true,
+            PresenceStatus::Idle => has_idle = true,
+            PresenceStatus::Invisible | PresenceStatus::Offline => {}
+        }
         all_afk &= afk;
         any_mobile |= mobile;
     }
 
-    if statuses.is_empty() {
+    if !any {
         return ("offline", false, false);
     }
 
-    let pub_st = public_status(combined_status(statuses));
+    let pub_st = if has_dnd {
+        "dnd"
+    } else if has_online {
+        "online"
+    } else if has_idle {
+        "idle"
+    } else {
+        "offline"
+    };
+
     if pub_st == "offline" {
         ("offline", false, false)
     } else {
@@ -96,14 +114,22 @@ impl GatewayHub {
         }
     }
 
+    pub fn close_auth_session(&self, user_id: &str, auth_session_id: &str) {
+        for session in self.sessions_for_user(user_id) {
+            if session.auth_session_id().as_deref() == Some(auth_session_id) {
+                session.close(close_codes::AUTHENTICATION_FAILED);
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub fn authenticate(
         &self,
         session_id: &str,
-        dialect: ClientDialect,
         user_id: String,
         auth_session_id: String,
-        status: String,
+        status: PresenceStatus,
         afk: bool,
         mobile: bool,
         guild_ids: &[String],
@@ -115,7 +141,6 @@ impl GatewayHub {
 
         let guild_set: HashSet<String> = guild_ids.iter().cloned().collect();
         session.set_authenticated(
-            dialect,
             user_id.clone(),
             auth_session_id,
             status,
@@ -157,24 +182,16 @@ impl GatewayHub {
 
         let guilds = removed.guilds();
 
-        let prev_live_state = {
-            let mut snapshots = Vec::new();
-            if let Some(sids) = inner.user_sessions.get(&uid) {
-                for sid in sids {
-                    if sid == session_id {
-                        snapshots.push(removed.snapshot_presence());
-                    } else if let Some(s) = inner.sessions.get(sid) {
-                        snapshots.push(s.snapshot_presence());
-                    }
+        let prev_live_state = if let Some(sids) = inner.user_sessions.get(&uid) {
+            aggregate_live_state(sids.iter().filter_map(|sid| {
+                if sid == session_id {
+                    Some(removed.snapshot_presence())
+                } else {
+                    inner.sessions.get(sid).map(|s| s.snapshot_presence())
                 }
-            } else {
-                snapshots.push(removed.snapshot_presence());
-            }
-            aggregate_live_state(
-                snapshots
-                    .iter()
-                    .map(|(st, afk, mob)| (st.as_str(), *afk, *mob)),
-            )
+            }))
+        } else {
+            aggregate_live_state(std::iter::once(removed.snapshot_presence()))
         };
 
         if let Some(sids) = inner.user_sessions.get_mut(&uid) {
@@ -311,20 +328,30 @@ impl GatewayHub {
         }
     }
 
+    fn user_live_state_locked(
+        inner: &HubInner,
+        user_id: &str,
+    ) -> (&'static str, bool, bool) {
+        let Some(usids) = inner.user_sessions.get(user_id) else {
+            return ("offline", false, false);
+        };
+        aggregate_live_state(
+            usids
+                .iter()
+                .filter_map(|sid| inner.sessions.get(sid))
+                .map(|s| s.snapshot_presence()),
+        )
+    }
+
     pub fn online_user_ids(&self) -> HashSet<String> {
         let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let mut out = HashSet::new();
 
         for (uid, sids) in &inner.user_sessions {
-            let snapshots: Vec<_> = sids
-                .iter()
-                .filter_map(|sid| inner.sessions.get(sid))
-                .map(|s| s.snapshot_presence())
-                .collect();
             let (pub_st, _, _) = aggregate_live_state(
-                snapshots
-                    .iter()
-                    .map(|(st, afk, mob)| (st.as_str(), *afk, *mob)),
+                sids.iter()
+                    .filter_map(|sid| inner.sessions.get(sid))
+                    .map(|s| s.snapshot_presence()),
             );
             if pub_st != "offline" {
                 out.insert(uid.clone());
@@ -336,6 +363,19 @@ impl GatewayHub {
 
     pub fn count_guild_online(&self, guild_id: &str) -> u64 {
         let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        Self::count_guild_online_locked(&inner, guild_id)
+    }
+
+    pub fn count_guilds_online(&self, guild_ids: &[String]) -> HashMap<String, u64> {
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let mut out = HashMap::with_capacity(guild_ids.len());
+        for gid in guild_ids {
+            out.insert(gid.clone(), Self::count_guild_online_locked(&inner, gid));
+        }
+        out
+    }
+
+    fn count_guild_online_locked(inner: &HubInner, guild_id: &str) -> u64 {
         let Some(sids) = inner.guild_sessions.get(guild_id) else {
             return 0;
         };
@@ -351,39 +391,19 @@ impl GatewayHub {
 
         user_ids
             .into_iter()
-            .filter(|uid| {
-                let Some(usids) = inner.user_sessions.get(uid) else {
-                    return false;
-                };
-                let snapshots: Vec<_> = usids
-                    .iter()
-                    .filter_map(|sid| inner.sessions.get(sid))
-                    .map(|s| s.snapshot_presence())
-                    .collect();
-                let (pub_st, _, _) = aggregate_live_state(
-                    snapshots
-                        .iter()
-                        .map(|(st, afk, mob)| (st.as_str(), *afk, *mob)),
-                );
-                pub_st != "offline"
-            })
+            .filter(|uid| Self::user_live_state_locked(inner, uid).0 != "offline")
             .count() as u64
     }
 
     pub fn collect_user_live_state(&self, user_id: &str) -> (&'static str, bool, bool) {
         let sessions = self.sessions_for_user(user_id);
-        let snapshots: Vec<_> = sessions.iter().map(|s| s.snapshot_presence()).collect();
-        aggregate_live_state(
-            snapshots
-                .iter()
-                .map(|(st, afk, mob)| (st.as_str(), *afk, *mob)),
-        )
+        aggregate_live_state(sessions.iter().map(|s| s.snapshot_presence()))
     }
 
-    pub fn guild_live_states(
+    pub fn guild_live_presences(
         &self,
         guild_id: &str,
-    ) -> HashMap<String, (&'static str, bool, bool)> {
+    ) -> HashMap<String, (&'static str, bool, bool, Option<CustomStatus>)> {
         let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let Some(sids) = inner.guild_sessions.get(guild_id) else {
             return HashMap::new();
@@ -400,20 +420,13 @@ impl GatewayHub {
 
         let mut out = HashMap::with_capacity(user_ids.len());
         for uid in user_ids {
-            let Some(usids) = inner.user_sessions.get(&uid) else {
-                continue;
+            let (status, afk, mobile) = Self::user_live_state_locked(&inner, &uid);
+            let custom_status = if status == "offline" {
+                None
+            } else {
+                inner.user_custom_statuses.get(&uid).cloned().flatten()
             };
-            let snapshots: Vec<_> = usids
-                .iter()
-                .filter_map(|sid| inner.sessions.get(sid))
-                .map(|s| s.snapshot_presence())
-                .collect();
-            let state = aggregate_live_state(
-                snapshots
-                    .iter()
-                    .map(|(st, afk, mob)| (st.as_str(), *afk, *mob)),
-            );
-            out.insert(uid, state);
+            out.insert(uid, (status, afk, mobile, custom_status));
         }
         out
     }
@@ -445,19 +458,7 @@ impl GatewayHub {
 
         let mut out = Vec::with_capacity(peer_ids.len());
         for uid in peer_ids {
-            let Some(usids) = inner.user_sessions.get(&uid) else {
-                continue;
-            };
-            let snapshots: Vec<_> = usids
-                .iter()
-                .filter_map(|sid| inner.sessions.get(sid))
-                .map(|s| s.snapshot_presence())
-                .collect();
-            let (pub_st, afk, mobile) = aggregate_live_state(
-                snapshots
-                    .iter()
-                    .map(|(st, afk, mob)| (st.as_str(), *afk, *mob)),
-            );
+            let (pub_st, afk, mobile) = Self::user_live_state_locked(&inner, &uid);
             if pub_st == "offline" {
                 continue;
             }
@@ -478,21 +479,7 @@ impl GatewayHub {
         let mut out = Vec::with_capacity(user_ids.len());
 
         for uid in user_ids {
-            let (pub_st, afk, mobile) = if let Some(usids) = inner.user_sessions.get(uid) {
-                let snapshots: Vec<_> = usids
-                    .iter()
-                    .filter_map(|sid| inner.sessions.get(sid))
-                    .map(|s| s.snapshot_presence())
-                    .collect();
-                aggregate_live_state(
-                    snapshots
-                        .iter()
-                        .map(|(st, afk, mob)| (st.as_str(), *afk, *mob)),
-                )
-            } else {
-                ("offline", false, false)
-            };
-
+            let (pub_st, afk, mobile) = Self::user_live_state_locked(&inner, uid);
             let custom_status = if pub_st == "offline" {
                 None
             } else {
@@ -515,7 +502,7 @@ impl GatewayHub {
     pub fn guild_member_list_subscribers(
         &self,
         guild_id: &str,
-    ) -> Vec<(Arc<GatewaySession>, ClientDialect, String, [i64; 2])> {
+    ) -> Vec<(Arc<GatewaySession>, String, [i64; 2])> {
         let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let Some(sids) = inner.guild_sessions.get(guild_id) else {
             return Vec::new();
@@ -526,7 +513,7 @@ impl GatewayHub {
             .filter(|s| s.is_authenticated())
             .filter_map(|s| {
                 s.member_list_subscription(guild_id)
-                    .map(|(cid, range)| (Arc::clone(s), s.dialect(), cid, range))
+                    .map(|(cid, range)| (Arc::clone(s), cid, range))
             })
             .collect()
     }
@@ -562,8 +549,11 @@ impl GatewayHub {
     }
 
     pub fn set_user_status(&self, user_id: &str, status: &str) {
+        let Some(parsed) = PresenceStatus::parse(status) else {
+            return;
+        };
         for session in self.sessions_for_user(user_id) {
-            session.set_status(status.to_string());
+            session.set_status(parsed);
         }
     }
 
@@ -583,6 +573,8 @@ impl GatewayHub {
                         .values()
                         .filter(|s| {
                             now.saturating_sub(s.last_heartbeat_ms()) > HEARTBEAT_TIMEOUT_MS
+                                || (!s.is_authenticated()
+                                    && now.saturating_sub(s.connected_at_ms()) > IDENTIFY_TIMEOUT_MS)
                         })
                         .cloned()
                         .collect()
@@ -594,5 +586,90 @@ impl GatewayHub {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    fn test_user(id: &str) -> PartialUser {
+        PartialUser {
+            id: id.to_string(),
+            username: format!("user_{id}"),
+            discriminator: "0000".to_string(),
+            global_name: None,
+            avatar: None,
+            avatar_color: None,
+            bot: false,
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn aggregate_live_state_precedence_and_invisible_masking() {
+        assert_eq!(
+            aggregate_live_state(std::iter::empty()),
+            ("offline", false, false)
+        );
+
+        let inv = [
+            (PresenceStatus::Invisible, false, true),
+            (PresenceStatus::Invisible, true, false),
+        ];
+        assert_eq!(
+            aggregate_live_state(inv.iter().copied()),
+            ("offline", false, false)
+        );
+
+        let mixed = [
+            (PresenceStatus::Online, true, false),
+            (PresenceStatus::Dnd, false, true),
+        ];
+        assert_eq!(
+            aggregate_live_state(mixed.iter().copied()),
+            ("dnd", false, true)
+        );
+
+        let idle_afk = [
+            (PresenceStatus::Idle, true, false),
+            (PresenceStatus::Invisible, true, false),
+        ];
+        assert_eq!(
+            aggregate_live_state(idle_afk.iter().copied()),
+            ("idle", true, false)
+        );
+    }
+
+    #[test]
+    fn hub_ready_presences_excludes_viewer_and_invisible() {
+        let hub = GatewayHub::new();
+        let (tx1, _rx1) = mpsc::channel(8);
+        let (tx2, _rx2) = mpsc::channel(8);
+        let (tx3, _rx3) = mpsc::channel(8);
+
+        hub.register(Arc::new(GatewaySession::new("s1".into(), tx1)));
+        hub.register(Arc::new(GatewaySession::new("s2".into(), tx2)));
+        hub.register(Arc::new(GatewaySession::new("s3".into(), tx3)));
+
+        let guilds = vec!["g1".to_string()];
+        hub.authenticate("s1", "u1".into(), "a1".into(), PresenceStatus::Online, false, false, &guilds, test_user("u1"), None);
+        hub.authenticate("s2", "u2".into(), "a2".into(), PresenceStatus::Dnd, false, true, &guilds, test_user("u2"), None);
+        hub.authenticate("s3", "u3".into(), "a3".into(), PresenceStatus::Invisible, false, false, &guilds, test_user("u3"), None);
+
+        let presences = hub.ready_presences_for_guilds("u1", &guilds);
+        assert_eq!(presences.len(), 1);
+        assert_eq!(presences[0].user_id, "u2");
+        assert_eq!(presences[0].status, "dnd");
+        assert!(presences[0].mobile);
+        assert_eq!(hub.count_guild_online("g1"), 2);
+
+        let (unreg, remaining) = hub.unregister("s2");
+        assert_eq!(remaining, 2);
+        let unreg = unreg.unwrap();
+        assert!(!unreg.has_other_session);
+        assert_eq!(unreg.prev_live_state, ("dnd", false, true));
+        assert_eq!(hub.count_guild_online("g1"), 1);
     }
 }

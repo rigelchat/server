@@ -2,14 +2,10 @@ use std::fmt;
 
 use axum::{
     Json,
-    extract::Request,
     http::StatusCode,
-    middleware::Next,
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
-
-use crate::constants::dialect::ClientDialect;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,28 +64,6 @@ impl ApiErrorCode {
         }
     }
 
-    pub fn discord_code(self) -> u32 {
-        match self {
-            Self::InvalidFormBody => 50035,
-            Self::Unauthorized | Self::MissingAuthorization => 40001,
-            Self::InvalidAuthToken => 50014,
-            Self::MissingPermissions => 50013,
-            Self::UnknownChannel => 10003,
-            Self::UnknownGuild => 10004,
-            Self::UnknownInvite => 10006,
-            Self::UnknownMember => 10007,
-            Self::UnknownMessage => 10008,
-            Self::UnknownUser => 10013,
-            Self::MaxGuilds => 30001,
-            Self::MaxInvites => 30016,
-            Self::InvalidChannelType => 50024,
-            Self::CannotSendMessagesInNonTextChannel => 50008,
-            Self::CannotEditOtherUserMessage => 50005,
-            Self::CannotSendEmptyMessage => 50006,
-            Self::UserBannedFromGuild => 40007,
-            _ => 0,
-        }
-    }
 }
 
 #[allow(dead_code)]
@@ -143,13 +117,6 @@ pub struct ValidationError {
     pub message: String,
 }
 
-#[derive(Debug, Clone)]
-struct ApiErrorMeta {
-    status: StatusCode,
-    code: ApiErrorCode,
-    message: String,
-}
-
 fn slice_is_empty(errors: &&[ValidationError]) -> bool {
     errors.is_empty()
 }
@@ -160,12 +127,6 @@ struct FluxerErrorBody<'a> {
     message: &'a str,
     #[serde(skip_serializing_if = "slice_is_empty")]
     errors: &'a [ValidationError],
-}
-
-#[derive(Serialize)]
-struct DiscordErrorBody<'a> {
-    code: u32,
-    message: &'a str,
 }
 
 #[derive(Debug)]
@@ -409,7 +370,7 @@ impl IntoResponse for AppError {
             } => (status, code, message, errors),
         };
 
-        let mut response = (
+        (
             status,
             Json(FluxerErrorBody {
                 code: code.as_str(),
@@ -417,34 +378,6 @@ impl IntoResponse for AppError {
                 errors: &errors,
             }),
         )
-            .into_response();
-
-        response
-            .extensions_mut()
-            .insert(ApiErrorMeta { status, code, message });
-
-        response
+            .into_response()
     }
-}
-
-pub async fn adapt_error_dialect(mut req: Request, next: Next) -> Response {
-    let dialect = ClientDialect::from_http(req.headers());
-    req.extensions_mut().insert(dialect);
-
-    let res = next.run(req).await;
-
-    if dialect == ClientDialect::Discord {
-        if let Some(meta) = res.extensions().get::<ApiErrorMeta>() {
-            return (
-                meta.status,
-                Json(DiscordErrorBody {
-                    code: meta.code.discord_code(),
-                    message: &meta.message,
-                }),
-            )
-                .into_response();
-        }
-    }
-
-    res
 }

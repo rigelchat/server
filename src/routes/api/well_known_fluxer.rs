@@ -34,7 +34,7 @@ async fn get_config(State(state): State<AppState>) -> Json<fluxer::InstanceRespo
     };
 
     let registration_mode = match cfg.auth.registration_mode {
-        RegistrationMode::Open | RegistrationMode::InviteOnly => fluxer::RegistrationModes::Open,
+        RegistrationMode::Open => fluxer::RegistrationModes::Open,
         RegistrationMode::Closed => fluxer::RegistrationModes::Closed,
     };
 

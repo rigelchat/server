@@ -3,19 +3,12 @@ use axum::{
     extract::{Path, Query, State},
     routing::get,
 };
-use serde::Deserialize;
-
 use crate::AppState;
 use crate::error::AppError;
 use crate::extractors::AuthUser;
 use crate::models::guild_member::GuildMemberResponse;
+use crate::models::rest::guilds::ListMembersQuery;
 use crate::services::member_service;
-
-#[derive(Deserialize)]
-struct ListMembersQuery {
-    limit: Option<u32>,
-    after: Option<String>,
-}
 
 pub fn router() -> Router<AppState> {
     Router::new()

@@ -1,7 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+use crate::constants::limits::{
+    MAX_CUSTOM_STATUS_TEXT_LENGTH, MAX_EMOJI_NAME_LENGTH, MAX_EXPIRES_AT_LENGTH,
+};
+use crate::error::{AppError, ValidationCode};
 use crate::models::serde_helpers::deserialize_double_option;
 use crate::models::user::{CustomStatus, GuildFolder, PartialUser, UserProfileData};
+use crate::utils::snowflake::validate_snowflake;
 
 #[derive(Deserialize)]
 pub struct UpdateUserRequest {
@@ -109,23 +114,89 @@ pub struct UpdateSettingsRequest {
     pub guild_folders: Option<Vec<GuildFolder>>,
 }
 
-impl From<CustomStatusInput> for CustomStatus {
-    fn from(input: CustomStatusInput) -> Self {
-        let expires_at = input.expires_at.and_then(|v| match v {
-            serde_json::Value::String(s) => Some(s),
-            serde_json::Value::Number(n) => n
-                .as_i64()
-                .and_then(chrono::DateTime::from_timestamp_millis)
-                .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
-            _ => None,
-        });
-
-        Self {
-            text: input.text,
-            expires_at,
-            emoji_id: input.emoji_id,
-            emoji_name: input.emoji_name,
-            emoji_animated: false,
+impl CustomStatusInput {
+    pub fn try_into_custom_status(self) -> Result<CustomStatus, AppError> {
+        let text = self
+            .text
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(ref t) = text {
+            if t.chars().count() > MAX_CUSTOM_STATUS_TEXT_LENGTH {
+                return Err(AppError::validation(
+                    "custom_status.text",
+                    ValidationCode::ContentExceedsMaxLength,
+                    "Custom status text must not exceed 128 characters.",
+                ));
+            }
         }
+
+        let emoji_name = self
+            .emoji_name
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(ref name) = emoji_name {
+            if name.chars().count() > MAX_EMOJI_NAME_LENGTH {
+                return Err(AppError::validation(
+                    "custom_status.emoji_name",
+                    ValidationCode::StringLengthInvalid,
+                    "Emoji name must not exceed 64 characters.",
+                ));
+            }
+        }
+
+        let emoji_id = self
+            .emoji_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(ref id) = emoji_id {
+            validate_snowflake("custom_status.emoji_id", id)?;
+        }
+
+        let expires_at = match self.expires_at {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(raw)) => {
+                let s = raw.trim().to_string();
+                if s.is_empty() {
+                    None
+                } else {
+                    if s.len() > MAX_EXPIRES_AT_LENGTH || chrono::DateTime::parse_from_rfc3339(&s).is_err() {
+                        return Err(AppError::validation(
+                            "custom_status.expires_at",
+                            ValidationCode::InvalidFormat,
+                            "Invalid custom status expiration timestamp.",
+                        ));
+                    }
+                    Some(s)
+                }
+            }
+            Some(serde_json::Value::Number(n)) => {
+                let ts = n
+                    .as_i64()
+                    .and_then(chrono::DateTime::from_timestamp_millis)
+                    .ok_or_else(|| {
+                        AppError::validation(
+                            "custom_status.expires_at",
+                            ValidationCode::InvalidFormat,
+                            "Invalid custom status expiration timestamp.",
+                        )
+                    })?;
+                Some(ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+            }
+            Some(_) => {
+                return Err(AppError::validation(
+                    "custom_status.expires_at",
+                    ValidationCode::InvalidFormat,
+                    "Invalid custom status expiration timestamp.",
+                ));
+            }
+        };
+
+        Ok(CustomStatus {
+            text,
+            expires_at,
+            emoji_id,
+            emoji_name,
+            emoji_animated: false,
+        })
     }
 }

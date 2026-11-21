@@ -1,9 +1,8 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sqlx::FromRow;
 
-use crate::constants::dialect::ClientDialect;
 use crate::models::channel::ChannelResponse;
-use crate::models::guild_member::{GatewayGuildMember, GuildMemberResponse};
+use crate::models::guild_member::GatewayGuildMember;
 use crate::models::role::Role;
 use crate::models::serde_helpers::serialize_millis_iso;
 
@@ -24,14 +23,6 @@ pub struct BaseGuild {
     pub discoverable: bool,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ListGuildsQuery {
-    pub before: Option<String>,
-    pub after: Option<String>,
-    pub limit: Option<u32>,
-    pub with_counts: Option<bool>,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct Guild {
     pub id: String,
@@ -49,8 +40,6 @@ pub struct Guild {
     pub embed_splash_height: Option<u32>,
     pub vanity_url_code: Option<String>,
     pub owner_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner: Option<bool>,
     pub system_channel_id: Option<String>,
     pub system_channel_flags: u32,
     pub rules_channel_id: Option<String>,
@@ -108,13 +97,12 @@ impl From<BaseGuild> for Guild {
             embed_splash_height: None,
             vanity_url_code: g.vanity_url_code,
             owner_id: g.owner_id,
-            owner: None,
             system_channel_id: g.system_channel_id,
             system_channel_flags: g.system_channel_flags,
             rules_channel_id: g.rules_channel_id,
             afk_channel_id: g.afk_channel_id,
             afk_timeout: g.afk_timeout,
-            features: if g.discoverable { vec!["DISCOVERABLE".to_string()] } else { vec![] },
+            features: if g.discoverable { vec![crate::constants::guild::FEATURE_DISCOVERABLE.to_string()] } else { vec![] },
             badge_ids: vec![],
             verification_level: 0,
             mfa_level: 0,
@@ -139,15 +127,6 @@ impl From<BaseGuild> for Guild {
     }
 }
 
-impl Guild {
-    pub fn with_dialect_for_user(mut self, dialect: ClientDialect, user_id: &str) -> Self {
-        if dialect == ClientDialect::Discord {
-            self.owner = Some(self.owner_id == user_id);
-        }
-        self
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct GatewayGuild<M = GatewayGuildMember> {
     pub id: String,
@@ -166,41 +145,3 @@ pub struct GatewayGuild<M = GatewayGuildMember> {
     pub properties: GatewayGuildProperties,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct DiscordGuildCreate {
-    #[serde(flatten)]
-    pub properties: Guild,
-    #[serde(serialize_with = "serialize_millis_iso")]
-    pub joined_at: u64,
-    pub large: bool,
-    pub unavailable: bool,
-    pub member_count: u64,
-    pub channels: Vec<ChannelResponse>,
-    pub roles: Vec<Role>,
-    pub members: Vec<GuildMemberResponse>,
-    pub emojis: Vec<serde_json::Value>,
-    pub stickers: Vec<serde_json::Value>,
-    pub presences: Vec<serde_json::Value>,
-    pub voice_states: Vec<serde_json::Value>,
-    pub threads: Vec<serde_json::Value>,
-}
-
-impl From<GatewayGuild<GuildMemberResponse>> for DiscordGuildCreate {
-    fn from(g: GatewayGuild<GuildMemberResponse>) -> Self {
-        Self {
-            properties: g.properties,
-            joined_at: g.joined_at,
-            large: false,
-            unavailable: false,
-            member_count: g.member_count,
-            channels: g.channels,
-            roles: g.roles,
-            members: g.members,
-            emojis: g.emojis,
-            stickers: g.stickers,
-            presences: g.presences,
-            voice_states: g.voice_states,
-            threads: g.threads,
-        }
-    }
-}

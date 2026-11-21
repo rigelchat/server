@@ -6,10 +6,10 @@ use axum::{
 };
 
 use crate::AppState;
-use crate::constants::dialect::ClientDialect;
 use crate::error::AppError;
 use crate::extractors::{AppJson, AuthUser};
-use crate::models::guild::{Guild, ListGuildsQuery};
+use crate::models::guild::Guild;
+use crate::models::rest::guilds::ListGuildsQuery;
 use crate::models::guild_member::GuildMemberResponse;
 use crate::models::rest::users::{
     UpdateProfileRequest, UpdateSettingsRequest, UpdateUserRequest, UserProfileResponse,
@@ -32,20 +32,18 @@ pub fn router() -> Router<AppState> {
 async fn get_current_user(
     State(state): State<AppState>,
     auth: AuthUser,
-    dialect: ClientDialect,
 ) -> Result<Json<CurrentUser>, AppError> {
     let user = user_service::get_current_user(&state, &auth.user_id).await?;
-    Ok(Json(user.with_dialect(dialect)))
+    Ok(Json(user))
 }
 
 async fn update_user(
     State(state): State<AppState>,
     auth: AuthUser,
-    dialect: ClientDialect,
     AppJson(payload): AppJson<UpdateUserRequest>,
 ) -> Result<Json<CurrentUser>, AppError> {
     let updated = user_service::update_user(&state, &auth.user_id, payload).await?;
-    Ok(Json(updated.with_dialect(dialect)))
+    Ok(Json(updated))
 }
 
 async fn update_profile(
@@ -100,13 +98,8 @@ async fn no_content() -> StatusCode {
 async fn get_guilds(
     State(state): State<AppState>,
     auth: AuthUser,
-    dialect: ClientDialect,
     Query(query): Query<ListGuildsQuery>,
 ) -> Result<Json<Vec<Guild>>, AppError> {
-    let guilds = guild_service::get_user_guilds(&state, &auth.user_id, query)
-        .await?
-        .into_iter()
-        .map(|g| g.with_dialect_for_user(dialect, &auth.user_id))
-        .collect();
+    let guilds = guild_service::get_user_guilds(&state, &auth.user_id, query).await?;
     Ok(Json(guilds))
 }

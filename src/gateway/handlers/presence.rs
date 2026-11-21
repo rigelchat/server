@@ -1,29 +1,19 @@
 use std::collections::{HashMap, HashSet};
 
-use serde::Deserialize;
-use serde_json::json;
 use sqlx::{MySql, QueryBuilder};
-use tracing::error;
+use tracing::{debug, error};
 
 use crate::AppState;
-use crate::constants::dialect::ClientDialect;
 use crate::constants::gateway::events;
-use crate::constants::user::VALID_STATUSES;
+use crate::constants::user::PresenceStatus;
 use crate::gateway::hub::LivePresenceSnapshot;
+use crate::models::gateway::presence::{
+    PresenceUpdatePayload, build_presence_value, serialize_presence_user,
+};
 use crate::models::gateway::ready::ClientSessionInfo;
 use crate::models::rest::users::CustomStatusInput;
-use crate::models::serde_helpers::deserialize_double_option;
 use crate::models::user::{CustomStatus, PartialUser, UserRow, UserSettingsExtras};
 use crate::services::user_service;
-
-#[derive(Debug, Deserialize)]
-pub struct PresenceUpdatePayload {
-    pub status: String,
-    pub afk: Option<bool>,
-    pub mobile: Option<bool>,
-    #[serde(default, deserialize_with = "deserialize_double_option")]
-    pub custom_status: Option<Option<CustomStatusInput>>,
-}
 
 pub fn combined_status<'a>(statuses: impl IntoIterator<Item = &'a str>) -> &'static str {
     let mut has_online = false;
@@ -51,14 +41,7 @@ pub fn combined_status<'a>(statuses: impl IntoIterator<Item = &'a str>) -> &'sta
     }
 }
 
-pub fn public_status(combined: &str) -> &'static str {
-    match combined {
-        "dnd" => "dnd",
-        "idle" => "idle",
-        "online" => "online",
-        _ => "offline",
-    }
-}
+
 
 pub async fn build_user_sessions(state: &AppState, user_id: &str) -> Vec<ClientSessionInfo> {
     let live: Vec<ClientSessionInfo> = state
@@ -126,46 +109,21 @@ fn format_presence_json(
     snap: &LivePresenceSnapshot,
     fetched_users: &HashMap<String, PartialUser>,
     guild_id: Option<&str>,
-    dialect: ClientDialect,
 ) -> serde_json::Value {
-    match dialect {
-        ClientDialect::Fluxer => {
-            let user_val = snap
-                .partial_user
-                .as_ref()
-                .or_else(|| fetched_users.get(&snap.user_id))
-                .and_then(|u| serde_json::to_value(u).ok())
-                .unwrap_or_else(|| json!({ "id": snap.user_id }));
-            let mut obj = json!({
-                "user": user_val,
-                "status": snap.status,
-                "mobile": snap.mobile,
-                "afk": snap.afk,
-                "custom_status": snap.custom_status,
-            });
-            if let Some(gid) = guild_id {
-                obj["guild_id"] = json!(gid);
-            }
-            obj
-        }
-        ClientDialect::Discord => {
-            let client_status = if snap.status == "offline" {
-                json!({})
-            } else {
-                json!({ "desktop": snap.status })
-            };
-            let mut obj = json!({
-                "user": { "id": snap.user_id },
-                "status": snap.status,
-                "activities": [],
-                "client_status": client_status,
-            });
-            if let Some(gid) = guild_id {
-                obj["guild_id"] = json!(gid);
-            }
-            obj
-        }
-    }
+    let fluxer_user_val = serialize_presence_user(
+        &snap.user_id,
+        snap.partial_user
+            .as_ref()
+            .or_else(|| fetched_users.get(&snap.user_id)),
+    );
+    build_presence_value(
+        &fluxer_user_val,
+        snap.status,
+        snap.mobile,
+        snap.afk,
+        snap.custom_status.as_ref(),
+        guild_id,
+    )
 }
 
 pub async fn build_ready_presences(
@@ -187,7 +145,7 @@ pub async fn build_ready_presences(
 
     snapshots
         .iter()
-        .map(|snap| format_presence_json(snap, &fetched, None, ClientDialect::Fluxer))
+        .map(|snap| format_presence_json(snap, &fetched, None))
         .collect()
 }
 
@@ -195,43 +153,32 @@ pub async fn build_presence_payloads(
     state: &AppState,
     user_ids: &[String],
     guild_id: Option<&str>,
-    dialect: ClientDialect,
 ) -> Vec<serde_json::Value> {
     if user_ids.is_empty() {
         return vec![];
     }
 
     let snapshots = state.hub.presence_snapshots(user_ids);
-    let fetched = if dialect == ClientDialect::Fluxer {
-        let missing_ids: Vec<String> = snapshots
-            .iter()
-            .filter(|s| s.partial_user.is_none())
-            .map(|s| s.user_id.clone())
-            .collect();
-        fetch_partial_users_batched(state, &missing_ids).await
-    } else {
-        HashMap::new()
-    };
+    let missing_ids: Vec<String> = snapshots
+        .iter()
+        .filter(|s| s.partial_user.is_none())
+        .map(|s| s.user_id.clone())
+        .collect();
+    let fetched = fetch_partial_users_batched(state, &missing_ids).await;
 
     snapshots
         .iter()
-        .map(|snap| format_presence_json(snap, &fetched, guild_id, dialect))
+        .map(|snap| format_presence_json(snap, &fetched, guild_id))
         .collect()
 }
 
 pub async fn handle(session_id: &str, state: &AppState, payload: PresenceUpdatePayload) {
-    if !VALID_STATUSES.contains(&payload.status.as_str()) && payload.status != "offline" {
-        return;
-    }
-
-    let Some(session) = state.hub.get(session_id) else {
+    let Some(session_status) = PresenceStatus::parse(&payload.status) else {
         return;
     };
 
-    let session_status = if payload.status == "offline" {
-        "offline".to_string()
-    } else {
-        payload.status.clone()
+    let Some(session) = state.hub.get(session_id) else {
+        return;
     };
 
     let Some((user_id, guild_ids)) =
@@ -240,7 +187,14 @@ pub async fn handle(session_id: &str, state: &AppState, payload: PresenceUpdateP
         return;
     };
 
-    if payload.status != "offline" {
+    debug!(
+        user_id = %user_id,
+        status = %payload.status,
+        afk = ?payload.afk,
+        "Received OP 3 PRESENCE_UPDATE"
+    );
+
+    if session_status != PresenceStatus::Offline && payload.afk != Some(true) {
         if let Err(err) = sqlx::query("UPDATE user_settings SET status = ? WHERE id = ?")
             .bind(&payload.status)
             .bind(&user_id)
@@ -266,7 +220,10 @@ pub async fn handle(session_id: &str, state: &AppState, payload: PresenceUpdateP
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
 
-        extras.custom_status = cs_opt.map(CustomStatus::from);
+        extras.custom_status = match cs_opt.map(CustomStatusInput::try_into_custom_status).transpose() {
+            Ok(cs) => cs,
+            Err(_) => return,
+        };
         if let Ok(json_str) = serde_json::to_string(&extras) {
             if let Err(err) = sqlx::query("UPDATE user_settings SET extra_settings = ? WHERE id = ?")
                 .bind(&json_str)
@@ -353,37 +310,18 @@ pub async fn broadcast_presence_with_user(
         custom_status
     };
 
-    let fluxer_user_val = partial_user
-        .and_then(|u| serde_json::to_value(u).ok())
-        .unwrap_or_else(|| json!({ "id": user_id }));
+    let fluxer_user_val = serialize_presence_user(user_id, partial_user);
 
     for (peer, shared_guilds) in peers {
-        let dialect = peer.dialect();
         for guild_id in shared_guilds {
-            let payload = match dialect {
-                ClientDialect::Fluxer => json!({
-                    "guild_id": guild_id,
-                    "user": fluxer_user_val,
-                    "status": public_status,
-                    "mobile": mobile,
-                    "afk": afk,
-                    "custom_status": custom_status,
-                }),
-                ClientDialect::Discord => {
-                    let client_status = if public_status == "offline" {
-                        json!({})
-                    } else {
-                        json!({ "desktop": public_status })
-                    };
-                    json!({
-                        "guild_id": guild_id,
-                        "user": { "id": user_id },
-                        "status": public_status,
-                        "activities": [],
-                        "client_status": client_status,
-                    })
-                }
-            };
+            let payload = build_presence_value(
+                &fluxer_user_val,
+                public_status,
+                mobile,
+                afk,
+                custom_status,
+                Some(&guild_id),
+            );
             peer.dispatch(events::PRESENCE_UPDATE, payload);
         }
     }

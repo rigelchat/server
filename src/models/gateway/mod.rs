@@ -1,9 +1,16 @@
+pub mod events;
 pub mod lazy_request;
+pub mod presence;
 pub mod ready;
 
 use serde::{Deserialize, Serialize};
 
 use crate::constants::gateway::Opcode;
+
+#[derive(Debug, Deserialize)]
+pub struct GatewayQuery {
+    pub compress: Option<String>,
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct GatewayPayload<T = serde_json::Value> {
@@ -13,7 +20,7 @@ pub struct GatewayPayload<T = serde_json::Value> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub s: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub t: Option<String>
+    pub t: Option<String>,
 }
 
 impl<T> GatewayPayload<T> {
@@ -22,14 +29,14 @@ impl<T> GatewayPayload<T> {
             op,
             d,
             s: None,
-            t: None
+            t: None,
         }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HelloPayload {
-    pub heartbeat_interval: u32
+    pub heartbeat_interval: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,7 +50,5 @@ pub struct IdentifyPresence {
 pub struct IdentifyPayload {
     pub token: String,
     pub properties: serde_json::Value,
-    pub intents: Option<u64>,
-    pub shard: Option<[u32; 2]>,
     pub presence: Option<IdentifyPresence>,
 }

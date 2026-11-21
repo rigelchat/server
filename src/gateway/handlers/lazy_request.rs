@@ -1,36 +1,21 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use sqlx::FromRow;
 use tracing::error;
 
 use crate::AppState;
-use crate::constants::dialect::ClientDialect;
 use crate::constants::flags::PermissionFlags;
-use crate::constants::gateway::events;
+use crate::constants::gateway::{MEMBER_LIST_RANGE_MAX_SPAN, events};
+use crate::constants::limits::MAX_LAZY_SUBSCRIBED_MEMBERS;
 use crate::models::channel::{ChannelOverwriteRow, PermissionOverwrite};
 use crate::models::gateway::lazy_request::{
-    GuildMemberListUpdate, LazyListAction, LazyRequestPayload, MemberListClientStatus,
-    MemberListGroup, MemberListItem, MemberListMember, MemberListPresence, MemberListSyncOp,
+    GuildMemberListUpdate, LazyListAction, LazyRequestPayload, MemberListGroup, MemberListItem,
+    MemberListMember, MemberListPresence, MemberListSyncOp,
 };
-use crate::models::guild_member::{GuildMemberRole, GuildMemberUserRef};
-use crate::models::user::{CustomStatus, PartialUser, UserSettingsExtras};
+use crate::models::guild_member::{GuildMemberFields, GuildMemberRole, GuildMemberUserRow};
+use crate::models::user::{CustomStatus, PartialUser};
 use crate::services::permission_service::{self, RolePerm};
 
 use super::presence;
-
-#[derive(FromRow)]
-struct LazyMemberRow {
-    user_id: String,
-    joined_at: u64,
-    nick: Option<String>,
-    username: String,
-    discriminator: String,
-    global_name: Option<String>,
-    avatar: Option<String>,
-    bot: bool,
-    public_flags: u32,
-    extra_settings: Option<String>,
-}
 
 struct SnapshotMember {
     user: PartialUser,
@@ -46,6 +31,7 @@ struct SnapshotMember {
 struct GuildMemberListSnapshot {
     online_members: Vec<SnapshotMember>,
     offline_members: Vec<SnapshotMember>,
+    viewer_allowed: HashSet<String>,
 }
 
 impl GuildMemberListSnapshot {
@@ -54,41 +40,19 @@ impl GuildMemberListSnapshot {
         guild_id: &str,
         channel_id: &str,
         range: [i64; 2],
-        dialect: ClientDialect,
     ) -> GuildMemberListUpdate {
         let to_item = |m: &SnapshotMember| -> MemberListItem {
-            let presence = match dialect {
-                ClientDialect::Fluxer => MemberListPresence::Fluxer {
-                    status: m.status.to_string(),
-                    mobile: m.mobile,
-                    afk: m.afk,
-                    custom_status: m.custom_status.clone(),
-                },
-                ClientDialect::Discord => {
-                    let desktop = (m.status != "offline").then(|| m.status.to_string());
-                    MemberListPresence::Discord {
-                        user: GuildMemberUserRef {
-                            id: m.user.id.clone(),
-                        },
-                        status: m.status.to_string(),
-                        client_status: MemberListClientStatus { desktop },
-                        activities: vec![],
-                    }
-                }
+            let presence = MemberListPresence {
+                status: m.status.to_string(),
+                mobile: m.mobile,
+                afk: m.afk,
+                custom_status: m.custom_status.clone(),
             };
 
             MemberListItem::Member {
                 member: MemberListMember {
                     user: m.user.clone(),
-                    nick: m.nick.clone(),
-                    avatar: None,
-                    banner: None,
-                    accent_color: None,
-                    roles: m.roles.clone(),
-                    joined_at: m.joined_at,
-                    mute: false,
-                    deaf: false,
-                    communication_disabled_until: None,
+                    member: GuildMemberFields::new(m.nick.clone(), m.roles.clone(), m.joined_at),
                     presence,
                 },
             }
@@ -99,7 +63,8 @@ impl GuildMemberListSnapshot {
         let total_member_count = online_count + offline_count;
 
         let mut groups = Vec::new();
-        let mut all_items = Vec::with_capacity(total_member_count + 2);
+        let mut online_group = None;
+        let mut offline_group = None;
 
         if online_count > 0 {
             let group = MemberListGroup {
@@ -107,8 +72,7 @@ impl GuildMemberListSnapshot {
                 count: online_count,
             };
             groups.push(group.clone());
-            all_items.push(MemberListItem::Group { group });
-            all_items.extend(self.online_members.iter().map(to_item));
+            online_group = Some(group);
         }
 
         if offline_count > 0 {
@@ -117,17 +81,37 @@ impl GuildMemberListSnapshot {
                 count: offline_count,
             };
             groups.push(group.clone());
-            all_items.push(MemberListItem::Group { group });
-            all_items.extend(self.offline_members.iter().map(to_item));
+            offline_group = Some(group);
         }
 
-        let start = (range[0].max(0) as usize).min(all_items.len());
-        let end = ((range[1] + 1).max(0) as usize).min(all_items.len());
-        let sliced_items = if start < end {
-            all_items[start..end].to_vec()
-        } else {
-            vec![]
-        };
+        let online_span = if online_count > 0 { 1 + online_count } else { 0 };
+        let offline_span = if offline_count > 0 { 1 + offline_count } else { 0 };
+        let total_items = online_span + offline_span;
+
+        let start = (range[0].max(0) as usize).min(total_items);
+        let end = ((range[1] + 1).max(0) as usize).min(total_items);
+        let mut sliced_items = Vec::with_capacity(end.saturating_sub(start));
+
+        for idx in start..end {
+            if online_span > 0 && idx < online_span {
+                if idx == 0 {
+                    if let Some(ref g) = online_group {
+                        sliced_items.push(MemberListItem::Group { group: g.clone() });
+                    }
+                } else {
+                    sliced_items.push(to_item(&self.online_members[idx - 1]));
+                }
+            } else {
+                let off_idx = idx - online_span;
+                if off_idx == 0 {
+                    if let Some(ref g) = offline_group {
+                        sliced_items.push(MemberListItem::Group { group: g.clone() });
+                    }
+                } else {
+                    sliced_items.push(to_item(&self.offline_members[off_idx - 1]));
+                }
+            }
+        }
 
         GuildMemberListUpdate {
             guild_id: guild_id.to_string(),
@@ -175,17 +159,15 @@ async fn fetch_snapshot(
     .map(PermissionOverwrite::from)
     .collect();
 
-    let live_states = state.hub.guild_live_states(guild_id);
+    let mut live_presences = state.hub.guild_live_presences(guild_id);
 
-    let member_rows = match sqlx::query_as::<_, LazyMemberRow>(
+    let member_rows = match sqlx::query_as::<_, GuildMemberUserRow>(
         r#"
         SELECT
             gm.user_id, gm.joined_at, gm.nick,
-            u.username, u.discriminator, u.global_name, u.avatar, u.bot, u.public_flags,
-            us.extra_settings
+            u.username, u.discriminator, u.global_name, u.avatar, u.bot, u.public_flags
         FROM guild_members gm
         INNER JOIN users u ON u.id = gm.user_id
-        LEFT JOIN user_settings us ON us.id = u.id
         WHERE gm.guild_id = ?
         ORDER BY COALESCE(gm.nick, u.global_name, u.username) ASC, gm.joined_at ASC
         "#,
@@ -217,6 +199,7 @@ async fn fetch_snapshot(
 
     let mut online_members = Vec::new();
     let mut offline_members = Vec::new();
+    let mut viewer_allowed = HashSet::new();
 
     for row in member_rows {
         let roles = roles_by_user.remove(&row.user_id).unwrap_or_default();
@@ -234,39 +217,26 @@ async fn fetch_snapshot(
             &roles,
             &overwrites,
         );
+        if ch_perms.contains(PermissionFlags::VIEW_CHANNEL | PermissionFlags::VIEW_CHANNEL_MEMBERS) {
+            viewer_allowed.insert(row.user_id.clone());
+        }
         if !ch_perms.contains(PermissionFlags::VIEW_CHANNEL) {
             continue;
         }
 
-        let (status, afk, mobile) = live_states
-            .get(&row.user_id)
-            .copied()
-            .unwrap_or(("offline", false, false));
+        let (status, afk, mobile, custom_status) = live_presences
+            .remove(&row.user_id)
+            .unwrap_or(("offline", false, false, None));
 
         let is_visibly_online = status != "offline";
-        let custom_status = if is_visibly_online {
-            row.extra_settings
-                .as_deref()
-                .and_then(|s| serde_json::from_str::<UserSettingsExtras>(s).ok())
-                .and_then(|e| e.custom_status)
-        } else {
-            None
-        };
 
+        let nick = row.nick.clone();
+        let joined_at = row.joined_at;
         let member = SnapshotMember {
-            user: PartialUser {
-                id: row.user_id,
-                username: row.username,
-                discriminator: row.discriminator,
-                global_name: row.global_name,
-                avatar: row.avatar,
-                avatar_color: None,
-                bot: row.bot,
-                flags: row.public_flags,
-            },
-            nick: row.nick,
+            user: row.into_partial_user(),
+            nick,
             roles,
-            joined_at: row.joined_at,
+            joined_at,
             status,
             mobile,
             afk,
@@ -283,6 +253,7 @@ async fn fetch_snapshot(
     Some(GuildMemberListSnapshot {
         online_members,
         offline_members,
+        viewer_allowed,
     })
 }
 
@@ -299,7 +270,6 @@ pub async fn handle(session_id: &str, state: &AppState, payload: LazyRequestPayl
         return;
     };
 
-    let dialect = session.dialect();
     let mut to_send: Vec<(String, String, [i64; 2])> = Vec::new();
     let mut member_presences: Vec<(String, Vec<String>)> = Vec::new();
 
@@ -313,6 +283,11 @@ pub async fn handle(session_id: &str, state: &AppState, payload: LazyRequestPayl
                 if !session.has_guild(&guild_id) {
                     continue;
                 }
+                let start = range[0].max(0);
+                let end = range[1]
+                    .max(start)
+                    .min(start.saturating_add(MEMBER_LIST_RANGE_MAX_SPAN));
+                let range = [start, end];
                 let allowed = permission_service::compute_user_channel_permissions(
                     state,
                     &guild_id,
@@ -344,7 +319,7 @@ pub async fn handle(session_id: &str, state: &AppState, payload: LazyRequestPayl
     }
 
     for (guild_id, user_ids) in member_presences {
-        let requested: Vec<String> = user_ids.into_iter().take(1000).collect();
+        let requested: Vec<String> = user_ids.into_iter().take(MAX_LAZY_SUBSCRIBED_MEMBERS).collect();
         if requested.is_empty() {
             continue;
         }
@@ -369,8 +344,7 @@ pub async fn handle(session_id: &str, state: &AppState, payload: LazyRequestPayl
             .map(|(uid,)| uid)
             .collect();
 
-        let payloads =
-            presence::build_presence_payloads(state, &valid_ids, Some(&guild_id), dialect).await;
+        let payloads = presence::build_presence_payloads(state, &valid_ids, Some(&guild_id)).await;
         for payload in payloads {
             session.dispatch(events::PRESENCE_UPDATE, payload);
         }
@@ -380,7 +354,7 @@ pub async fn handle(session_id: &str, state: &AppState, payload: LazyRequestPayl
         let Some(snapshot) = fetch_snapshot(state, &guild_id, &channel_id).await else {
             continue;
         };
-        let update = snapshot.build_update(&guild_id, &channel_id, range, dialect);
+        let update = snapshot.build_update(&guild_id, &channel_id, range);
         session.dispatch(events::GUILD_MEMBER_LIST_UPDATE, update);
     }
 }
@@ -391,39 +365,28 @@ pub async fn refresh_guild_member_lists(state: &AppState, guild_id: &str) {
         return;
     }
 
-    let mut snapshots: HashMap<String, Option<GuildMemberListSnapshot>> = HashMap::new();
+    let mut by_channel: HashMap<String, Vec<(std::sync::Arc<crate::gateway::session::GatewaySession>, [i64; 2])>> = HashMap::new();
+    for (session, channel_id, range) in subscribers {
+        by_channel
+            .entry(channel_id)
+            .or_default()
+            .push((session, range));
+    }
 
-    for (session, dialect, channel_id, range) in subscribers {
-        let Some(uid) = session.user_id() else {
+    for (channel_id, subs) in by_channel {
+        let Some(snapshot) = fetch_snapshot(state, guild_id, &channel_id).await else {
             continue;
         };
-        let allowed = permission_service::compute_user_channel_permissions(
-            state,
-            guild_id,
-            &channel_id,
-            &uid,
-        )
-        .await
-        .is_ok_and(|p| {
-            p.contains(PermissionFlags::VIEW_CHANNEL | PermissionFlags::VIEW_CHANNEL_MEMBERS)
-        });
 
-        if !allowed {
-            session.remove_member_list_subscription(guild_id);
-            continue;
-        }
-
-        let snap_opt = match snapshots.get(&channel_id) {
-            Some(cached) => cached.as_ref(),
-            None => {
-                let fetched = fetch_snapshot(state, guild_id, &channel_id).await;
-                snapshots.insert(channel_id.clone(), fetched);
-                snapshots.get(&channel_id).and_then(|o| o.as_ref())
+        for (session, range) in subs {
+            let Some(uid) = session.user_id() else {
+                continue;
+            };
+            if !snapshot.viewer_allowed.contains(&uid) {
+                session.remove_member_list_subscription(guild_id);
+                continue;
             }
-        };
-
-        if let Some(snapshot) = snap_opt {
-            let update = snapshot.build_update(guild_id, &channel_id, range, dialect);
+            let update = snapshot.build_update(guild_id, &channel_id, range);
             session.dispatch(events::GUILD_MEMBER_LIST_UPDATE, update);
         }
     }

@@ -40,7 +40,7 @@ async fn register(
 }
 
 async fn logout(State(state): State<AppState>, auth: AuthUser) -> Result<StatusCode, AppError> {
-    auth_service::logout(&state, &auth.session_id).await?;
+    auth_service::logout(&state, &auth.user_id, &auth.session_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

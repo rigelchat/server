@@ -21,7 +21,6 @@ pub async fn get_channel(
     .await?
     .ok_or_else(AppError::unknown_channel)?;
 
-    member_service::require_member(state, &channel.guild_id, user_id).await?;
     permission_service::require_channel_permission(
         state,
         &channel.guild_id,

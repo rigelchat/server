@@ -3,9 +3,8 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-use crate::constants::dialect::ClientDialect;
 use crate::constants::flags::UserFlags;
-use crate::constants::user::DEFAULT_AFK_TIMEOUT;
+use crate::constants::user::{DEFAULT_AFK_TIMEOUT, DEFAULT_LOCALE, DEFAULT_STATUS, DEFAULT_THEME};
 use crate::models::serde_helpers::millis_to_iso;
 
 #[derive(Debug, Clone, FromRow)]
@@ -75,8 +74,6 @@ pub struct CurrentUser {
     pub authenticator_types: Vec<u8>,
     pub nsfw_allowed: bool,
     pub flags: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub public_flags: Option<u32>,
     pub is_staff: bool,
     pub acls: Vec<String>,
     pub required_actions: Vec<String>,
@@ -144,7 +141,6 @@ impl CurrentUser {
             authenticator_types: vec![],
             nsfw_allowed: true,
             flags: user.public_flags,
-            public_flags: None,
             is_staff,
             acls: vec![],
             required_actions: vec![],
@@ -184,13 +180,6 @@ impl CurrentUser {
             privacy_agreed_at: Some(created_iso.clone()),
             terms_agreed_at: Some(created_iso),
         }
-    }
-
-    pub fn with_dialect(mut self, dialect: ClientDialect) -> Self {
-        if dialect == ClientDialect::Discord {
-            self.public_flags = Some(self.flags);
-        }
-        self
     }
 }
 
@@ -402,13 +391,13 @@ impl Default for UserSettings {
     fn default() -> Self {
         let extras = UserSettingsExtras::default();
         Self {
-            status: "online".to_string(),
+            status: DEFAULT_STATUS.to_string(),
             custom_status: extras.custom_status,
             status_resets_at: extras.status_resets_at,
             status_resets_to: extras.status_resets_to,
-            locale: "en-US".to_string(),
+            locale: DEFAULT_LOCALE.to_string(),
             regional_format: extras.regional_format,
-            theme: "dark".to_string(),
+            theme: DEFAULT_THEME.to_string(),
             afk_timeout: DEFAULT_AFK_TIMEOUT,
             developer_mode: false,
             synced_preferences: String::new(),

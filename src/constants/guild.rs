@@ -42,6 +42,34 @@ pub enum DiscoveryCategory {
     Other = 8,
 }
 
+impl DiscoveryCategory {
+    pub const ALL: [Self; 9] = [
+        Self::Gaming,
+        Self::Music,
+        Self::Entertainment,
+        Self::Education,
+        Self::ScienceAndTechnology,
+        Self::ContentCreator,
+        Self::AnimeAndManga,
+        Self::MoviesAndTV,
+        Self::Other,
+    ];
+
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Gaming => "Gaming",
+            Self::Music => "Music",
+            Self::Entertainment => "Entertainment",
+            Self::Education => "Education",
+            Self::ScienceAndTechnology => "Science & Technology",
+            Self::ContentCreator => "Content Creator",
+            Self::AnimeAndManga => "Anime & Manga",
+            Self::MoviesAndTV => "Movies & TV",
+            Self::Other => "Other",
+        }
+    }
+}
+
 impl From<u8> for DiscoveryCategory {
     fn from(category: u8) -> Self {
         match category {
@@ -66,3 +94,5 @@ impl From<DiscoveryCategory> for u8 {
 
 pub const DEFAULT_VOICE_BITRATE: u32 = 64_000;
 pub const DEFAULT_VOICE_CONNECTION_LIMIT: u32 = 5;
+pub const DEFAULT_PRIMARY_LANGUAGE: &str = "en-US";
+pub const FEATURE_DISCOVERABLE: &str = "DISCOVERABLE";

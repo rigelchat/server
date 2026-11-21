@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::extract::ws::{CloseFrame, Message};
 use serde::Serialize;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{mpsc, watch};
 
-use crate::constants::dialect::ClientDialect;
 use crate::constants::gateway::{Opcode, close_codes};
+use crate::constants::user::PresenceStatus;
 use crate::gateway::hub::now_millis;
 use crate::models::gateway::GatewayPayload;
 use crate::models::gateway::ready::ClientSessionInfo;
@@ -15,7 +15,7 @@ use crate::models::gateway::ready::ClientSessionInfo;
 struct SessionState {
     user_id: Option<String>,
     auth_session_id: Option<String>,
-    status: String,
+    status: PresenceStatus,
     afk: bool,
     mobile: bool,
     guilds: HashSet<String>,
@@ -24,29 +24,29 @@ struct SessionState {
 
 pub struct GatewaySession {
     pub id: String,
-    dialect: AtomicU8,
     sender: mpsc::Sender<Message>,
     sequence: AtomicU64,
+    connected_at_ms: u64,
     last_heartbeat_ms: AtomicU64,
-    closed: AtomicBool,
-    close_notify: Notify,
+    close_tx: watch::Sender<bool>,
     state: RwLock<SessionState>,
 }
 
 impl GatewaySession {
-    pub fn new(id: String, dialect: ClientDialect, sender: mpsc::Sender<Message>) -> Self {
+    pub fn new(id: String, sender: mpsc::Sender<Message>) -> Self {
+        let (close_tx, _) = watch::channel(false);
+        let now = now_millis();
         Self {
             id,
-            dialect: AtomicU8::new(dialect_to_u8(dialect)),
             sender,
             sequence: AtomicU64::new(0),
-            last_heartbeat_ms: AtomicU64::new(now_millis()),
-            closed: AtomicBool::new(false),
-            close_notify: Notify::new(),
+            connected_at_ms: now,
+            last_heartbeat_ms: AtomicU64::new(now),
+            close_tx,
             state: RwLock::new(SessionState {
                 user_id: None,
                 auth_session_id: None,
-                status: "online".to_string(),
+                status: PresenceStatus::Online,
                 afk: false,
                 mobile: false,
                 guilds: HashSet::new(),
@@ -55,20 +55,25 @@ impl GatewaySession {
         }
     }
 
-    pub fn dialect(&self) -> ClientDialect {
-        match self.dialect.load(Ordering::Relaxed) {
-            1 => ClientDialect::Discord,
-            _ => ClientDialect::Fluxer,
-        }
-    }
-
     pub fn touch_heartbeat(&self) {
         self.last_heartbeat_ms
             .store(now_millis(), Ordering::Relaxed);
     }
 
+    pub fn connected_at_ms(&self) -> u64 {
+        self.connected_at_ms
+    }
+
     pub fn last_heartbeat_ms(&self) -> u64 {
         self.last_heartbeat_ms.load(Ordering::Relaxed)
+    }
+
+    pub fn auth_session_id(&self) -> Option<String> {
+        self.state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .auth_session_id
+            .clone()
     }
 
     pub fn is_authenticated(&self) -> bool {
@@ -119,18 +124,15 @@ impl GatewaySession {
             .remove(guild_id);
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn set_authenticated(
         &self,
-        dialect: ClientDialect,
         user_id: String,
         auth_session_id: String,
-        status: String,
+        status: PresenceStatus,
         afk: bool,
         mobile: bool,
         guilds: HashSet<String>,
     ) {
-        self.dialect.store(dialect_to_u8(dialect), Ordering::Relaxed);
         let mut st = self.state.write().unwrap_or_else(|e| e.into_inner());
         st.user_id = Some(user_id);
         st.auth_session_id = Some(auth_session_id);
@@ -142,7 +144,7 @@ impl GatewaySession {
 
     pub fn update_presence(
         &self,
-        status: String,
+        status: PresenceStatus,
         afk: Option<bool>,
         mobile: Option<bool>,
     ) -> Option<(String, HashSet<String>)> {
@@ -158,23 +160,23 @@ impl GatewaySession {
         Some((uid, st.guilds.clone()))
     }
 
-    pub fn set_status(&self, status: String) {
+    pub fn set_status(&self, status: PresenceStatus) {
         self.state
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .status = status;
     }
 
-    pub fn snapshot_presence(&self) -> (String, bool, bool) {
+    pub fn snapshot_presence(&self) -> (PresenceStatus, bool, bool) {
         let st = self.state.read().unwrap_or_else(|e| e.into_inner());
-        (st.status.clone(), st.afk, st.mobile)
+        (st.status, st.afk, st.mobile)
     }
 
     pub fn client_session_info(&self) -> ClientSessionInfo {
         let st = self.state.read().unwrap_or_else(|e| e.into_inner());
         ClientSessionInfo {
             session_id: self.id.clone(),
-            status: st.status.clone(),
+            status: st.status.as_str().to_string(),
             afk: st.afk,
             mobile: st.mobile,
         }
@@ -211,10 +213,8 @@ impl GatewaySession {
     }
 
     pub async fn wait_for_close(&self) {
-        if self.closed.load(Ordering::Acquire) {
-            return;
-        }
-        self.close_notify.notified().await;
+        let mut rx = self.close_tx.subscribe();
+        let _ = rx.wait_for(|&closed| closed).await;
     }
 
     pub fn send(&self, op: Opcode, d: Option<serde_json::Value>) {
@@ -242,6 +242,12 @@ impl GatewaySession {
         self.send_raw(&payload);
     }
 
+    pub fn dispatch_pre_serialized(&self, event_json: &str, data_json: &str) {
+        let seq = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let text = format!(r#"{{"op":0,"d":{data_json},"s":{seq},"t":{event_json}}}"#);
+        self.send_text(text);
+    }
+
     pub fn close(&self, (code, reason): (u16, &'static str)) {
         let frame = CloseFrame {
             code,
@@ -253,8 +259,7 @@ impl GatewaySession {
     }
 
     fn trigger_force_close(&self) {
-        self.closed.store(true, Ordering::Release);
-        self.close_notify.notify_one();
+        let _ = self.close_tx.send(true);
     }
 
     fn send_raw(&self, payload: &GatewayPayload) {
@@ -265,7 +270,10 @@ impl GatewaySession {
                 return;
             }
         };
+        self.send_text(text);
+    }
 
+    fn send_text(&self, text: String) {
         match self.sender.try_send(Message::Text(text.into())) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -280,9 +288,3 @@ impl GatewaySession {
     }
 }
 
-fn dialect_to_u8(dialect: ClientDialect) -> u8 {
-    match dialect {
-        ClientDialect::Fluxer => 0,
-        ClientDialect::Discord => 1,
-    }
-}

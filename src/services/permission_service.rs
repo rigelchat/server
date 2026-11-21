@@ -19,6 +19,13 @@ pub struct RolePerm {
     pub permissions: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ChannelPermissionContext {
+    pub owner_id: String,
+    pub roles: Vec<RolePerm>,
+    pub overwrites: Vec<PermissionOverwrite>,
+}
+
 pub fn compute_base_permissions(
     owner_id: &str,
     guild_id: &str,
@@ -208,20 +215,61 @@ pub async fn require_channel_permission(
     Ok(perms)
 }
 
-pub async fn filter_visible_channels(
+pub async fn require_channel_permission_with_ctx(
     state: &AppState,
     guild_id: &str,
+    channel_id: &str,
     user_id: &str,
-    channels: Vec<ChannelResponse>,
-) -> Result<Vec<ChannelResponse>, AppError> {
-    if channels.is_empty() {
-        return Ok(channels);
+    required: PermissionFlags,
+) -> Result<(Option<ChannelPermissionContext>, Option<Vec<String>>, PermissionFlags), AppError> {
+    let (owner_id, roles, member_roles) = load_guild_role_context(state, guild_id, user_id).await?;
+    if owner_id == user_id {
+        return Ok((None, None, PermissionFlags::all()));
     }
 
-    let (owner_id, roles, member_roles) = load_guild_role_context(state, guild_id, user_id).await?;
     let base = compute_base_permissions(&owner_id, guild_id, user_id, &roles, &member_roles);
     if base.contains(PermissionFlags::ADMINISTRATOR) {
-        return Ok(channels);
+        return Ok((None, Some(member_roles), PermissionFlags::all()));
+    }
+
+    let overwrites: Vec<PermissionOverwrite> = sqlx::query_as::<_, ChannelOverwriteRow>(
+        "SELECT channel_id, type, target_id, allow, deny FROM channel_permission_overwrites WHERE channel_id = ?",
+    )
+    .bind(channel_id)
+    .fetch_all(&state.db)
+    .await?
+    .into_iter()
+    .map(PermissionOverwrite::from)
+    .collect();
+
+    let perms = compute_channel_permissions(base, guild_id, user_id, &member_roles, &overwrites);
+    if !perms.contains(required) {
+        return Err(AppError::missing_permissions());
+    }
+
+    let ctx = ChannelPermissionContext {
+        owner_id,
+        roles,
+        overwrites,
+    };
+    Ok((Some(ctx), Some(member_roles), perms))
+}
+
+pub fn filter_visible_channels_with_context(
+    owner_id: &str,
+    guild_id: &str,
+    user_id: &str,
+    roles: &[RolePerm],
+    member_roles: &[String],
+    channels: Vec<ChannelResponse>,
+) -> Vec<ChannelResponse> {
+    if channels.is_empty() {
+        return channels;
+    }
+
+    let base = compute_base_permissions(owner_id, guild_id, user_id, roles, member_roles);
+    if base.contains(PermissionFlags::ADMINISTRATOR) {
+        return channels;
     }
 
     let category_kind = ChannelType::GuildCategory as u32;
@@ -238,7 +286,7 @@ pub async fn filter_visible_channels(
                 base,
                 guild_id,
                 user_id,
-                &member_roles,
+                member_roles,
                 &ch.permission_overwrites,
             );
             if perms.contains(PermissionFlags::VIEW_CHANNEL) {
@@ -259,7 +307,7 @@ pub async fn filter_visible_channels(
                     base,
                     guild_id,
                     user_id,
-                    &member_roles,
+                    member_roles,
                     &ch.permission_overwrites,
                 );
                 let empty_cat = !has_children.contains(&ch.base.id);
@@ -272,88 +320,126 @@ pub async fn filter_visible_channels(
         }
     }
 
-    Ok(channels
+    channels
         .into_iter()
         .filter(|ch| visible_ids.contains(&ch.base.id))
-        .collect())
+        .collect()
 }
 
-pub async fn filter_sessions_for_channel(
+pub async fn filter_visible_channels(
+    state: &AppState,
+    guild_id: &str,
+    user_id: &str,
+    channels: Vec<ChannelResponse>,
+) -> Result<Vec<ChannelResponse>, AppError> {
+    if channels.is_empty() {
+        return Ok(channels);
+    }
+
+    let (owner_id, roles, member_roles) = load_guild_role_context(state, guild_id, user_id).await?;
+    Ok(filter_visible_channels_with_context(
+        &owner_id,
+        guild_id,
+        user_id,
+        &roles,
+        &member_roles,
+        channels,
+    ))
+}
+
+
+
+pub async fn filter_sessions_for_channel_with_ctx(
     state: &AppState,
     guild_id: &str,
     channel_id: &str,
+    ctx: Option<&ChannelPermissionContext>,
 ) -> Vec<Arc<GatewaySession>> {
     let sessions = state.hub.sessions_for_guild(guild_id);
     if sessions.is_empty() {
         return sessions;
     }
 
-    let owner_id: Option<String> = sqlx::query_scalar("SELECT owner_id FROM guilds WHERE id = ?")
-        .bind(guild_id)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
-    let Some(owner_id) = owner_id else {
-        return Vec::new();
-    };
+    let owned_ctx;
+    let ctx = match ctx {
+        Some(c) => c,
+        None => {
+            let owner_id: Option<String> =
+                sqlx::query_scalar("SELECT owner_id FROM guilds WHERE id = ?")
+                    .bind(guild_id)
+                    .fetch_optional(&state.db)
+                    .await
+                    .ok()
+                    .flatten();
+            let Some(owner_id) = owner_id else {
+                return Vec::new();
+            };
 
-    let roles: Vec<RolePerm> =
-        sqlx::query_as("SELECT id, permissions FROM roles WHERE guild_id = ?")
-            .bind(guild_id)
+            let roles: Vec<RolePerm> =
+                sqlx::query_as("SELECT id, permissions FROM roles WHERE guild_id = ?")
+                    .bind(guild_id)
+                    .fetch_all(&state.db)
+                    .await
+                    .unwrap_or_default();
+
+            let overwrites: Vec<PermissionOverwrite> = sqlx::query_as::<_, ChannelOverwriteRow>(
+                "SELECT channel_id, type, target_id, allow, deny FROM channel_permission_overwrites WHERE channel_id = ?",
+            )
+            .bind(channel_id)
             .fetch_all(&state.db)
             .await
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .map(PermissionOverwrite::from)
+            .collect();
 
-    let overwrites: Vec<PermissionOverwrite> = sqlx::query_as::<_, ChannelOverwriteRow>(
-        "SELECT channel_id, type, target_id, allow, deny FROM channel_permission_overwrites WHERE channel_id = ?",
-    )
-    .bind(channel_id)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(PermissionOverwrite::from)
-    .collect();
+            owned_ctx = ChannelPermissionContext {
+                owner_id,
+                roles,
+                overwrites,
+            };
+            &owned_ctx
+        }
+    };
 
     let user_ids: Vec<String> = sessions
         .iter()
         .filter_map(|s| s.user_id())
+        .filter(|uid| uid != &ctx.owner_id)
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
 
-    if user_ids.is_empty() {
-        return Vec::new();
-    }
-
-    let mut qb = QueryBuilder::<MySql>::new(
-        "SELECT user_id, role_id FROM guild_member_roles WHERE guild_id = ",
-    );
-    qb.push_bind(guild_id);
-    qb.push(" AND role_id != ");
-    qb.push_bind(guild_id);
-    qb.push(" AND user_id IN (");
-    let mut sep = qb.separated(", ");
-    for uid in &user_ids {
-        sep.push_bind(uid);
-    }
-    qb.push(")");
-
-    let role_rows: Vec<GuildMemberRole> =
-        qb.build_query_as().fetch_all(&state.db).await.unwrap_or_default();
-
     let mut roles_by_user: HashMap<String, Vec<String>> = HashMap::new();
-    for r in role_rows {
-        roles_by_user.entry(r.user_id).or_default().push(r.role_id);
+    if !user_ids.is_empty() {
+        let mut qb = QueryBuilder::<MySql>::new(
+            "SELECT user_id, role_id FROM guild_member_roles WHERE guild_id = ",
+        );
+        qb.push_bind(guild_id);
+        qb.push(" AND role_id != ");
+        qb.push_bind(guild_id);
+        qb.push(" AND user_id IN (");
+        let mut sep = qb.separated(", ");
+        for uid in &user_ids {
+            sep.push_bind(uid);
+        }
+        qb.push(")");
+
+        let role_rows: Vec<GuildMemberRole> =
+            qb.build_query_as().fetch_all(&state.db).await.unwrap_or_default();
+
+        for r in role_rows {
+            roles_by_user.entry(r.user_id).or_default().push(r.role_id);
+        }
     }
 
-    let mut can_view: HashMap<String, bool> = HashMap::with_capacity(user_ids.len());
+    let mut can_view: HashMap<String, bool> = HashMap::with_capacity(user_ids.len() + 1);
+    can_view.insert(ctx.owner_id.clone(), true);
     for uid in user_ids {
         let member_roles = roles_by_user.get(&uid).map(Vec::as_slice).unwrap_or(&[]);
-        let base = compute_base_permissions(&owner_id, guild_id, &uid, &roles, member_roles);
+        let base = compute_base_permissions(&ctx.owner_id, guild_id, &uid, &ctx.roles, member_roles);
         let ch_perms =
-            compute_channel_permissions(base, guild_id, &uid, member_roles, &overwrites);
+            compute_channel_permissions(base, guild_id, &uid, member_roles, &ctx.overwrites);
         can_view.insert(uid, ch_perms.contains(PermissionFlags::VIEW_CHANNEL));
     }
 
@@ -366,30 +452,36 @@ pub async fn filter_sessions_for_channel(
         .collect()
 }
 
-pub async fn dispatch_channel<T: Serialize>(
+pub async fn dispatch_channel_with_ctx<T: Serialize>(
     state: &AppState,
     guild_id: &str,
     channel_id: &str,
+    ctx: Option<&ChannelPermissionContext>,
     event_name: &str,
     data: &T,
 ) {
-    let sessions = filter_sessions_for_channel(state, guild_id, channel_id).await;
+    let sessions = filter_sessions_for_channel_with_ctx(state, guild_id, channel_id, ctx).await;
     if sessions.is_empty() {
         return;
     }
 
-    let value = match serde_json::to_value(data) {
+    let data_json = match serde_json::to_string(data) {
         Ok(v) => v,
         Err(err) => {
             tracing::error!(error = %err, event = %event_name, "Failed to serialize payload");
             return;
         }
     };
+    let Ok(event_json) = serde_json::to_string(event_name) else {
+        return;
+    };
 
     for session in sessions {
-        session.dispatch(event_name, value.clone());
+        session.dispatch_pre_serialized(&event_json, &data_json);
     }
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -477,5 +569,46 @@ mod tests {
         // Denying VIEW_CHANNEL removes all permissions
         let hidden = compute_channel_permissions(base, "g1", "u1", &[], &overwrites[..1]);
         assert!(hidden.is_empty());
+    }
+
+    #[test]
+    fn category_visibility_depends_on_visible_children() {
+        use crate::models::channel::GuildChannel;
+
+        let roles = vec![RolePerm {
+            id: "g1".to_string(),
+            permissions: PermissionFlags::VIEW_CHANNEL.bits(),
+        }];
+        let make_ch = |id: &str, kind: ChannelType, parent: Option<&str>, ows| {
+            ChannelResponse::from_parts(
+                GuildChannel {
+                    id: id.to_string(),
+                    kind: kind as u32,
+                    position: 0,
+                    guild_id: "g1".to_string(),
+                    parent_id: parent.map(str::to_string),
+                    name: id.to_string(),
+                    last_message_id: None,
+                },
+                ows,
+            )
+        };
+        let deny_view = vec![ow_role("g1", PermissionFlags::empty(), PermissionFlags::VIEW_CHANNEL)];
+
+        let channels = vec![
+            make_ch("cat_hidden", ChannelType::GuildCategory, None, vec![]),
+            make_ch("ch_secret", ChannelType::GuildText, Some("cat_hidden"), deny_view.clone()),
+            make_ch("cat_empty", ChannelType::GuildCategory, None, vec![]),
+            make_ch("cat_mixed", ChannelType::GuildCategory, None, vec![]),
+            make_ch("ch_public", ChannelType::GuildText, Some("cat_mixed"), vec![]),
+        ];
+
+        let visible: Vec<String> =
+            filter_visible_channels_with_context("owner", "g1", "u1", &roles, &[], channels)
+                .into_iter()
+                .map(|c| c.base.id)
+                .collect();
+
+        assert_eq!(visible, vec!["cat_empty", "cat_mixed", "ch_public"]);
     }
 }

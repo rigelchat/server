@@ -2,15 +2,12 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::models::guild_member::GuildMemberUserRef;
-use crate::models::serde_helpers::serialize_millis_iso;
+use crate::models::guild_member::GuildMemberFields;
 use crate::models::user::{CustomStatus, PartialUser};
 
 #[derive(Debug, Deserialize)]
 pub struct LazyRequestPayload {
     pub subscriptions: Option<HashMap<String, GuildSubscription>>,
-    pub guild_id: Option<String>,
-    pub channels: Option<HashMap<String, Vec<Vec<i64>>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,21 +65,6 @@ impl LazyRequestPayload {
                     }
                 }
             }
-            return actions;
-        }
-
-        if let Some(guild_id) = self.guild_id {
-            if let Some(channels) = self.channels {
-                for (channel_id, ranges) in channels {
-                    if let Some(first) = ranges.first().filter(|r| r.len() >= 2) {
-                        actions.push(LazyListAction::Subscribe {
-                            guild_id: guild_id.clone(),
-                            channel_id,
-                            range: [first[0], first[1]],
-                        });
-                    }
-                }
-            }
         }
 
         actions
@@ -96,41 +78,18 @@ pub struct MemberListGroup {
 }
 
 #[derive(Clone, Serialize)]
-pub struct MemberListClientStatus {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub desktop: Option<String>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(untagged)]
-pub enum MemberListPresence {
-    Fluxer {
-        status: String,
-        mobile: bool,
-        afk: bool,
-        custom_status: Option<CustomStatus>,
-    },
-    Discord {
-        user: GuildMemberUserRef,
-        status: String,
-        client_status: MemberListClientStatus,
-        activities: Vec<serde_json::Value>,
-    },
+pub struct MemberListPresence {
+    pub status: String,
+    pub mobile: bool,
+    pub afk: bool,
+    pub custom_status: Option<CustomStatus>,
 }
 
 #[derive(Clone, Serialize)]
 pub struct MemberListMember {
     pub user: PartialUser,
-    pub nick: Option<String>,
-    pub avatar: Option<String>,
-    pub banner: Option<String>,
-    pub accent_color: Option<u32>,
-    pub roles: Vec<String>,
-    #[serde(serialize_with = "serialize_millis_iso")]
-    pub joined_at: u64,
-    pub mute: bool,
-    pub deaf: bool,
-    pub communication_disabled_until: Option<String>,
+    #[serde(flatten)]
+    pub member: GuildMemberFields,
     pub presence: MemberListPresence,
 }
 
@@ -157,4 +116,37 @@ pub struct GuildMemberListUpdate {
     pub online_count: usize,
     pub member_count: usize,
     pub groups: Vec<MemberListGroup>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_fluxer_lazy_requests() {
+        let fluxer_json = r#"{
+            "subscriptions": {
+                "g1": {
+                    "member_list_channels": { "c1": [[0, 99]] },
+                    "members": ["u1", "u2"]
+                },
+                "g2": {
+                    "member_list_channels": {}
+                }
+            }
+        }"#;
+        let payload: LazyRequestPayload = serde_json::from_str(fluxer_json).unwrap();
+        assert_eq!(payload.into_actions().len(), 3);
+
+        let unsub_json = r#"{
+            "subscriptions": {
+                "g1": { "member_list_channels": {} }
+            }
+        }"#;
+        let unsub: LazyRequestPayload = serde_json::from_str(unsub_json).unwrap();
+        assert!(matches!(
+            &unsub.into_actions()[..],
+            [LazyListAction::Unsubscribe { guild_id }] if guild_id == "g1"
+        ));
+    }
 }

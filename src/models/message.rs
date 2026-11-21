@@ -80,38 +80,7 @@ impl From<MessageDbRow> for Message {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct MessageMember {
-    pub nick: Option<String>,
-    pub avatar: Option<String>,
-    pub banner: Option<String>,
-    pub accent_color: Option<u32>,
-    pub roles: Vec<String>,
-    #[serde(serialize_with = "serialize_millis_iso")]
-    pub joined_at: u64,
-    pub mute: bool,
-    pub deaf: bool,
-    pub communication_disabled_until: Option<String>,
-}
 
-#[derive(Debug, Clone, Serialize)]
-pub struct GatewayMessageEvent {
-    #[serde(flatten)]
-    pub message: Message,
-    pub channel_type: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub guild_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub member: Option<MessageMember>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct GetMessagesQuery {
-    pub limit: Option<u32>,
-    pub before: Option<String>,
-    pub after: Option<String>,
-    pub around: Option<String>,
-}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

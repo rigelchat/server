@@ -2,8 +2,16 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const HEARTBEAT_INTERVAL: u32 = 41250;
+pub const HEARTBEAT_INTERVAL: u32 = 41_250;
+pub const HEARTBEAT_TIMEOUT_MS: u64 = (HEARTBEAT_INTERVAL as u64) * 2 + 5_000;
+pub const IDENTIFY_TIMEOUT_MS: u64 = 30_000;
+pub const REAPER_INTERVAL_SECS: u64 = 15;
+
 pub const MAX_PAYLOAD_BYTES: usize = 16_384;
+pub const GATEWAY_SEND_QUEUE_CAPACITY: usize = 512;
+pub const GATEWAY_WRITE_TIMEOUT_SECS: u64 = 5;
+pub const ZSTD_DECODE_CHUNK_BYTES: usize = 4_096;
+pub const MEMBER_LIST_RANGE_MAX_SPAN: i64 = 99;
 
 #[derive(Serialize)]
 #[serde(rename_all = "kebab-case")]

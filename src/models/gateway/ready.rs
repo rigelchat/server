@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::models::guild::{DiscordGuildCreate, GatewayGuild};
+use crate::models::guild::GatewayGuild;
 use crate::models::user::{CurrentUser, PartialUser, UserSettings};
 
 #[derive(Serialize)]
@@ -41,36 +41,4 @@ pub struct ReadyData {
     pub user: CurrentUser,
     pub user_settings: UserSettings,
     pub users: Vec<PartialUser>,
-}
-
-#[derive(Serialize)]
-pub struct UnavailableGuild {
-    pub id: String,
-    pub unavailable: bool,
-}
-
-#[derive(Serialize)]
-#[serde(untagged)]
-pub enum DiscordReadyGuild {
-    Unavailable(UnavailableGuild),
-    Full(Box<DiscordGuildCreate>),
-}
-
-#[derive(Serialize)]
-pub struct PartialApplication {
-    pub id: String,
-    pub flags: u32,
-}
-
-#[derive(Serialize)]
-pub struct DiscordReadyData {
-    pub v: u8,
-    pub user: CurrentUser,
-    pub guilds: Vec<DiscordReadyGuild>,
-    pub session_id: String,
-    pub resume_gateway_url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub shard: Option<[u32; 2]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub application: Option<PartialApplication>,
 }

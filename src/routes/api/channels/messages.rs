@@ -4,26 +4,14 @@ use axum::{
     http::StatusCode,
     routing::{get, patch},
 };
-use serde::Deserialize;
-
 use crate::AppState;
 use crate::error::AppError;
 use crate::extractors::{AppJson, AuthUser};
-use crate::models::message::{GetMessagesQuery, Message};
-use crate::models::serde_helpers::deserialize_opt_string_or_int;
+use crate::models::message::Message;
+use crate::models::rest::messages::{
+    CreateMessageRequest, EditMessageRequest, GetMessagesQuery,
+};
 use crate::services::message_service;
-
-#[derive(Deserialize)]
-struct CreateMessageRequest {
-    content: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_opt_string_or_int")]
-    nonce: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct EditMessageRequest {
-    content: Option<String>,
-}
 
 pub fn router() -> Router<AppState> {
     Router::new()
