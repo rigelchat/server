@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -15,10 +14,6 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn online_user_ids(&self) -> HashSet<String> {
-        self.hub.online_user_ids()
-    }
-
     pub async fn count_guild_online(&self, guild_id: &str) -> u64 {
         self.hub.count_guild_online(guild_id)
     }

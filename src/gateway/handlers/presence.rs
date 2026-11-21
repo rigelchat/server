@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 use sqlx::{MySql, QueryBuilder};
 use tracing::{debug, error};
@@ -319,18 +319,31 @@ pub async fn broadcast_presence_with_user(
     };
 
     let fluxer_user_val = serialize_presence_user(user_id, partial_user);
+    let Ok(event_json) = serde_json::to_string(events::PRESENCE_UPDATE) else {
+        return;
+    };
+    let mut serialized_by_guild: HashMap<String, String> = HashMap::with_capacity(guild_ids.len());
 
     for (peer, shared_guilds) in peers {
         for guild_id in shared_guilds {
-            let payload = build_presence_value(
-                &fluxer_user_val,
-                public_status,
-                mobile,
-                afk,
-                custom_status,
-                Some(&guild_id),
-            );
-            peer.dispatch(events::PRESENCE_UPDATE, payload);
+            let data_json = match serialized_by_guild.entry(guild_id) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let payload = build_presence_value(
+                        &fluxer_user_val,
+                        public_status,
+                        mobile,
+                        afk,
+                        custom_status,
+                        Some(entry.key()),
+                    );
+                    let Ok(s) = serde_json::to_string(&payload) else {
+                        continue;
+                    };
+                    entry.insert(s)
+                }
+            };
+            peer.dispatch_pre_serialized(&event_json, data_json);
         }
     }
 }

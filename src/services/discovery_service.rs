@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use sqlx::{FromRow, MySql, QueryBuilder};
 
 use crate::AppState;
@@ -23,12 +21,6 @@ struct DiscoverableGuildRow {
     banner: Option<String>,
     description: Option<String>,
     member_count: i64,
-}
-
-#[derive(FromRow)]
-struct GuildOnlineCountRow {
-    guild_id: String,
-    online_count: i64,
 }
 
 async fn fetch_discoverable_rows(
@@ -72,46 +64,6 @@ async fn fetch_discoverable_rows(
         .await?)
 }
 
-async fn fetch_online_counts(
-    state: &AppState,
-    guild_ids: &[String],
-) -> Result<HashMap<String, u64>, AppError> {
-    let mut online_counts = HashMap::new();
-    if guild_ids.is_empty() {
-        return Ok(online_counts);
-    }
-
-    let online_ids = state.online_user_ids().await;
-    if online_ids.is_empty() {
-        return Ok(online_counts);
-    }
-
-    let mut qb = QueryBuilder::<MySql>::new(
-        "SELECT guild_id, COUNT(DISTINCT user_id) AS online_count FROM guild_members WHERE guild_id IN (",
-    );
-    let mut sep = qb.separated(", ");
-    for gid in guild_ids {
-        sep.push_bind(gid);
-    }
-    qb.push(") AND user_id IN (");
-    let mut sep = qb.separated(", ");
-    for uid in &online_ids {
-        sep.push_bind(uid);
-    }
-    qb.push(") GROUP BY guild_id");
-
-    let counts = qb
-        .build_query_as::<GuildOnlineCountRow>()
-        .fetch_all(&state.db)
-        .await?;
-
-    for row in counts {
-        online_counts.insert(row.guild_id, row.online_count.max(0) as u64);
-    }
-
-    Ok(online_counts)
-}
-
 pub async fn get_discovery_guilds(
     state: &AppState,
     params: DiscoverySearchQuery,
@@ -134,7 +86,7 @@ pub async fn get_discovery_guilds(
 
     let page: Vec<DiscoverableGuildRow> = rows.into_iter().skip(offset).take(limit).collect();
     let page_ids: Vec<String> = page.iter().map(|r| r.id.clone()).collect();
-    let online_counts = fetch_online_counts(state, &page_ids).await?;
+    let online_counts = state.hub.count_guilds_online(&page_ids);
 
     let guilds: Vec<DiscoverableGuild> = page
         .into_iter()
@@ -179,7 +131,7 @@ pub async fn get_discoverable_guilds(
 ) -> Result<DiscoverableGuildsResponse, AppError> {
     let rows = fetch_discoverable_rows(state, None).await?;
     let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
-    let online_counts = fetch_online_counts(state, &ids).await?;
+    let online_counts = state.hub.count_guilds_online(&ids);
 
     let guilds: Vec<RestDiscoverableGuild> = rows
         .into_iter()

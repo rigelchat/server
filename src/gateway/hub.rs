@@ -343,24 +343,6 @@ impl GatewayHub {
         )
     }
 
-    pub fn online_user_ids(&self) -> HashSet<String> {
-        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
-        let mut out = HashSet::new();
-
-        for (uid, sids) in &inner.user_sessions {
-            let (pub_st, _, _) = aggregate_live_state(
-                sids.iter()
-                    .filter_map(|sid| inner.sessions.get(sid))
-                    .map(|s| s.snapshot_presence()),
-            );
-            if pub_st != "offline" {
-                out.insert(uid.clone());
-            }
-        }
-
-        out
-    }
-
     pub fn count_guild_online(&self, guild_id: &str) -> u64 {
         let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
         Self::count_guild_online_locked(&inner, guild_id)

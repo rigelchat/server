@@ -308,6 +308,13 @@ pub async fn get_user_guilds(
         }
     }
 
+    let online_counts = if with_counts {
+        let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+        state.hub.count_guilds_online(&ids)
+    } else {
+        HashMap::new()
+    };
+
     let mut guilds = Vec::with_capacity(rows.len());
     for row in rows {
         let gid = row.id.clone();
@@ -332,7 +339,7 @@ pub async fn get_user_guilds(
         if with_counts {
             let cnt = member_counts.get(&gid).copied().unwrap_or(1).max(1) as u64;
             guild.approximate_member_count = Some(cnt);
-            guild.approximate_presence_count = Some(state.count_guild_online(&gid).await);
+            guild.approximate_presence_count = Some(online_counts.get(&gid).copied().unwrap_or(0));
         }
 
         guilds.push(guild);

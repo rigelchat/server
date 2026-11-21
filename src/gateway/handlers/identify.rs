@@ -226,18 +226,22 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
     let pub_status = presence::user_public_status(state, &user_id).await;
     let my_guilds: HashSet<String> = guild_ids.into_iter().collect();
     presence::dispatch_sessions_replace(state, &user_id).await;
-    presence::broadcast_presence(
-        state,
-        &user_id,
-        &my_guilds,
-        pub_status,
-        custom_status.as_ref(),
-    )
-    .await;
-    futures_util::future::join_all(
-        my_guilds
-            .iter()
-            .map(|gid| lazy_request::refresh_guild_member_lists(state, gid)),
-    )
-    .await;
+    let is_sole_offline_session =
+        pub_status == "offline" && state.hub.sessions_for_user(&user_id).len() <= 1;
+    if !is_sole_offline_session {
+        presence::broadcast_presence(
+            state,
+            &user_id,
+            &my_guilds,
+            pub_status,
+            custom_status.as_ref(),
+        )
+        .await;
+        futures_util::future::join_all(
+            my_guilds
+                .iter()
+                .map(|gid| lazy_request::refresh_guild_member_lists(state, gid)),
+        )
+        .await;
+    }
 }
