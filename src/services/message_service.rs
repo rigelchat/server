@@ -1,5 +1,4 @@
 use chrono::Utc;
-use serde_json::json;
 use sqlx::FromRow;
 
 use crate::AppState;
@@ -10,7 +9,7 @@ use crate::constants::limits::{
 };
 use crate::error::{AppError, ValidationCode};
 use crate::models::channel::ChannelType;
-use crate::models::gateway::events::{GatewayMessageEvent, MessageMember};
+use crate::models::gateway::events::{GatewayMessageEvent, MessageDeleteEvent, MessageMember};
 use crate::models::message::{Message, MessageDbRow, MessageType};
 use crate::models::rest::messages::GetMessagesQuery;
 use crate::services::permission_service;
@@ -21,6 +20,20 @@ struct ChannelMetaRow {
     guild_id: String,
     #[sqlx(rename = "type")]
     channel_type: u32,
+}
+
+fn validate_message_content(content: &str) -> Result<(), AppError> {
+    if content.trim().is_empty() {
+        return Err(AppError::empty_message());
+    }
+    if content.chars().count() > MAX_MESSAGE_LENGTH {
+        return Err(AppError::validation(
+            "content",
+            ValidationCode::ContentExceedsMaxLength,
+            format!("Text must not exceed {MAX_MESSAGE_LENGTH} characters."),
+        ));
+    }
+    Ok(())
 }
 
 async fn get_channel_meta(state: &AppState, channel_id: &str) -> Result<ChannelMetaRow, AppError> {
@@ -197,17 +210,7 @@ pub async fn create_message(
     content: String,
     nonce: Option<String>,
 ) -> Result<Message, AppError> {
-    if content.trim().is_empty() {
-        return Err(AppError::empty_message());
-    }
-    let max_len = MAX_MESSAGE_LENGTH;
-    if content.chars().count() > max_len {
-        return Err(AppError::validation(
-            "content",
-            ValidationCode::ContentExceedsMaxLength,
-            format!("Text must not exceed {max_len} characters."),
-        ));
-    }
+    validate_message_content(&content)?;
 
     let meta = get_channel_meta(state, channel_id).await?;
     let (perm_ctx, member_roles, _) = permission_service::require_channel_permission_with_ctx(
@@ -278,17 +281,7 @@ pub async fn edit_message(
     user_id: &str,
     content: String,
 ) -> Result<Message, AppError> {
-    if content.trim().is_empty() {
-        return Err(AppError::empty_message());
-    }
-    let max_len = MAX_MESSAGE_LENGTH;
-    if content.chars().count() > max_len {
-        return Err(AppError::validation(
-            "content",
-            ValidationCode::ContentExceedsMaxLength,
-            format!("Text must not exceed {max_len} characters."),
-        ));
-    }
+    validate_message_content(&content)?;
 
     let meta = get_channel_meta(state, channel_id).await?;
     let (perm_ctx, member_roles, _) = permission_service::require_channel_permission_with_ctx(
@@ -406,11 +399,11 @@ pub async fn delete_message(
         channel_id,
         perm_ctx.as_ref(),
         events::MESSAGE_DELETE,
-        &json!({
-            "id": message_id,
-            "channel_id": channel_id,
-            "guild_id": meta.guild_id,
-        }),
+        &MessageDeleteEvent {
+            id: message_id,
+            channel_id,
+            guild_id: &meta.guild_id,
+        },
     )
     .await;
 

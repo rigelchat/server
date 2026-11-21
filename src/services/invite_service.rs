@@ -4,7 +4,9 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::constants::flags::PermissionFlags;
-use crate::constants::limits::{MAX_INVITES_PER_GUILD, MAX_INVITE_AGE_SECONDS, MAX_INVITE_USES};
+use crate::constants::limits::{
+    INVITE_CODE_LENGTH, MAX_INVITES_PER_GUILD, MAX_INVITE_AGE_SECONDS, MAX_INVITE_USES,
+};
 use crate::error::AppError;
 use crate::models::channel::ChannelType;
 use crate::models::invite::{
@@ -149,7 +151,7 @@ pub async fn create_channel_invite(
         return Err(AppError::max_invites());
     }
 
-    let code = Uuid::new_v4().simple().to_string()[..8].to_string();
+    let code = Uuid::new_v4().simple().to_string()[..INVITE_CODE_LENGTH].to_string();
     let created_at = Utc::now().timestamp_millis() as u64;
     let max_uses = payload.max_uses.unwrap_or(0).min(MAX_INVITE_USES);
     let max_age = payload.max_age.unwrap_or(0).min(MAX_INVITE_AGE_SECONDS);

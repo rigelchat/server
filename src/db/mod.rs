@@ -268,7 +268,7 @@ pub async fn init(database_url: &str, max_connections: u32) -> Result<MySqlPool,
     Ok(pool)
 }
 
-// TODO: revoir ca (normalement, ya pas besoins de tout ca)
+// TODO: review whether runtime index checks can move to dedicated migrations
 async fn ensure_index(
     pool: &MySqlPool,
     table: &str,

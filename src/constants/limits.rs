@@ -44,3 +44,6 @@ pub const MAX_ATTACHMENT_SIZE_BYTES: u64 = 26_214_400;
 pub const MAX_SESSION_PROPERTY_LENGTH: usize = 64;
 pub const MAX_USERNAME_SUGGESTION_SEED_LENGTH: usize = 128;
 pub const MAX_SEARCH_QUERY_LENGTH: usize = 100;
+pub const MAX_SNOWFLAKE_LENGTH: usize = 20;
+pub const INVITE_CODE_LENGTH: usize = 8;
+pub const MAX_THEME_COLORS: usize = 2;

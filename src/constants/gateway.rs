@@ -11,6 +11,8 @@ pub const MAX_PAYLOAD_BYTES: usize = 16_384;
 pub const GATEWAY_SEND_QUEUE_CAPACITY: usize = 512;
 pub const GATEWAY_WRITE_TIMEOUT_SECS: u64 = 5;
 pub const ZSTD_DECODE_CHUNK_BYTES: usize = 4_096;
+pub const ZSTD_COMPRESSION_LEVEL: i32 = 3;
+pub const READY_VERSION: u8 = 1;
 pub const MEMBER_LIST_RANGE_MAX_SPAN: i64 = 99;
 
 #[derive(Serialize)]

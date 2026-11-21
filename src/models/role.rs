@@ -4,6 +4,12 @@ use sqlx::FromRow;
 use crate::models::serde_helpers::serialize_u64_as_string;
 
 #[derive(Debug, Clone, FromRow)]
+pub struct RolePerm {
+    pub id: String,
+    pub permissions: u64,
+}
+
+#[derive(Debug, Clone, FromRow)]
 pub struct RoleRow {
     pub id: String,
     pub position: u32,

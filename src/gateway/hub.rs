@@ -123,7 +123,6 @@ impl GatewayHub {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn authenticate(
         &self,
         session_id: &str,

@@ -5,6 +5,7 @@ use sqlx::mysql::MySqlPool;
 
 use crate::config::AppConfig;
 use crate::gateway::hub::GatewayHub;
+use crate::gateway::session::GatewaySession;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -26,8 +27,12 @@ impl AppState {
         self.hub.remove_user_guild(user_id, guild_id);
     }
 
-    pub async fn dispatch_user<T: Serialize>(&self, event_name: &str, data: &T, user_id: &str) {
-        let sessions = self.hub.sessions_for_user(user_id);
+    pub fn dispatch_to_sessions<T: Serialize>(
+        &self,
+        sessions: &[Arc<GatewaySession>],
+        event_name: &str,
+        data: &T,
+    ) {
         if sessions.is_empty() {
             return;
         }
@@ -44,21 +49,13 @@ impl AppState {
         }
     }
 
+    pub async fn dispatch_user<T: Serialize>(&self, event_name: &str, data: &T, user_id: &str) {
+        let sessions = self.hub.sessions_for_user(user_id);
+        self.dispatch_to_sessions(&sessions, event_name, data);
+    }
+
     pub async fn dispatch_guild<T: Serialize>(&self, event_name: &str, data: &T, guild_id: &str) {
         let sessions = self.hub.sessions_for_guild(guild_id);
-        if sessions.is_empty() {
-            return;
-        }
-        let Ok(data_json) = serde_json::to_string(data) else {
-            tracing::error!(event = %event_name, "Failed to serialize payload");
-            return;
-        };
-        let Ok(event_json) = serde_json::to_string(event_name) else {
-            return;
-        };
-
-        for session in sessions {
-            session.dispatch_pre_serialized(&event_json, &data_json);
-        }
+        self.dispatch_to_sessions(&sessions, event_name, data);
     }
 }

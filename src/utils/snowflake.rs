@@ -124,7 +124,7 @@ impl Snowflake {
 
 pub fn validate_snowflake(field: &str, value: &str) -> Result<(), crate::error::AppError> {
     if value.is_empty()
-        || value.len() > 20
+        || value.len() > crate::constants::limits::MAX_SNOWFLAKE_LENGTH
         || !value.bytes().all(|b| b.is_ascii_digit())
         || value.parse::<u64>().is_err()
     {

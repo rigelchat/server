@@ -13,7 +13,8 @@ use crate::models::gateway::lazy_request::{
 };
 use crate::models::guild_member::{GuildMemberFields, GuildMemberRole, GuildMemberUserRow};
 use crate::models::user::{CustomStatus, PartialUser};
-use crate::services::permission_service::{self, RolePerm};
+use crate::models::role::RolePerm;
+use crate::services::permission_service;
 
 use super::presence;
 

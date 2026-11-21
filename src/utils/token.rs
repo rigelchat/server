@@ -40,6 +40,15 @@ pub fn sign(user_id: &str, secret: &str) -> TokenData {
     }
 }
 
+pub fn strip_auth_prefix(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    trimmed
+        .strip_prefix("Bearer ")
+        .or_else(|| trimmed.strip_prefix("Bot "))
+        .unwrap_or(trimmed)
+        .trim()
+}
+
 pub fn verify(token: &str, secret: &str) -> Result<TokenClaims, String> {
     let parts: Vec<&str> = token.trim().split('.').collect();
     if parts.len() != 3 {

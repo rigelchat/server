@@ -22,8 +22,7 @@ use crate::models::guild_member::{
     GuildMemberUserRef, GuildMemberUserRow,
 };
 use crate::models::permission::OverwriteType;
-use crate::models::role::{Role, RoleRow};
-use crate::services::permission_service::RolePerm;
+use crate::models::role::{Role, RolePerm, RoleRow};
 use crate::services::{channel_service, member_service, permission_service, role_service};
 use crate::utils::snowflake::DISCORD_SNOWFLAKE;
 

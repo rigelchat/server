@@ -22,3 +22,26 @@ pub struct GatewayMessageEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub member: Option<MessageMember>,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GuildDeleteEvent<'a> {
+    pub id: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GuildMemberRemoveUser<'a> {
+    pub id: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GuildMemberRemoveEvent<'a> {
+    pub guild_id: &'a str,
+    pub user: GuildMemberRemoveUser<'a>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageDeleteEvent<'a> {
+    pub id: &'a str,
+    pub channel_id: &'a str,
+    pub guild_id: &'a str,
+}

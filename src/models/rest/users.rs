@@ -1,10 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::constants::limits::{
-    MAX_CUSTOM_STATUS_TEXT_LENGTH, MAX_EMOJI_NAME_LENGTH, MAX_EXPIRES_AT_LENGTH,
-};
+use crate::constants::limits::{MAX_CUSTOM_STATUS_TEXT_LENGTH, MAX_EMOJI_NAME_LENGTH};
 use crate::error::{AppError, ValidationCode};
-use crate::models::serde_helpers::deserialize_double_option;
+use crate::models::serde_helpers::{deserialize_double_option, parse_timestamp_iso};
 use crate::models::user::{CustomStatus, GuildFolder, PartialUser, UserProfileData};
 use crate::utils::snowflake::validate_snowflake;
 
@@ -152,44 +150,11 @@ impl CustomStatusInput {
             validate_snowflake("custom_status.emoji_id", id)?;
         }
 
-        let expires_at = match self.expires_at {
-            None | Some(serde_json::Value::Null) => None,
-            Some(serde_json::Value::String(raw)) => {
-                let s = raw.trim().to_string();
-                if s.is_empty() {
-                    None
-                } else {
-                    if s.len() > MAX_EXPIRES_AT_LENGTH || chrono::DateTime::parse_from_rfc3339(&s).is_err() {
-                        return Err(AppError::validation(
-                            "custom_status.expires_at",
-                            ValidationCode::InvalidFormat,
-                            "Invalid custom status expiration timestamp.",
-                        ));
-                    }
-                    Some(s)
-                }
-            }
-            Some(serde_json::Value::Number(n)) => {
-                let ts = n
-                    .as_i64()
-                    .and_then(chrono::DateTime::from_timestamp_millis)
-                    .ok_or_else(|| {
-                        AppError::validation(
-                            "custom_status.expires_at",
-                            ValidationCode::InvalidFormat,
-                            "Invalid custom status expiration timestamp.",
-                        )
-                    })?;
-                Some(ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-            }
-            Some(_) => {
-                return Err(AppError::validation(
-                    "custom_status.expires_at",
-                    ValidationCode::InvalidFormat,
-                    "Invalid custom status expiration timestamp.",
-                ));
-            }
-        };
+        let expires_at = self
+            .expires_at
+            .map(|v| parse_timestamp_iso("custom_status.expires_at", v))
+            .transpose()?
+            .flatten();
 
         Ok(CustomStatus {
             text,

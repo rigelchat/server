@@ -3,10 +3,10 @@ use sqlx::{FromRow, MySql, QueryBuilder};
 use crate::AppState;
 use crate::constants::gateway::events;
 use crate::constants::limits::{
-    MAX_ASSET_HASH_LENGTH, MAX_BIO_LENGTH, MAX_COLOR_VALUE, MAX_EXPIRES_AT_LENGTH,
-    MAX_EXTRA_SETTINGS_BYTES, MAX_FOLDER_ICON_LENGTH, MAX_FOLDER_NAME_LENGTH,
-    MAX_GLOBAL_NAME_LENGTH, MAX_GRADIENT_PRESET_LENGTH, MAX_GUILD_FOLDERS, MAX_LOCALE_LENGTH,
-    MAX_PRONOUNS_LENGTH, MAX_SETTINGS_LIST_ITEMS, MAX_SYNCED_PREFS_BYTES, MIN_AFK_TIMEOUT,
+    MAX_ASSET_HASH_LENGTH, MAX_BIO_LENGTH, MAX_COLOR_VALUE, MAX_EXTRA_SETTINGS_BYTES,
+    MAX_FOLDER_ICON_LENGTH, MAX_FOLDER_NAME_LENGTH, MAX_GLOBAL_NAME_LENGTH,
+    MAX_GRADIENT_PRESET_LENGTH, MAX_GUILD_FOLDERS, MAX_LOCALE_LENGTH, MAX_PRONOUNS_LENGTH,
+    MAX_SETTINGS_LIST_ITEMS, MAX_SYNCED_PREFS_BYTES, MAX_THEME_COLORS, MIN_AFK_TIMEOUT,
 };
 use crate::constants::user::{DEFAULT_AFK_TIMEOUT, VALID_STATUSES, VALID_THEMES};
 use crate::error::{AppError, ValidationCode};
@@ -14,6 +14,7 @@ use crate::models::rest::users::{
     CustomStatusInput, GetProfileQuery, MutualGuild, UpdateProfileRequest, UpdateSettingsRequest,
     UpdateUserRequest, UserProfileResponse,
 };
+use crate::models::serde_helpers::parse_timestamp_iso;
 use crate::models::user::{
     CurrentUser, PartialUser, UserProfileData, UserProfileRow, UserRow, UserSettings,
     UserSettingsExtras, UserSettingsRow,
@@ -150,47 +151,21 @@ pub async fn update_user(
     let mut has_profile_updates = false;
 
     if let Some(bio) = &payload.bio {
-        let value = bio.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        if let Some(text) = value {
-            if text.chars().count() > MAX_BIO_LENGTH {
-                return Err(AppError::validation(
-                    "bio",
-                    ValidationCode::ContentExceedsMaxLength,
-                    "Text must not exceed 320 characters.",
-                ));
-            }
-        }
+        let value = normalize_optional_text("bio", bio.as_deref(), MAX_BIO_LENGTH)?;
         profile_sep.push("bio = ");
-        profile_sep.push_bind_unseparated(value.map(str::to_string));
+        profile_sep.push_bind_unseparated(value);
         has_profile_updates = true;
     }
 
     if let Some(pronouns) = &payload.pronouns {
-        let value = pronouns.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        if let Some(text) = value {
-            if text.chars().count() > MAX_PRONOUNS_LENGTH {
-                return Err(AppError::validation(
-                    "pronouns",
-                    ValidationCode::ContentExceedsMaxLength,
-                    "Text must not exceed 40 characters.",
-                ));
-            }
-        }
+        let value = normalize_optional_text("pronouns", pronouns.as_deref(), MAX_PRONOUNS_LENGTH)?;
         profile_sep.push("pronouns = ");
-        profile_sep.push_bind_unseparated(value.map(str::to_string));
+        profile_sep.push_bind_unseparated(value);
         has_profile_updates = true;
     }
 
     if let Some(accent_color) = payload.accent_color {
-        if let Some(color) = accent_color {
-            if color > MAX_COLOR_VALUE {
-                return Err(AppError::validation(
-                    "accent_color",
-                    ValidationCode::ColorValueTooHigh,
-                    "Color value must not exceed 0xffffff.",
-                ));
-            }
-        }
+        validate_color_opt("accent_color", accent_color)?;
         profile_sep.push("accent_color = ");
         profile_sep.push_bind_unseparated(accent_color);
         has_profile_updates = true;
@@ -310,54 +285,28 @@ pub async fn update_profile(
     let mut has_updates = false;
 
     if let Some(bio) = &payload.bio {
-        let value = bio.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        if let Some(text) = value {
-            if text.chars().count() > MAX_BIO_LENGTH {
-                return Err(AppError::validation(
-                    "bio",
-                    ValidationCode::ContentExceedsMaxLength,
-                    "Text must not exceed 320 characters.",
-                ));
-            }
-        }
+        let value = normalize_optional_text("bio", bio.as_deref(), MAX_BIO_LENGTH)?;
         separated.push("bio = ");
-        separated.push_bind_unseparated(value.map(str::to_string));
+        separated.push_bind_unseparated(value);
         has_updates = true;
     }
 
     if let Some(pronouns) = &payload.pronouns {
-        let value = pronouns.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        if let Some(text) = value {
-            if text.chars().count() > MAX_PRONOUNS_LENGTH {
-                return Err(AppError::validation(
-                    "pronouns",
-                    ValidationCode::ContentExceedsMaxLength,
-                    "Text must not exceed 40 characters.",
-                ));
-            }
-        }
+        let value = normalize_optional_text("pronouns", pronouns.as_deref(), MAX_PRONOUNS_LENGTH)?;
         separated.push("pronouns = ");
-        separated.push_bind_unseparated(value.map(str::to_string));
+        separated.push_bind_unseparated(value);
         has_updates = true;
     }
 
     if let Some(accent_color) = payload.accent_color {
-        if let Some(color) = accent_color {
-            if color > MAX_COLOR_VALUE {
-                return Err(AppError::validation(
-                    "accent_color",
-                    ValidationCode::ColorValueTooHigh,
-                    "Color value must not exceed 0xffffff.",
-                ));
-            }
-        }
+        validate_color_opt("accent_color", accent_color)?;
         separated.push("accent_color = ");
         separated.push_bind_unseparated(accent_color);
         has_updates = true;
     }
 
     if let Some(theme_colors) = &payload.theme_colors {
-        if theme_colors.len() > 2 {
+        if theme_colors.len() > MAX_THEME_COLORS {
             return Err(AppError::validation(
                 "theme_colors",
                 ValidationCode::InvalidFormat,
@@ -366,15 +315,8 @@ pub async fn update_profile(
         }
         let primary = theme_colors.first().copied().flatten();
         let secondary = theme_colors.get(1).copied().flatten();
-        for color in [primary, secondary].into_iter().flatten() {
-            if color > MAX_COLOR_VALUE {
-                return Err(AppError::validation(
-                    "theme_colors",
-                    ValidationCode::ColorValueTooHigh,
-                    "Color value must not exceed 0xffffff.",
-                ));
-            }
-        }
+        validate_color_opt("theme_colors", primary)?;
+        validate_color_opt("theme_colors", secondary)?;
         separated.push("theme_color_primary = ");
         separated.push_bind_unseparated(primary);
         separated.push("theme_color_secondary = ");
@@ -609,44 +551,10 @@ pub async fn update_settings(
         has_extra_updates = true;
     }
     if let Some(ra) = payload.status_resets_at {
-        extras.status_resets_at = match ra {
-            None | Some(serde_json::Value::Null) => None,
-            Some(serde_json::Value::String(raw)) => {
-                let s = raw.trim().to_string();
-                if s.is_empty() {
-                    None
-                } else {
-                    if s.len() > MAX_EXPIRES_AT_LENGTH || chrono::DateTime::parse_from_rfc3339(&s).is_err() {
-                        return Err(AppError::validation(
-                            "status_resets_at",
-                            ValidationCode::InvalidFormat,
-                            "Invalid status_resets_at timestamp.",
-                        ));
-                    }
-                    Some(s)
-                }
-            }
-            Some(serde_json::Value::Number(n)) => {
-                let ts = n
-                    .as_i64()
-                    .and_then(chrono::DateTime::from_timestamp_millis)
-                    .ok_or_else(|| {
-                        AppError::validation(
-                            "status_resets_at",
-                            ValidationCode::InvalidFormat,
-                            "Invalid status_resets_at timestamp.",
-                        )
-                    })?;
-                Some(ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-            }
-            Some(_) => {
-                return Err(AppError::validation(
-                    "status_resets_at",
-                    ValidationCode::InvalidFormat,
-                    "Invalid status_resets_at timestamp.",
-                ));
-            }
-        };
+        extras.status_resets_at = ra
+            .map(|v| parse_timestamp_iso("status_resets_at", v))
+            .transpose()?
+            .flatten();
         has_extra_updates = true;
     }
 
@@ -803,6 +711,37 @@ async fn broadcast_presence_from_settings(
     for gid in &guild_ids {
         crate::gateway::handlers::lazy_request::refresh_guild_member_lists(state, gid).await;
     }
+}
+
+fn normalize_optional_text(
+    field: &str,
+    input: Option<&str>,
+    max_chars: usize,
+) -> Result<Option<String>, AppError> {
+    let value = input.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(text) = value {
+        if text.chars().count() > max_chars {
+            return Err(AppError::validation(
+                field,
+                ValidationCode::ContentExceedsMaxLength,
+                format!("Text must not exceed {max_chars} characters."),
+            ));
+        }
+    }
+    Ok(value.map(str::to_string))
+}
+
+fn validate_color_opt(field: &str, color: Option<u32>) -> Result<(), AppError> {
+    if let Some(c) = color {
+        if c > MAX_COLOR_VALUE {
+            return Err(AppError::validation(
+                field,
+                ValidationCode::ColorValueTooHigh,
+                "Color value must not exceed 0xffffff.",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_asset_opt(field: &str, value: Option<&str>) -> Result<Option<String>, AppError> {

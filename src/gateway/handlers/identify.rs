@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, error};
 
 use crate::AppState;
-use crate::constants::gateway::{close_codes, events};
+use crate::constants::gateway::{READY_VERSION, close_codes, events};
 use crate::constants::limits::MAX_SESSION_PROPERTY_LENGTH;
 use crate::constants::user::PresenceStatus;
 use crate::models::gateway::IdentifyPayload;
@@ -14,7 +14,7 @@ use crate::models::gateway::ready::{ReadyData, RtcRegion};
 use crate::models::guild::GatewayGuild;
 use crate::models::user::{CurrentUser, PartialUser, UserProfileRow, UserRow};
 use crate::services::{auth_service, guild_service, user_service};
-use crate::utils::token::{TokenClaims, verify};
+use crate::utils::token::{TokenClaims, strip_auth_prefix, verify};
 
 use super::{lazy_request, presence};
 
@@ -31,12 +31,7 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         return;
     }
 
-    let raw_token = payload
-        .token
-        .strip_prefix("Bot ")
-        .or_else(|| payload.token.strip_prefix("Bearer "))
-        .unwrap_or(&payload.token)
-        .trim();
+    let raw_token = strip_auth_prefix(&payload.token);
 
     let TokenClaims {
         user_id,
@@ -199,7 +194,7 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         auth_session_id_hash: hash_session_id(&auth_session_id),
         session_id: session_id.to_string(),
         country_code: state.config.instance.country_code.clone(),
-        version: 1,
+        version: READY_VERSION,
         guilds,
         private_channels: vec![],
         pinned_dms: vec![],

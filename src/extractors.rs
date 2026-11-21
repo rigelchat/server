@@ -52,11 +52,7 @@ where
             .and_then(|v| v.to_str().ok())
             .ok_or_else(AppError::missing_auth)?;
 
-        let token = raw_header
-            .strip_prefix("Bearer ")
-            .or_else(|| raw_header.strip_prefix("Bot "))
-            .unwrap_or(raw_header)
-            .trim();
+        let token = token::strip_auth_prefix(raw_header);
 
         let TokenClaims {
             user_id,

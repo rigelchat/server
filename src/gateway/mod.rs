@@ -22,7 +22,7 @@ use zstd::stream::raw::{Decoder as RawZstdDecoder, Operation};
 use crate::AppState;
 use crate::constants::gateway::{
     GATEWAY_SEND_QUEUE_CAPACITY, GATEWAY_WRITE_TIMEOUT_SECS, HEARTBEAT_INTERVAL, MAX_PAYLOAD_BYTES,
-    Opcode, ZSTD_DECODE_CHUNK_BYTES, close_codes,
+    Opcode, ZSTD_COMPRESSION_LEVEL, ZSTD_DECODE_CHUNK_BYTES, close_codes,
 };
 use crate::gateway::session::GatewaySession;
 use crate::models::gateway::{
@@ -61,7 +61,7 @@ async fn handle_socket(ws: WebSocket, state: AppState, zstd_stream: bool) {
 
     let mut send_task = tokio::spawn(async move {
         let mut zstd_encoder = if zstd_stream {
-            zstd::stream::write::Encoder::new(Vec::new(), 3)
+            zstd::stream::write::Encoder::new(Vec::new(), ZSTD_COMPRESSION_LEVEL)
                 .map_err(|err| error!(error = %err, "Failed to initialize zstd encoder"))
                 .ok()
         } else {

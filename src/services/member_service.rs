@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
-use serde_json::json;
 use sqlx::{MySql, QueryBuilder};
 
 use crate::AppState;
 use crate::constants::gateway::events;
 use crate::constants::limits::{DEFAULT_MEMBERS_PAGE_LIMIT, MAX_GUILDS_PER_USER, MAX_MEMBERS_PAGE_LIMIT};
 use crate::error::{AppError, ValidationCode};
-use crate::models::gateway::events::GuildMemberAddEvent;
+use crate::models::gateway::events::{
+    GuildDeleteEvent, GuildMemberAddEvent, GuildMemberRemoveEvent, GuildMemberRemoveUser,
+};
 use crate::models::guild_member::{GuildMemberResponse, GuildMemberRole, GuildMemberUserRow};
 use crate::services::guild_service;
 
@@ -172,13 +173,16 @@ pub async fn leave_guild(state: &AppState, user_id: &str, guild_id: &str) -> Res
     crate::gateway::handlers::lazy_request::refresh_guild_member_lists(state, guild_id).await;
 
     state
-        .dispatch_user(events::GUILD_DELETE, &json!({ "id": guild_id }), user_id)
+        .dispatch_user(events::GUILD_DELETE, &GuildDeleteEvent { id: guild_id }, user_id)
         .await;
 
     state
         .dispatch_guild(
             events::GUILD_MEMBER_REMOVE,
-            &json!({ "guild_id": guild_id, "user": { "id": user_id } }),
+            &GuildMemberRemoveEvent {
+                guild_id,
+                user: GuildMemberRemoveUser { id: user_id },
+            },
             guild_id,
         )
         .await;

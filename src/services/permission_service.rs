@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::Serialize;
-use sqlx::{FromRow, MySql, QueryBuilder};
+use sqlx::{MySql, QueryBuilder};
 
 use crate::AppState;
 use crate::constants::flags::PermissionFlags;
@@ -11,13 +11,8 @@ use crate::gateway::session::GatewaySession;
 use crate::models::channel::{ChannelOverwriteRow, ChannelResponse, ChannelType, PermissionOverwrite};
 use crate::models::guild_member::GuildMemberRole;
 use crate::models::permission::OverwriteType;
+use crate::models::role::RolePerm;
 use crate::services::member_service;
-
-#[derive(Debug, Clone, FromRow)]
-pub struct RolePerm {
-    pub id: String,
-    pub permissions: u64,
-}
 
 #[derive(Debug, Clone)]
 pub struct ChannelPermissionContext {
@@ -461,24 +456,7 @@ pub async fn dispatch_channel_with_ctx<T: Serialize>(
     data: &T,
 ) {
     let sessions = filter_sessions_for_channel_with_ctx(state, guild_id, channel_id, ctx).await;
-    if sessions.is_empty() {
-        return;
-    }
-
-    let data_json = match serde_json::to_string(data) {
-        Ok(v) => v,
-        Err(err) => {
-            tracing::error!(error = %err, event = %event_name, "Failed to serialize payload");
-            return;
-        }
-    };
-    let Ok(event_json) = serde_json::to_string(event_name) else {
-        return;
-    };
-
-    for session in sessions {
-        session.dispatch_pre_serialized(&event_json, &data_json);
-    }
+    state.dispatch_to_sessions(&sessions, event_name, data);
 }
 
 
