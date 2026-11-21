@@ -33,7 +33,7 @@ pub async fn get_current_user(state: &AppState, user_id: &str) -> Result<Current
         .bind(user_id)
         .fetch_optional(&state.db)
         .await?
-        .ok_or_else(|| AppError::unknown_user())?;
+        .ok_or_else(AppError::unknown_user)?;
 
     let profile = sqlx::query_as::<_, UserProfileRow>(
         "SELECT bio, pronouns, accent_color, theme_color_primary, theme_color_secondary FROM user_profiles WHERE id = ?",
@@ -50,7 +50,7 @@ pub async fn get_partial_user(state: &AppState, user_id: &str) -> Result<Partial
         .bind(user_id)
         .fetch_optional(&state.db)
         .await?
-        .ok_or_else(|| AppError::unknown_user())?;
+        .ok_or_else(AppError::unknown_user)?;
 
     Ok(PartialUser::from(&user))
 }
@@ -129,14 +129,14 @@ pub async fn update_user(
         user_query.push(" WHERE id = ");
         user_query.push_bind(user_id);
         if let Err(err) = user_query.build().execute(&mut *tx).await {
-            if let sqlx::Error::Database(db_err) = &err {
-                if db_err.is_unique_violation() {
-                    return Err(AppError::validation(
-                        "username",
-                        ValidationCode::UsernameAlreadyTaken,
-                        "This username is already taken.",
-                    ));
-                }
+            if let sqlx::Error::Database(db_err) = &err
+                && db_err.is_unique_violation()
+            {
+                return Err(AppError::validation(
+                    "username",
+                    ValidationCode::UsernameAlreadyTaken,
+                    "This username is already taken.",
+                ));
             }
             return Err(err.into());
         }
@@ -466,14 +466,14 @@ pub async fn update_settings(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        if let Some(ref v) = value {
-            if v.len() > MAX_GRADIENT_PRESET_LENGTH || v.chars().any(char::is_control) {
-                return Err(AppError::validation(
-                    "background_gradient_preset",
-                    ValidationCode::StringLengthInvalid,
-                    "background_gradient_preset must not exceed 32 characters.",
-                ));
-            }
+        if let Some(ref v) = value
+            && (v.len() > MAX_GRADIENT_PRESET_LENGTH || v.chars().any(char::is_control))
+        {
+            return Err(AppError::validation(
+                "background_gradient_preset",
+                ValidationCode::StringLengthInvalid,
+                "background_gradient_preset must not exceed 32 characters.",
+            ));
         }
         separated.push("background_gradient_preset = ");
         separated.push_bind_unseparated(value);
@@ -523,31 +523,30 @@ pub async fn update_settings(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        if let Some(ref v) = value {
-            if v.len() > MAX_LOCALE_LENGTH
+        if let Some(ref v) = value
+            && (v.len() > MAX_LOCALE_LENGTH
                 || !v
                     .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
-                return Err(AppError::validation(
-                    "regional_format",
-                    ValidationCode::InvalidFormat,
-                    "Invalid regional_format value.",
-                ));
-            }
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        {
+            return Err(AppError::validation(
+                "regional_format",
+                ValidationCode::InvalidFormat,
+                "Invalid regional_format value.",
+            ));
         }
         extras.regional_format = value;
         has_extra_updates = true;
     }
     if let Some(rt) = payload.status_resets_to {
-        if let Some(ref s) = rt {
-            if !VALID_STATUSES.contains(&s.as_str()) {
-                return Err(AppError::validation(
-                    "status_resets_to",
-                    ValidationCode::InvalidFormat,
-                    "Invalid status_resets_to value.",
-                ));
-            }
+        if let Some(ref s) = rt
+            && !VALID_STATUSES.contains(&s.as_str())
+        {
+            return Err(AppError::validation(
+                "status_resets_to",
+                ValidationCode::InvalidFormat,
+                "Invalid status_resets_to value.",
+            ));
         }
         extras.status_resets_to = rt;
         has_extra_updates = true;
@@ -679,12 +678,12 @@ pub async fn update_settings(
         .dispatch_user(events::USER_SETTINGS_UPDATE, &settings, user_id)
         .await;
 
-    if locale_changed {
-        if let Ok(current) = get_current_user(state, user_id).await {
-            state
-                .dispatch_user(events::USER_UPDATE, &current, user_id)
-                .await;
-        }
+    if locale_changed
+        && let Ok(current) = get_current_user(state, user_id).await
+    {
+        state
+            .dispatch_user(events::USER_UPDATE, &current, user_id)
+            .await;
     }
 
     if let Some(new_status) = &payload.status {
@@ -741,27 +740,27 @@ fn normalize_optional_text(
     max_chars: usize,
 ) -> Result<Option<String>, AppError> {
     let value = input.map(str::trim).filter(|s| !s.is_empty());
-    if let Some(text) = value {
-        if text.chars().count() > max_chars {
-            return Err(AppError::validation(
-                field,
-                ValidationCode::ContentExceedsMaxLength,
-                format!("Text must not exceed {max_chars} characters."),
-            ));
-        }
+    if let Some(text) = value
+        && text.chars().count() > max_chars
+    {
+        return Err(AppError::validation(
+            field,
+            ValidationCode::ContentExceedsMaxLength,
+            format!("Text must not exceed {max_chars} characters."),
+        ));
     }
     Ok(value.map(str::to_string))
 }
 
 fn validate_color_opt(field: &str, color: Option<u32>) -> Result<(), AppError> {
-    if let Some(c) = color {
-        if c > MAX_COLOR_VALUE {
-            return Err(AppError::validation(
-                field,
-                ValidationCode::ColorValueTooHigh,
-                "Color value must not exceed 0xffffff.",
-            ));
-        }
+    if let Some(c) = color
+        && c > MAX_COLOR_VALUE
+    {
+        return Err(AppError::validation(
+            field,
+            ValidationCode::ColorValueTooHigh,
+            "Color value must not exceed 0xffffff.",
+        ));
     }
     Ok(())
 }

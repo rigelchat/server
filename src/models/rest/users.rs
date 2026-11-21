@@ -118,28 +118,28 @@ impl CustomStatusInput {
             .text
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        if let Some(ref t) = text {
-            if t.chars().count() > MAX_CUSTOM_STATUS_TEXT_LENGTH {
-                return Err(AppError::validation(
-                    "custom_status.text",
-                    ValidationCode::ContentExceedsMaxLength,
-                    "Custom status text must not exceed 128 characters.",
-                ));
-            }
+        if let Some(ref t) = text
+            && t.chars().count() > MAX_CUSTOM_STATUS_TEXT_LENGTH
+        {
+            return Err(AppError::validation(
+                "custom_status.text",
+                ValidationCode::ContentExceedsMaxLength,
+                "Custom status text must not exceed 128 characters.",
+            ));
         }
 
         let emoji_name = self
             .emoji_name
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        if let Some(ref name) = emoji_name {
-            if name.chars().count() > MAX_EMOJI_NAME_LENGTH {
-                return Err(AppError::validation(
-                    "custom_status.emoji_name",
-                    ValidationCode::StringLengthInvalid,
-                    "Emoji name must not exceed 64 characters.",
-                ));
-            }
+        if let Some(ref name) = emoji_name
+            && name.chars().count() > MAX_EMOJI_NAME_LENGTH
+        {
+            return Err(AppError::validation(
+                "custom_status.emoji_name",
+                ValidationCode::StringLengthInvalid,
+                "Emoji name must not exceed 64 characters.",
+            ));
         }
 
         let emoji_id = self

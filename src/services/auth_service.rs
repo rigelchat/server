@@ -26,17 +26,17 @@ static DUMMY_PASSWORD_HASH: LazyLock<String> = LazyLock::new(|| {
 
 fn normalize_login_identifier(raw: &str, login_mode: LoginMode) -> String {
     let trimmed = raw.trim();
-    if let Some((name, tag)) = trimmed.rsplit_once('#') {
-        if !name.is_empty() && tag.chars().all(|c| c.is_ascii_digit()) {
-            return name.to_string();
-        }
+    if let Some((name, tag)) = trimmed.rsplit_once('#')
+        && !name.is_empty()
+        && tag.chars().all(|c| c.is_ascii_digit())
+    {
+        return name.to_string();
     }
-    if login_mode == LoginMode::Username {
-        if let Some((local, _host)) = trimmed.split_once('@') {
-            if !local.is_empty() {
-                return local.to_string();
-            }
-        }
+    if login_mode == LoginMode::Username
+        && let Some((local, _host)) = trimmed.split_once('@')
+        && !local.is_empty()
+    {
+        return local.to_string();
     }
     trimmed.to_string()
 }
@@ -317,14 +317,14 @@ pub async fn register(
         .map(|g| g.trim().to_string())
         .filter(|g| !g.is_empty());
 
-    if let Some(ref g) = global_name {
-        if g.len() > MAX_GLOBAL_NAME_LENGTH {
-            return Err(AppError::validation(
-                "global_name",
-                ValidationCode::GlobalNameLengthInvalid,
-                "Display name must be at most 32 characters.",
-            ));
-        }
+    if let Some(ref g) = global_name
+        && g.len() > MAX_GLOBAL_NAME_LENGTH
+    {
+        return Err(AppError::validation(
+            "global_name",
+            ValidationCode::GlobalNameLengthInvalid,
+            "Display name must be at most 32 characters.",
+        ));
     }
 
     let explicit_username = payload
@@ -375,7 +375,7 @@ pub async fn register(
     })
     .await
     .map_err(|err| AppError::internal(format!("Password hashing task failed: {err}")))?
-    .map_err(|err| AppError::internal(err))?;
+    .map_err(AppError::internal)?;
 
     let mut tx = state.db.begin().await?;
 
@@ -448,8 +448,9 @@ pub async fn register(
     .await;
 
     if let Err(err) = insert_res {
-        if let sqlx::Error::Database(db_err) = &err {
-            if db_err.is_unique_violation() {
+        if let sqlx::Error::Database(db_err) = &err
+            && db_err.is_unique_violation()
+        {
                 let msg = db_err.message();
                 if msg.contains("'email'") || msg.contains(".email'") {
                     return Err(AppError::validation(
@@ -463,7 +464,6 @@ pub async fn register(
                     ValidationCode::UsernameAlreadyTaken,
                     "This username is already taken.",
                 ));
-            }
         }
         return Err(err.into());
     }

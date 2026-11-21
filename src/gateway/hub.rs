@@ -358,10 +358,10 @@ impl GatewayHub {
 
         let mut user_ids = HashSet::new();
         for sid in sids {
-            if let Some(session) = inner.sessions.get(sid) {
-                if let Some(uid) = session.user_id() {
-                    user_ids.insert(uid);
-                }
+            if let Some(session) = inner.sessions.get(sid)
+                && let Some(uid) = session.user_id()
+            {
+                user_ids.insert(uid);
             }
         }
 
@@ -387,10 +387,10 @@ impl GatewayHub {
 
         let mut user_ids = HashSet::new();
         for sid in sids {
-            if let Some(session) = inner.sessions.get(sid) {
-                if let Some(uid) = session.user_id() {
-                    user_ids.insert(uid);
-                }
+            if let Some(session) = inner.sessions.get(sid)
+                && let Some(uid) = session.user_id()
+            {
+                user_ids.insert(uid);
             }
         }
 
@@ -421,12 +421,11 @@ impl GatewayHub {
         for gid in guild_ids {
             if let Some(sids) = inner.guild_sessions.get(gid) {
                 for sid in sids {
-                    if let Some(session) = inner.sessions.get(sid) {
-                        if let Some(uid) = session.user_id() {
-                            if uid != viewer_id {
-                                peer_ids.insert(uid);
-                            }
-                        }
+                    if let Some(session) = inner.sessions.get(sid)
+                        && let Some(uid) = session.user_id()
+                        && uid != viewer_id
+                    {
+                        peer_ids.insert(uid);
                     }
                 }
             }

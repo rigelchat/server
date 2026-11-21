@@ -37,13 +37,13 @@ impl LazyRequestPayload {
 
         if let Some(subs) = self.subscriptions {
             for (guild_id, sub) in subs {
-                if let Some(user_ids) = sub.members {
-                    if !user_ids.is_empty() {
-                        actions.push(LazyListAction::SubscribeMembers {
-                            guild_id: guild_id.clone(),
-                            user_ids,
-                        });
-                    }
+                if let Some(user_ids) = sub.members
+                    && !user_ids.is_empty()
+                {
+                    actions.push(LazyListAction::SubscribeMembers {
+                        guild_id: guild_id.clone(),
+                        user_ids,
+                    });
                 }
                 if let Some(channels) = sub.member_list_channels {
                     if channels.is_empty() {
@@ -97,7 +97,7 @@ pub struct MemberListMember {
 #[serde(untagged)]
 pub enum MemberListItem {
     Group { group: MemberListGroup },
-    Member { member: MemberListMember },
+    Member { member: Box<MemberListMember> },
 }
 
 #[derive(Serialize)]

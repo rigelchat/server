@@ -45,20 +45,20 @@ pub struct DeconstructedSnowflake {
 
 impl Snowflake {
     pub const fn new(epoch: u64) -> Self {
-        return Self {
+        Self {
             epoch,
             process_id: 1,
             worker_id: 0,
             increment: AtomicU16::new(0),
-        };
+        }
     }
 
     pub fn epoch(&self) -> u64 {
-        return self.epoch;
+        self.epoch
     }
 
     pub fn process_id(&self) -> u64 {
-        return self.process_id;
+        self.process_id
     }
 
     pub fn set_process_id(&mut self, value: u64) {
@@ -66,7 +66,7 @@ impl Snowflake {
     }
 
     pub fn worker_id(&self) -> u64 {
-        return self.worker_id;
+        self.worker_id
     }
 
     pub fn set_worker_id(&mut self, value: u64) {
@@ -88,40 +88,40 @@ impl Snowflake {
 
         let increment = opts.increment.unwrap_or_else(|| {
             let current = self.increment.fetch_add(1, AtomicOrdering::Relaxed);
-            return current & MAXIMUM_INCREMENT;
+            current & MAXIMUM_INCREMENT
         }) as u64;
 
-        return (timestamp.saturating_sub(self.epoch) << 22)
+        (timestamp.saturating_sub(self.epoch) << 22)
             | (worker_id << 17)
             | (process_id << 12)
-            | increment;
+            | increment
     }
 
     pub fn deconstruct(&self, id: u64) -> DeconstructedSnowflake {
-        return DeconstructedSnowflake {
+        DeconstructedSnowflake {
             id,
             timestamp: (id >> 22) + self.epoch,
             worker_id: (id >> 17) & MAXIMUM_WORKER_ID,
             process_id: (id >> 12) & MAXIMUM_PROCESS_ID,
             increment: id & (MAXIMUM_INCREMENT as u64),
             epoch: self.epoch,
-        };
+        }
     }
 
     pub fn decode(&self, id: u64) -> DeconstructedSnowflake {
-        return self.deconstruct(id);
+        self.deconstruct(id)
     }
 
     pub fn timestamp_from(&self, id: u64) -> u64 {
-        return (id >> 22) + self.epoch;
+        (id >> 22) + self.epoch
     }
 
     pub fn compare_strings(a: &str, b: &str) -> Ordering {
         if a.len() != b.len() {
-            return a.len().cmp(&b.len());
+            a.len().cmp(&b.len())
         } else {
-            return a.cmp(b);
-        };
+            a.cmp(b)
+        }
     }
 }
 

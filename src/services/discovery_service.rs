@@ -70,14 +70,14 @@ pub async fn get_discovery_guilds(
     state: &AppState,
     params: DiscoverySearchQuery,
 ) -> Result<GuildDiscoveryResponse, AppError> {
-    if let Some(cat) = params.category {
-        if cat != DiscoveryCategory::Other as u8 {
-            return Ok(GuildDiscoveryResponse {
-                guilds: vec![],
-                total: 0,
-                category_counts: vec![],
-            });
-        }
+    if let Some(cat) = params.category
+        && cat != DiscoveryCategory::Other as u8
+    {
+        return Ok(GuildDiscoveryResponse {
+            guilds: vec![],
+            total: 0,
+            category_counts: vec![],
+        });
     }
 
     let rows = fetch_discoverable_rows(state, params.query.as_deref()).await?;

@@ -51,11 +51,11 @@ impl GuildMemberListSnapshot {
             };
 
             MemberListItem::Member {
-                member: MemberListMember {
+                member: Box::new(MemberListMember {
                     user: m.user.clone(),
                     member: GuildMemberFields::new(m.nick.clone(), m.roles.clone(), m.joined_at),
                     presence,
-                },
+                }),
             }
         };
 
@@ -151,9 +151,7 @@ async fn fetch_snapshot(
             .await
             .ok()
             .flatten();
-    if channel_in_guild.is_none() {
-        return None;
-    }
+    channel_in_guild?;
 
     let owner_id: String = sqlx::query_scalar("SELECT owner_id FROM guilds WHERE id = ?")
         .bind(guild_id)
@@ -400,19 +398,18 @@ pub async fn handle(session_id: &str, state: &AppState, payload: LazyRequestPayl
     }
 }
 
+type ChannelSubscribers = Vec<(
+    std::sync::Arc<crate::gateway::session::GatewaySession>,
+    [i64; 2],
+)>;
+
 pub async fn refresh_guild_member_lists(state: &AppState, guild_id: &str) {
     let subscribers = state.hub.guild_member_list_subscribers(guild_id);
     if subscribers.is_empty() {
         return;
     }
 
-    let mut by_channel: HashMap<
-        String,
-        Vec<(
-            std::sync::Arc<crate::gateway::session::GatewaySession>,
-            [i64; 2],
-        )>,
-    > = HashMap::new();
+    let mut by_channel: HashMap<String, ChannelSubscribers> = HashMap::new();
     for (session, channel_id, range) in subscribers {
         by_channel
             .entry(channel_id)

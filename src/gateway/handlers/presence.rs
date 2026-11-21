@@ -195,15 +195,15 @@ pub async fn handle(session_id: &str, state: &AppState, payload: PresenceUpdateP
         "Received OP 3 PRESENCE_UPDATE"
     );
 
-    if session_status != PresenceStatus::Offline && payload.afk != Some(true) {
-        if let Err(err) = sqlx::query("UPDATE user_settings SET status = ? WHERE id = ?")
+    if session_status != PresenceStatus::Offline
+        && payload.afk != Some(true)
+        && let Err(err) = sqlx::query("UPDATE user_settings SET status = ? WHERE id = ?")
             .bind(&payload.status)
             .bind(&user_id)
             .execute(&state.db)
             .await
-        {
-            error!(error = %err, "Failed to update status in user_settings");
-        }
+    {
+        error!(error = %err, "Failed to update status in user_settings");
     }
 
     let custom_status = if let Some(cs_opt) = payload.custom_status {
@@ -232,16 +232,15 @@ pub async fn handle(session_id: &str, state: &AppState, payload: PresenceUpdateP
                     .unwrap_or_default();
 
                 extras.custom_status = parsed_custom.clone();
-                if let Ok(json_str) = serde_json::to_string(&extras) {
-                    if let Err(err) =
+                if let Ok(json_str) = serde_json::to_string(&extras)
+                    && let Err(err) =
                         sqlx::query("UPDATE user_settings SET extra_settings = ? WHERE id = ?")
                             .bind(&json_str)
                             .bind(&user_id)
                             .execute(&mut *tx)
                             .await
-                    {
-                        error!(error = %err, "Failed to update custom_status in user_settings");
-                    }
+                {
+                    error!(error = %err, "Failed to update custom_status in user_settings");
                 }
                 if let Err(err) = tx.commit().await {
                     error!(error = %err, "Failed to commit custom_status update");
