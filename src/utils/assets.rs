@@ -7,7 +7,8 @@ use flate2::read::GzDecoder;
 use tar::Archive;
 use tracing::{info, warn};
 
-const TWEMOJI_ARCHIVE_URL: &str = "https://github.com/jdecked/twemoji/archive/refs/heads/main.tar.gz";
+const TWEMOJI_ARCHIVE_URL: &str =
+    "https://github.com/jdecked/twemoji/archive/refs/heads/main.tar.gz";
 const EMOJI_DIR: &str = "static/emoji";
 const READY_MARKER: &str = "static/emoji/.ready";
 

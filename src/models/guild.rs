@@ -102,7 +102,11 @@ impl From<BaseGuild> for Guild {
             rules_channel_id: g.rules_channel_id,
             afk_channel_id: g.afk_channel_id,
             afk_timeout: g.afk_timeout,
-            features: if g.discoverable { vec![crate::constants::guild::FEATURE_DISCOVERABLE.to_string()] } else { vec![] },
+            features: if g.discoverable {
+                vec![crate::constants::guild::FEATURE_DISCOVERABLE.to_string()]
+            } else {
+                vec![]
+            },
             badge_ids: vec![],
             verification_level: 0,
             mfa_level: 0,
@@ -144,4 +148,3 @@ pub struct GatewayGuild<M = GatewayGuildMember> {
     pub threads: Vec<serde_json::Value>,
     pub properties: GatewayGuildProperties,
 }
-

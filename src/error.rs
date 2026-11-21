@@ -63,7 +63,6 @@ impl ApiErrorCode {
             Self::InternalServerError => "INTERNAL_SERVER_ERROR",
         }
     }
-
 }
 
 #[allow(dead_code)]

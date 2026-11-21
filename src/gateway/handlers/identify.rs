@@ -88,15 +88,14 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         .take(MAX_SESSION_PROPERTY_LENGTH)
         .collect();
 
-    if let Err(err) = sqlx::query(
-        "UPDATE user_sessions SET last_used_at = ?, os = ?, platform = ? WHERE id = ?",
-    )
-    .bind(Utc::now().timestamp_millis() as u64)
-    .bind(os)
-    .bind(browser)
-    .bind(&auth_session_id)
-    .execute(&state.db)
-    .await
+    if let Err(err) =
+        sqlx::query("UPDATE user_sessions SET last_used_at = ?, os = ?, platform = ? WHERE id = ?")
+            .bind(Utc::now().timestamp_millis() as u64)
+            .bind(os)
+            .bind(browser)
+            .bind(&auth_session_id)
+            .execute(&state.db)
+            .await
     {
         error!(error = %err, "Failed to update user_sessions");
     }

@@ -26,8 +26,8 @@ use crate::constants::gateway::{
 };
 use crate::gateway::session::GatewaySession;
 use crate::models::gateway::{
-    GatewayPayload, GatewayQuery, HelloPayload, IdentifyPayload,
-    lazy_request::LazyRequestPayload, presence::PresenceUpdatePayload,
+    GatewayPayload, GatewayQuery, HelloPayload, IdentifyPayload, lazy_request::LazyRequestPayload,
+    presence::PresenceUpdatePayload,
 };
 
 pub async fn handler(
@@ -136,24 +136,22 @@ async fn handle_socket(ws: WebSocket, state: AppState, zstd_stream: bool) {
                         break;
                     }
                 }
-                Message::Binary(bin) => {
-                    match decode_binary_frame(&bin, zstd_decoder.as_mut()) {
-                        Ok(text) => {
-                            process_gateway_message(&text, &recv_session_id, &recv_state).await;
-                            if recv_state
-                                .hub
-                                .get(&recv_session_id)
-                                .is_none_or(|s| s.is_closed())
-                            {
-                                break;
-                            }
-                        }
-                        Err(code) => {
-                            recv_state.hub.close_session(&recv_session_id, code);
+                Message::Binary(bin) => match decode_binary_frame(&bin, zstd_decoder.as_mut()) {
+                    Ok(text) => {
+                        process_gateway_message(&text, &recv_session_id, &recv_state).await;
+                        if recv_state
+                            .hub
+                            .get(&recv_session_id)
+                            .is_none_or(|s| s.is_closed())
+                        {
                             break;
                         }
                     }
-                }
+                    Err(code) => {
+                        recv_state.hub.close_session(&recv_session_id, code);
+                        break;
+                    }
+                },
                 Message::Close(frame) => {
                     debug!(?frame, "Client sent close frame");
                     break;
@@ -177,7 +175,8 @@ async fn handle_socket(ws: WebSocket, state: AppState, zstd_stream: bool) {
     if let Some(removed) = removed {
         if removed.has_other_session {
             handlers::presence::dispatch_sessions_replace(&state, &removed.user_id).await;
-            let current_live = handlers::presence::collect_user_live_state(&state, &removed.user_id).await;
+            let current_live =
+                handlers::presence::collect_user_live_state(&state, &removed.user_id).await;
             if current_live != removed.prev_live_state {
                 handlers::presence::broadcast_presence_with_user(
                     &state,
@@ -263,7 +262,9 @@ async fn process_gateway_message(text: &str, session_id: &str, state: &AppState)
         Ok(p) => p,
         Err(err) => {
             error!(error = %err, bytes = text.len(), "Failed to parse GatewayPayload");
-            state.hub.close_session(session_id, close_codes::DECODE_ERROR);
+            state
+                .hub
+                .close_session(session_id, close_codes::DECODE_ERROR);
             return;
         }
     };
@@ -286,28 +287,38 @@ async fn process_gateway_message(text: &str, session_id: &str, state: &AppState)
     match payload.op {
         Opcode::Identify => {
             let Some(d) = payload.d else {
-                state.hub.close_session(session_id, close_codes::DECODE_ERROR);
+                state
+                    .hub
+                    .close_session(session_id, close_codes::DECODE_ERROR);
                 return;
             };
             match serde_json::from_value::<IdentifyPayload>(d) {
                 Ok(identify) => handlers::identify::handle(session_id, state, identify).await,
                 Err(err) => {
                     error!(error = %err, "Failed to parse IDENTIFY payload");
-                    state.hub.close_session(session_id, close_codes::DECODE_ERROR);
+                    state
+                        .hub
+                        .close_session(session_id, close_codes::DECODE_ERROR);
                 }
             }
         }
         Opcode::Heartbeat => handlers::heartbeat::handle(session_id, state).await,
         Opcode::PresenceUpdate => {
             let Some(d) = payload.d else {
-                state.hub.close_session(session_id, close_codes::DECODE_ERROR);
+                state
+                    .hub
+                    .close_session(session_id, close_codes::DECODE_ERROR);
                 return;
             };
             match serde_json::from_value::<PresenceUpdatePayload>(d) {
-                Ok(presence_req) => handlers::presence::handle(session_id, state, presence_req).await,
+                Ok(presence_req) => {
+                    handlers::presence::handle(session_id, state, presence_req).await
+                }
                 Err(err) => {
                     error!(error = %err, "Failed to parse PRESENCE_UPDATE payload");
-                    state.hub.close_session(session_id, close_codes::DECODE_ERROR);
+                    state
+                        .hub
+                        .close_session(session_id, close_codes::DECODE_ERROR);
                 }
             }
         }

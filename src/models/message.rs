@@ -80,8 +80,6 @@ impl From<MessageDbRow> for Message {
     }
 }
 
-
-
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageType {

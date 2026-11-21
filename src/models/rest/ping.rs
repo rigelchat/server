@@ -4,7 +4,7 @@ use serde::Serialize;
 #[derive(Serialize)]
 pub struct PingResponse {
     pub ping: String,
-    pub instance: Instance
+    pub instance: Instance,
 }
 
 #[derive(Serialize)]
@@ -17,5 +17,5 @@ pub struct Instance {
     #[serde(rename = "correspondenceUserID")]
     pub correspondence_user_id: Option<String>,
     pub front_page: Option<String>,
-    pub tos_page: Option<String>
+    pub tos_page: Option<String>,
 }

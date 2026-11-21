@@ -39,10 +39,7 @@ async fn get_config(State(state): State<AppState>) -> Json<fluxer::InstanceRespo
     };
 
     let mut limit_overrides = BTreeMap::new();
-    limit_overrides.insert(
-        "max_message_length".to_string(),
-        MAX_MESSAGE_LENGTH as i64,
-    );
+    limit_overrides.insert("max_message_length".to_string(), MAX_MESSAGE_LENGTH as i64);
     limit_overrides.insert("max_bio_length".to_string(), MAX_BIO_LENGTH as i64);
     limit_overrides.insert("max_guilds".to_string(), MAX_GUILDS_PER_USER);
     limit_overrides.insert(

@@ -9,8 +9,8 @@ use crate::AppState;
 use crate::error::AppError;
 use crate::extractors::{AppJson, AuthUser};
 use crate::models::guild::Guild;
-use crate::models::rest::guilds::ListGuildsQuery;
 use crate::models::guild_member::GuildMemberResponse;
+use crate::models::rest::guilds::ListGuildsQuery;
 use crate::models::rest::users::{
     UpdateProfileRequest, UpdateSettingsRequest, UpdateUserRequest, UserProfileResponse,
 };

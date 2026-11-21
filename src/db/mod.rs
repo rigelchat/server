@@ -263,7 +263,13 @@ pub async fn init(database_url: &str, max_connections: u32) -> Result<MySqlPool,
     }
 
     ensure_index(&pool, "guilds", "idx_guilds_discoverable", "discoverable").await?;
-    ensure_index(&pool, "messages", "idx_messages_channel_ts", "channel_id, timestamp").await?;
+    ensure_index(
+        &pool,
+        "messages",
+        "idx_messages_channel_ts",
+        "channel_id, timestamp",
+    )
+    .await?;
 
     Ok(pool)
 }

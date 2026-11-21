@@ -8,7 +8,9 @@ use crate::AppState;
 use crate::constants::flags::PermissionFlags;
 use crate::error::AppError;
 use crate::gateway::session::GatewaySession;
-use crate::models::channel::{ChannelOverwriteRow, ChannelResponse, ChannelType, PermissionOverwrite};
+use crate::models::channel::{
+    ChannelOverwriteRow, ChannelResponse, ChannelType, PermissionOverwrite,
+};
 use crate::models::guild_member::GuildMemberRole;
 use crate::models::permission::OverwriteType;
 use crate::models::role::RolePerm;
@@ -133,10 +135,11 @@ async fn load_guild_role_context(
 
     member_service::require_member(state, guild_id, user_id).await?;
 
-    let roles = sqlx::query_as::<_, RolePerm>("SELECT id, permissions FROM roles WHERE guild_id = ?")
-        .bind(guild_id)
-        .fetch_all(&state.db)
-        .await?;
+    let roles =
+        sqlx::query_as::<_, RolePerm>("SELECT id, permissions FROM roles WHERE guild_id = ?")
+            .bind(guild_id)
+            .fetch_all(&state.db)
+            .await?;
 
     let member_roles: Vec<String> = sqlx::query_scalar(
         "SELECT role_id FROM guild_member_roles WHERE guild_id = ? AND user_id = ? AND role_id != ?",
@@ -216,7 +219,14 @@ pub async fn require_channel_permission_with_ctx(
     channel_id: &str,
     user_id: &str,
     required: PermissionFlags,
-) -> Result<(Option<ChannelPermissionContext>, Option<Vec<String>>, PermissionFlags), AppError> {
+) -> Result<
+    (
+        Option<ChannelPermissionContext>,
+        Option<Vec<String>>,
+        PermissionFlags,
+    ),
+    AppError,
+> {
     let (owner_id, roles, member_roles) = load_guild_role_context(state, guild_id, user_id).await?;
     if owner_id == user_id {
         return Ok((None, None, PermissionFlags::all()));
@@ -342,8 +352,6 @@ pub async fn filter_visible_channels(
     ))
 }
 
-
-
 pub async fn filter_sessions_for_channel_with_ctx(
     state: &AppState,
     guild_id: &str,
@@ -420,8 +428,11 @@ pub async fn filter_sessions_for_channel_with_ctx(
         }
         qb.push(")");
 
-        let role_rows: Vec<GuildMemberRole> =
-            qb.build_query_as().fetch_all(&state.db).await.unwrap_or_default();
+        let role_rows: Vec<GuildMemberRole> = qb
+            .build_query_as()
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default();
 
         for r in role_rows {
             roles_by_user.entry(r.user_id).or_default().push(r.role_id);
@@ -432,7 +443,8 @@ pub async fn filter_sessions_for_channel_with_ctx(
     can_view.insert(ctx.owner_id.clone(), true);
     for uid in user_ids {
         let member_roles = roles_by_user.get(&uid).map(Vec::as_slice).unwrap_or(&[]);
-        let base = compute_base_permissions(&ctx.owner_id, guild_id, &uid, &ctx.roles, member_roles);
+        let base =
+            compute_base_permissions(&ctx.owner_id, guild_id, &uid, &ctx.roles, member_roles);
         let ch_perms =
             compute_channel_permissions(base, guild_id, &uid, member_roles, &ctx.overwrites);
         can_view.insert(uid, ch_perms.contains(PermissionFlags::VIEW_CHANNEL));
@@ -458,8 +470,6 @@ pub async fn dispatch_channel_with_ctx<T: Serialize>(
     let sessions = filter_sessions_for_channel_with_ctx(state, guild_id, channel_id, ctx).await;
     state.dispatch_to_sessions(&sessions, event_name, data);
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -501,16 +511,21 @@ mod tests {
             PermissionFlags::all()
         );
 
-        let admin_base = compute_base_permissions(
-            "u_owner",
+        let admin_base =
+            compute_base_permissions("u_owner", "g1", "u_admin", &roles, &["r_admin".to_string()]);
+        let deny_all = vec![ow_role(
             "g1",
-            "u_admin",
-            &roles,
-            &["r_admin".to_string()],
-        );
-        let deny_all = vec![ow_role("g1", PermissionFlags::empty(), PermissionFlags::VIEW_CHANNEL)];
+            PermissionFlags::empty(),
+            PermissionFlags::VIEW_CHANNEL,
+        )];
         assert_eq!(
-            compute_channel_permissions(admin_base, "g1", "u_admin", &["r_admin".to_string()], &deny_all),
+            compute_channel_permissions(
+                admin_base,
+                "g1",
+                "u_admin",
+                &["r_admin".to_string()],
+                &deny_all
+            ),
             PermissionFlags::all()
         );
     }
@@ -525,10 +540,26 @@ mod tests {
 
         // @everyone denies VIEW_CHANNEL, r1 denies SEND_MESSAGES, r2 allows VIEW_CHANNEL, member allows SEND_MESSAGES
         let overwrites = vec![
-            ow_role("g1", PermissionFlags::empty(), PermissionFlags::VIEW_CHANNEL),
-            ow_role("r1", PermissionFlags::empty(), PermissionFlags::SEND_MESSAGES),
-            ow_role("r2", PermissionFlags::VIEW_CHANNEL, PermissionFlags::empty()),
-            ow_member("u1", PermissionFlags::SEND_MESSAGES, PermissionFlags::empty()),
+            ow_role(
+                "g1",
+                PermissionFlags::empty(),
+                PermissionFlags::VIEW_CHANNEL,
+            ),
+            ow_role(
+                "r1",
+                PermissionFlags::empty(),
+                PermissionFlags::SEND_MESSAGES,
+            ),
+            ow_role(
+                "r2",
+                PermissionFlags::VIEW_CHANNEL,
+                PermissionFlags::empty(),
+            ),
+            ow_member(
+                "u1",
+                PermissionFlags::SEND_MESSAGES,
+                PermissionFlags::empty(),
+            ),
         ];
 
         let perms = compute_channel_permissions(base, "g1", "u1", &roles, &overwrites);
@@ -571,14 +602,28 @@ mod tests {
                 ows,
             )
         };
-        let deny_view = vec![ow_role("g1", PermissionFlags::empty(), PermissionFlags::VIEW_CHANNEL)];
+        let deny_view = vec![ow_role(
+            "g1",
+            PermissionFlags::empty(),
+            PermissionFlags::VIEW_CHANNEL,
+        )];
 
         let channels = vec![
             make_ch("cat_hidden", ChannelType::GuildCategory, None, vec![]),
-            make_ch("ch_secret", ChannelType::GuildText, Some("cat_hidden"), deny_view.clone()),
+            make_ch(
+                "ch_secret",
+                ChannelType::GuildText,
+                Some("cat_hidden"),
+                deny_view.clone(),
+            ),
             make_ch("cat_empty", ChannelType::GuildCategory, None, vec![]),
             make_ch("cat_mixed", ChannelType::GuildCategory, None, vec![]),
-            make_ch("ch_public", ChannelType::GuildText, Some("cat_mixed"), vec![]),
+            make_ch(
+                "ch_public",
+                ChannelType::GuildText,
+                Some("cat_mixed"),
+                vec![],
+            ),
         ];
 
         let visible: Vec<String> =
@@ -595,8 +640,16 @@ mod tests {
         let base = PermissionFlags::VIEW_CHANNEL | PermissionFlags::SEND_MESSAGES;
         let roles = vec!["r1".to_string()];
         let overwrites = vec![
-            ow_role("r1", PermissionFlags::SEND_MESSAGES, PermissionFlags::empty()),
-            ow_member("u1", PermissionFlags::empty(), PermissionFlags::SEND_MESSAGES),
+            ow_role(
+                "r1",
+                PermissionFlags::SEND_MESSAGES,
+                PermissionFlags::empty(),
+            ),
+            ow_member(
+                "u1",
+                PermissionFlags::empty(),
+                PermissionFlags::SEND_MESSAGES,
+            ),
         ];
         let perms = compute_channel_permissions(base, "g1", "u1", &roles, &overwrites);
         assert!(perms.contains(PermissionFlags::VIEW_CHANNEL));

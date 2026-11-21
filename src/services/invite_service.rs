@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::constants::flags::PermissionFlags;
 use crate::constants::limits::{
-    INVITE_CODE_LENGTH, MAX_INVITES_PER_GUILD, MAX_INVITE_AGE_SECONDS, MAX_INVITE_USES,
+    INVITE_CODE_LENGTH, MAX_INVITE_AGE_SECONDS, MAX_INVITE_USES, MAX_INVITES_PER_GUILD,
 };
 use crate::error::AppError;
 use crate::models::channel::ChannelType;
@@ -63,8 +63,7 @@ async fn fetch_invite_details(
     .ok_or_else(AppError::unknown_invite)?;
 
     let now = Utc::now().timestamp_millis() as u64;
-    if row.expires_at.is_some_and(|exp| now > exp)
-        || (row.max_uses > 0 && row.uses >= row.max_uses)
+    if row.expires_at.is_some_and(|exp| now > exp) || (row.max_uses > 0 && row.uses >= row.max_uses)
     {
         return Err(AppError::unknown_invite());
     }
@@ -230,11 +229,7 @@ pub async fn accept_invite(
     Ok(invite)
 }
 
-pub async fn delete_invite(
-    state: &AppState,
-    code: &str,
-    user_id: &str,
-) -> Result<(), AppError> {
+pub async fn delete_invite(state: &AppState, code: &str, user_id: &str) -> Result<(), AppError> {
     let row = sqlx::query_as::<_, InviteDeleteRow>(
         r#"
         SELECT i.guild_id, i.channel_id, i.inviter_id, g.owner_id

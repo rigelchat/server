@@ -1,11 +1,6 @@
 pub mod channels;
 pub mod members;
 
-use axum::{
-    Json, Router,
-    extract::{Path, State},
-    routing::{get, post},
-};
 use crate::AppState;
 use crate::error::AppError;
 use crate::extractors::{AppJson, AuthUser};
@@ -13,6 +8,11 @@ use crate::models::guild::Guild;
 use crate::models::rest::guilds::CreateGuildRequest;
 use crate::models::role::Role;
 use crate::services::{guild_service, role_service};
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    routing::{get, post},
+};
 
 pub fn router() -> Router<AppState> {
     Router::new()

@@ -1,14 +1,14 @@
-use axum::{
-    Json, Router,
-    extract::{Path, Query, State},
-    routing::get,
-};
 use crate::AppState;
 use crate::error::AppError;
 use crate::extractors::AuthUser;
 use crate::models::guild_member::GuildMemberResponse;
 use crate::models::rest::guilds::ListMembersQuery;
 use crate::services::member_service;
+use axum::{
+    Json, Router,
+    extract::{Path, Query, State},
+    routing::get,
+};
 
 pub fn router() -> Router<AppState> {
     Router::new()

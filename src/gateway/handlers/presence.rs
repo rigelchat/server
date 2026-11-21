@@ -41,8 +41,6 @@ pub fn combined_status<'a>(statuses: impl IntoIterator<Item = &'a str>) -> &'sta
     }
 }
 
-
-
 pub async fn build_user_sessions(state: &AppState, user_id: &str) -> Vec<ClientSessionInfo> {
     let live: Vec<ClientSessionInfo> = state
         .hub
@@ -73,7 +71,10 @@ pub async fn dispatch_sessions_replace(state: &AppState, user_id: &str) {
         .await;
 }
 
-pub async fn collect_user_live_state(state: &AppState, user_id: &str) -> (&'static str, bool, bool) {
+pub async fn collect_user_live_state(
+    state: &AppState,
+    user_id: &str,
+) -> (&'static str, bool, bool) {
     state.hub.collect_user_live_state(user_id)
 }
 
@@ -206,7 +207,10 @@ pub async fn handle(session_id: &str, state: &AppState, payload: PresenceUpdateP
     }
 
     let custom_status = if let Some(cs_opt) = payload.custom_status {
-        let parsed_custom = match cs_opt.map(CustomStatusInput::try_into_custom_status).transpose() {
+        let parsed_custom = match cs_opt
+            .map(CustomStatusInput::try_into_custom_status)
+            .transpose()
+        {
             Ok(cs) => cs,
             Err(_) => return,
         };
@@ -229,11 +233,12 @@ pub async fn handle(session_id: &str, state: &AppState, payload: PresenceUpdateP
 
                 extras.custom_status = parsed_custom.clone();
                 if let Ok(json_str) = serde_json::to_string(&extras) {
-                    if let Err(err) = sqlx::query("UPDATE user_settings SET extra_settings = ? WHERE id = ?")
-                        .bind(&json_str)
-                        .bind(&user_id)
-                        .execute(&mut *tx)
-                        .await
+                    if let Err(err) =
+                        sqlx::query("UPDATE user_settings SET extra_settings = ? WHERE id = ?")
+                            .bind(&json_str)
+                            .bind(&user_id)
+                            .execute(&mut *tx)
+                            .await
                     {
                         error!(error = %err, "Failed to update custom_status in user_settings");
                     }

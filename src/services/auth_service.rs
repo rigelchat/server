@@ -49,7 +49,10 @@ fn validate_username(username: &str) -> Result<(), AppError> {
             "Username must be between 1 and 32 characters.",
         ));
     }
-    if !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+    if !username
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
         return Err(AppError::validation(
             "username",
             ValidationCode::UsernameInvalidCharacters,
@@ -85,7 +88,13 @@ pub fn suggest_username_from_display(global_name: &str) -> String {
     let sanitized: String = bounded
         .to_ascii_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let trimmed = sanitized.trim_matches('_').to_string();
     let candidate = if trimmed.is_empty() {
@@ -106,13 +115,12 @@ pub async fn is_session_active(
     session_id: &str,
     user_id: &str,
 ) -> Result<bool, AppError> {
-    let exists: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM user_sessions WHERE id = ? AND user_id = ? LIMIT 1",
-    )
-    .bind(session_id)
-    .bind(user_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let exists: Option<(i32,)> =
+        sqlx::query_as("SELECT 1 FROM user_sessions WHERE id = ? AND user_id = ? LIMIT 1")
+            .bind(session_id)
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await?;
 
     Ok(exists.is_some())
 }
@@ -201,7 +209,11 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
     let password_owned = payload.password;
     let valid = tokio::task::spawn_blocking(move || {
         PasswordHash::new(&hash_owned)
-            .map(|parsed| Argon2::default().verify_password(password_owned.as_bytes(), &parsed).is_ok())
+            .map(|parsed| {
+                Argon2::default()
+                    .verify_password(password_owned.as_bytes(), &parsed)
+                    .is_ok()
+            })
             .unwrap_or(false)
     })
     .await
@@ -239,7 +251,12 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
     tx.commit().await?;
 
     let partial = PartialUser::from(&user);
-    if let Some(code) = payload.invite_code.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+    if let Some(code) = payload
+        .invite_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
         let _ = crate::services::invite_service::accept_invite(state, code, &partial.id).await;
     }
 
@@ -250,7 +267,10 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
     })
 }
 
-pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<LoginResponse, AppError> {
+pub async fn register(
+    state: &AppState,
+    payload: RegisterRequest,
+) -> Result<LoginResponse, AppError> {
     if state.config.auth.registration_mode == RegistrationMode::Closed {
         return Err(AppError::registration_closed(
             "Registration is closed on this instance.",
@@ -308,7 +328,8 @@ pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<Logi
     }
 
     let explicit_username = payload
-        .username.as_deref()
+        .username
+        .as_deref()
         .map(|u| u.trim().to_string())
         .filter(|u| !u.is_empty());
 
@@ -353,13 +374,8 @@ pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<Logi
             .map_err(|err| format!("Password hashing failed: {err}"))
     })
     .await
-    .map_err(|err| {
-        AppError::internal(format!("Password hashing task failed: {err}"),
-        )
-    })?
-    .map_err(|err| {
-        AppError::internal(err)
-    })?;
+    .map_err(|err| AppError::internal(format!("Password hashing task failed: {err}")))?
+    .map_err(|err| AppError::internal(err))?;
 
     let mut tx = state.db.begin().await?;
 
@@ -370,7 +386,11 @@ pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<Logi
             .await?;
 
     if existing.is_some() {
-        if payload.username.as_deref().is_some_and(|u| !u.trim().is_empty()) {
+        if payload
+            .username
+            .as_deref()
+            .is_some_and(|u| !u.trim().is_empty())
+        {
             return Err(AppError::validation(
                 "username",
                 ValidationCode::UsernameAlreadyTaken,
@@ -470,7 +490,12 @@ pub async fn register(state: &AppState, payload: RegisterRequest) -> Result<Logi
 
     tx.commit().await?;
 
-    if let Some(code) = payload.invite_code.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+    if let Some(code) = payload
+        .invite_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
         let _ = crate::services::invite_service::accept_invite(state, code, &user_id).await;
     }
 
@@ -507,8 +532,14 @@ mod tests {
 
     #[test]
     fn normalize_login_identifier_respects_mode() {
-        assert_eq!(normalize_login_identifier("alice#0000", LoginMode::Username), "alice");
-        assert_eq!(normalize_login_identifier("alice@inst.local", LoginMode::Username), "alice");
+        assert_eq!(
+            normalize_login_identifier("alice#0000", LoginMode::Username),
+            "alice"
+        );
+        assert_eq!(
+            normalize_login_identifier("alice@inst.local", LoginMode::Username),
+            "alice"
+        );
         assert_eq!(
             normalize_login_identifier("alice@example.com", LoginMode::Email),
             "alice@example.com"

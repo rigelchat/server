@@ -163,10 +163,7 @@ impl GatewaySession {
     }
 
     pub fn set_status(&self, status: PresenceStatus) {
-        self.state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .status = status;
+        self.state.write().unwrap_or_else(|e| e.into_inner()).status = status;
     }
 
     pub fn snapshot_presence(&self) -> (PresenceStatus, bool, bool) {
@@ -295,4 +292,3 @@ impl GatewaySession {
         }
     }
 }
-

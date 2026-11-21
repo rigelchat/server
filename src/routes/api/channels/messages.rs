@@ -1,17 +1,15 @@
+use crate::AppState;
+use crate::error::AppError;
+use crate::extractors::{AppJson, AuthUser};
+use crate::models::message::Message;
+use crate::models::rest::messages::{CreateMessageRequest, EditMessageRequest, GetMessagesQuery};
+use crate::services::message_service;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, patch},
 };
-use crate::AppState;
-use crate::error::AppError;
-use crate::extractors::{AppJson, AuthUser};
-use crate::models::message::Message;
-use crate::models::rest::messages::{
-    CreateMessageRequest, EditMessageRequest, GetMessagesQuery,
-};
-use crate::services::message_service;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -25,8 +23,7 @@ async fn get_messages(
     Path(channel_id): Path<String>,
     Query(query): Query<GetMessagesQuery>,
 ) -> Result<Json<Vec<Message>>, AppError> {
-    let messages =
-        message_service::get_messages(&state, &channel_id, &auth.user_id, query).await?;
+    let messages = message_service::get_messages(&state, &channel_id, &auth.user_id, query).await?;
     Ok(Json(messages))
 }
 

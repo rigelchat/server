@@ -4,7 +4,9 @@ use crate::AppState;
 use crate::constants::guild::{
     DEFAULT_PRIMARY_LANGUAGE, DiscoveryCategory, FEATURE_DISCOVERABLE, VerificationLevel,
 };
-use crate::constants::limits::{DEFAULT_DISCOVERY_LIMIT, MAX_DISCOVERY_LIMIT, MAX_SEARCH_QUERY_LENGTH};
+use crate::constants::limits::{
+    DEFAULT_DISCOVERY_LIMIT, MAX_DISCOVERY_LIMIT, MAX_SEARCH_QUERY_LENGTH,
+};
 use crate::error::AppError;
 use crate::models::rest::discoverable_guilds::{
     DiscoverableGuild as RestDiscoverableGuild, DiscoverableGuildsResponse,
@@ -82,7 +84,10 @@ pub async fn get_discovery_guilds(
 
     let total = rows.len() as u64;
     let offset = params.offset.unwrap_or(0) as usize;
-    let limit = params.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT).clamp(1, MAX_DISCOVERY_LIMIT) as usize;
+    let limit = params
+        .limit
+        .unwrap_or(DEFAULT_DISCOVERY_LIMIT)
+        .clamp(1, MAX_DISCOVERY_LIMIT) as usize;
 
     let page: Vec<DiscoverableGuildRow> = rows.into_iter().skip(offset).take(limit).collect();
     let page_ids: Vec<String> = page.iter().map(|r| r.id.clone()).collect();
@@ -163,11 +168,7 @@ pub async fn get_discoverable_guilds(
     })
 }
 
-pub async fn join_guild(
-    state: &AppState,
-    user_id: &str,
-    guild_id: &str,
-) -> Result<(), AppError> {
+pub async fn join_guild(state: &AppState, user_id: &str, guild_id: &str) -> Result<(), AppError> {
     let discoverable: Option<bool> =
         sqlx::query_scalar("SELECT discoverable FROM guilds WHERE id = ?")
             .bind(guild_id)

@@ -12,8 +12,8 @@ use crate::models::gateway::lazy_request::{
     MemberListMember, MemberListPresence, MemberListSyncOp,
 };
 use crate::models::guild_member::{GuildMemberFields, GuildMemberRole, GuildMemberUserRow};
-use crate::models::user::{CustomStatus, PartialUser};
 use crate::models::role::RolePerm;
+use crate::models::user::{CustomStatus, PartialUser};
 use crate::services::permission_service;
 
 use super::presence;
@@ -85,8 +85,16 @@ impl GuildMemberListSnapshot {
             offline_group = Some(group);
         }
 
-        let online_span = if online_count > 0 { 1 + online_count } else { 0 };
-        let offline_span = if offline_count > 0 { 1 + offline_count } else { 0 };
+        let online_span = if online_count > 0 {
+            1 + online_count
+        } else {
+            0
+        };
+        let offline_span = if offline_count > 0 {
+            1 + offline_count
+        } else {
+            0
+        };
         let total_items = online_span + offline_span;
 
         let start = (range[0].max(0) as usize).min(total_items);
@@ -230,7 +238,8 @@ async fn fetch_snapshot(
             &roles,
             &overwrites,
         );
-        if ch_perms.contains(PermissionFlags::VIEW_CHANNEL | PermissionFlags::VIEW_CHANNEL_MEMBERS) {
+        if ch_perms.contains(PermissionFlags::VIEW_CHANNEL | PermissionFlags::VIEW_CHANNEL_MEMBERS)
+        {
             viewer_allowed.insert(row.user_id.clone());
         }
         if !ch_perms.contains(PermissionFlags::VIEW_CHANNEL) {
@@ -397,7 +406,13 @@ pub async fn refresh_guild_member_lists(state: &AppState, guild_id: &str) {
         return;
     }
 
-    let mut by_channel: HashMap<String, Vec<(std::sync::Arc<crate::gateway::session::GatewaySession>, [i64; 2])>> = HashMap::new();
+    let mut by_channel: HashMap<
+        String,
+        Vec<(
+            std::sync::Arc<crate::gateway::session::GatewaySession>,
+            [i64; 2],
+        )>,
+    > = HashMap::new();
     for (session, channel_id, range) in subscribers {
         by_channel
             .entry(channel_id)

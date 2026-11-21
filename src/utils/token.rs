@@ -75,8 +75,8 @@ pub fn verify(token: &str, secret: &str) -> Result<TokenClaims, String> {
     let user_id_bytes = URL_SAFE_NO_PAD
         .decode(payload64)
         .map_err(|_| "Invalid token payload encoding".to_string())?;
-    let user_id =
-        String::from_utf8(user_id_bytes).map_err(|_| "Token payload is not valid UTF-8".to_string())?;
+    let user_id = String::from_utf8(user_id_bytes)
+        .map_err(|_| "Token payload is not valid UTF-8".to_string())?;
 
     Ok(TokenClaims {
         user_id,
@@ -112,4 +112,3 @@ mod tests {
         assert_eq!(strip_auth_prefix("raw_token"), "raw_token");
     }
 }
-

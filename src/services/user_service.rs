@@ -33,9 +33,7 @@ pub async fn get_current_user(state: &AppState, user_id: &str) -> Result<Current
         .bind(user_id)
         .fetch_optional(&state.db)
         .await?
-        .ok_or_else(|| {
-            AppError::unknown_user()
-        })?;
+        .ok_or_else(|| AppError::unknown_user())?;
 
     let profile = sqlx::query_as::<_, UserProfileRow>(
         "SELECT bio, pronouns, accent_color, theme_color_primary, theme_color_secondary FROM user_profiles WHERE id = ?",
@@ -52,9 +50,7 @@ pub async fn get_partial_user(state: &AppState, user_id: &str) -> Result<Partial
         .bind(user_id)
         .fetch_optional(&state.db)
         .await?
-        .ok_or_else(|| {
-            AppError::unknown_user()
-        })?;
+        .ok_or_else(|| AppError::unknown_user())?;
 
     Ok(PartialUser::from(&user))
 }
@@ -189,7 +185,9 @@ pub async fn update_user(
         state.hub.update_partial_user(&PartialUser::from(&updated));
     }
     if has_user_updates || has_profile_updates {
-        state.dispatch_user(events::USER_UPDATE, &updated, user_id).await;
+        state
+            .dispatch_user(events::USER_UPDATE, &updated, user_id)
+            .await;
         if has_user_updates {
             let guild_ids: Vec<String> =
                 sqlx::query_scalar("SELECT guild_id FROM guild_members WHERE user_id = ?")
@@ -335,7 +333,9 @@ pub async fn update_profile(
         query.build().execute(&state.db).await?;
 
         if let Ok(current) = get_current_user(state, user_id).await {
-            state.dispatch_user(events::USER_UPDATE, &current, user_id).await;
+            state
+                .dispatch_user(events::USER_UPDATE, &current, user_id)
+                .await;
         }
     }
 
@@ -512,7 +512,9 @@ pub async fn update_settings(
 
     let custom_status_changed = payload.custom_status.is_some();
     if let Some(cs) = payload.custom_status {
-        extras.custom_status = cs.map(CustomStatusInput::try_into_custom_status).transpose()?;
+        extras.custom_status = cs
+            .map(CustomStatusInput::try_into_custom_status)
+            .transpose()?;
         has_extra_updates = true;
     }
     if let Some(rf) = payload.regional_format {
@@ -570,12 +572,24 @@ pub async fn update_settings(
     set_extra!(time_format, payload.time_format);
     set_extra!(timestamp_format, payload.timestamp_format);
     set_extra!(incoming_call_flags, payload.incoming_call_flags);
-    set_extra!(group_dm_add_permission_flags, payload.group_dm_add_permission_flags);
+    set_extra!(
+        group_dm_add_permission_flags,
+        payload.group_dm_add_permission_flags
+    );
     set_extra!(profile_privacy, payload.profile_privacy);
-    set_extra!(default_hide_muted_channels, payload.default_hide_muted_channels);
-    set_extra!(allow_mature_content_on_ios, payload.allow_mature_content_on_ios);
+    set_extra!(
+        default_hide_muted_channels,
+        payload.default_hide_muted_channels
+    );
+    set_extra!(
+        allow_mature_content_on_ios,
+        payload.allow_mature_content_on_ios
+    );
     set_extra!(default_guilds_restricted, payload.default_guilds_restricted);
-    set_extra!(bot_default_guilds_restricted, payload.bot_default_guilds_restricted);
+    set_extra!(
+        bot_default_guilds_restricted,
+        payload.bot_default_guilds_restricted
+    );
 
     if let Some(guilds) = payload.restricted_guilds {
         validate_guild_id_list("restricted_guilds", &guilds)?;
@@ -618,7 +632,10 @@ pub async fn update_settings(
             ));
         }
         for folder in &folders {
-            if folder.name.as_ref().is_some_and(|n| n.chars().count() > MAX_FOLDER_NAME_LENGTH)
+            if folder
+                .name
+                .as_ref()
+                .is_some_and(|n| n.chars().count() > MAX_FOLDER_NAME_LENGTH)
                 || folder.icon.len() > MAX_FOLDER_ICON_LENGTH
                 || folder.icon.chars().any(char::is_control)
             {
@@ -664,7 +681,9 @@ pub async fn update_settings(
 
     if locale_changed {
         if let Ok(current) = get_current_user(state, user_id).await {
-            state.dispatch_user(events::USER_UPDATE, &current, user_id).await;
+            state
+                .dispatch_user(events::USER_UPDATE, &current, user_id)
+                .await;
         }
     }
 
@@ -672,7 +691,9 @@ pub async fn update_settings(
         state.hub.set_user_status(user_id, new_status);
     }
     if custom_status_changed {
-        state.hub.set_custom_status(user_id, settings.custom_status.clone());
+        state
+            .hub
+            .set_custom_status(user_id, settings.custom_status.clone());
     }
 
     if status_changed || custom_status_changed {
@@ -697,7 +718,8 @@ async fn broadcast_presence_from_settings(
             .into_iter()
             .collect();
 
-    let public_status = crate::gateway::handlers::presence::user_public_status(state, user_id).await;
+    let public_status =
+        crate::gateway::handlers::presence::user_public_status(state, user_id).await;
 
     crate::gateway::handlers::presence::broadcast_presence(
         state,

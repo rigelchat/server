@@ -85,7 +85,9 @@ pub fn parse_timestamp_iso(
                         format!("Invalid {field} timestamp."),
                     )
                 })?;
-            Ok(Some(ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)))
+            Ok(Some(
+                ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ))
         }
         _ => Err(crate::error::AppError::validation(
             field,
@@ -125,25 +127,44 @@ mod tests {
     #[test]
     fn string_or_int_parses_all_variants() {
         assert_eq!(
-            serde_json::from_str::<NonceBox>(r#"{"nonce":12345}"#).unwrap().nonce.as_deref(),
+            serde_json::from_str::<NonceBox>(r#"{"nonce":12345}"#)
+                .unwrap()
+                .nonce
+                .as_deref(),
             Some("12345")
         );
         assert_eq!(
-            serde_json::from_str::<NonceBox>(r#"{"nonce":"abc"}"#).unwrap().nonce.as_deref(),
+            serde_json::from_str::<NonceBox>(r#"{"nonce":"abc"}"#)
+                .unwrap()
+                .nonce
+                .as_deref(),
             Some("abc")
         );
-        assert_eq!(serde_json::from_str::<NonceBox>(r#"{}"#).unwrap().nonce, None);
+        assert_eq!(
+            serde_json::from_str::<NonceBox>(r#"{}"#).unwrap().nonce,
+            None
+        );
     }
 
     #[test]
     fn parse_timestamp_iso_validates_inputs() {
-        assert_eq!(parse_timestamp_iso("exp", serde_json::Value::Null).unwrap(), None);
-        assert_eq!(parse_timestamp_iso("exp", serde_json::json!("  ")).unwrap(), None);
+        assert_eq!(
+            parse_timestamp_iso("exp", serde_json::Value::Null).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_timestamp_iso("exp", serde_json::json!("  ")).unwrap(),
+            None
+        );
         assert_eq!(
             parse_timestamp_iso("exp", serde_json::json!("2026-01-01T00:00:00Z")).unwrap(),
             Some("2026-01-01T00:00:00Z".to_string())
         );
-        assert!(parse_timestamp_iso("exp", serde_json::json!(1_700_000_000_000i64)).unwrap().is_some());
+        assert!(
+            parse_timestamp_iso("exp", serde_json::json!(1_700_000_000_000i64))
+                .unwrap()
+                .is_some()
+        );
         assert!(parse_timestamp_iso("exp", serde_json::json!("not-a-date")).is_err());
         assert!(parse_timestamp_iso("exp", serde_json::json!(true)).is_err());
     }

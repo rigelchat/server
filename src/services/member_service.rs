@@ -5,7 +5,9 @@ use sqlx::{MySql, QueryBuilder};
 
 use crate::AppState;
 use crate::constants::gateway::events;
-use crate::constants::limits::{DEFAULT_MEMBERS_PAGE_LIMIT, MAX_GUILDS_PER_USER, MAX_MEMBERS_PAGE_LIMIT};
+use crate::constants::limits::{
+    DEFAULT_MEMBERS_PAGE_LIMIT, MAX_GUILDS_PER_USER, MAX_MEMBERS_PAGE_LIMIT,
+};
 use crate::error::{AppError, ValidationCode};
 use crate::models::gateway::events::{
     GuildDeleteEvent, GuildMemberAddEvent, GuildMemberRemoveEvent, GuildMemberRemoveUser,
@@ -14,18 +16,21 @@ use crate::models::guild_member::{GuildMemberResponse, GuildMemberRole, GuildMem
 use crate::services::guild_service;
 
 pub async fn is_member(state: &AppState, guild_id: &str, user_id: &str) -> Result<bool, AppError> {
-    let exists: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ? LIMIT 1",
-    )
-    .bind(guild_id)
-    .bind(user_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let exists: Option<(i32,)> =
+        sqlx::query_as("SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ? LIMIT 1")
+            .bind(guild_id)
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await?;
 
     Ok(exists.is_some())
 }
 
-pub async fn require_member(state: &AppState, guild_id: &str, user_id: &str) -> Result<(), AppError> {
+pub async fn require_member(
+    state: &AppState,
+    guild_id: &str,
+    user_id: &str,
+) -> Result<(), AppError> {
     if !is_member(state, guild_id, user_id).await? {
         return Err(AppError::missing_permissions());
     }
@@ -57,13 +62,12 @@ pub async fn insert_member_tx(
         return Err(AppError::banned_from_guild());
     }
 
-    let already_member: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ? LIMIT 1",
-    )
-    .bind(guild_id)
-    .bind(user_id)
-    .fetch_optional(&mut *conn)
-    .await?;
+    let already_member: Option<(i32,)> =
+        sqlx::query_as("SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ? LIMIT 1")
+            .bind(guild_id)
+            .bind(user_id)
+            .fetch_optional(&mut *conn)
+            .await?;
 
     if already_member.is_some() {
         return Ok(false);
@@ -113,7 +117,9 @@ pub async fn on_member_joined(
     crate::gateway::handlers::lazy_request::refresh_guild_member_lists(state, guild_id).await;
 
     let gateway_guild = guild_service::build_full_gateway_guild(state, guild_id, user_id).await?;
-    state.dispatch_user(events::GUILD_CREATE, &gateway_guild, user_id).await;
+    state
+        .dispatch_user(events::GUILD_CREATE, &gateway_guild, user_id)
+        .await;
 
     Ok(())
 }
@@ -173,7 +179,11 @@ pub async fn leave_guild(state: &AppState, user_id: &str, guild_id: &str) -> Res
     crate::gateway::handlers::lazy_request::refresh_guild_member_lists(state, guild_id).await;
 
     state
-        .dispatch_user(events::GUILD_DELETE, &GuildDeleteEvent { id: guild_id }, user_id)
+        .dispatch_user(
+            events::GUILD_DELETE,
+            &GuildDeleteEvent { id: guild_id },
+            user_id,
+        )
         .await;
 
     state
@@ -200,7 +210,9 @@ pub async fn get_guild_members(
     crate::utils::snowflake::validate_snowflake_opt("after", after)?;
     require_member(state, guild_id, user_id).await?;
 
-    let limit = limit.unwrap_or(DEFAULT_MEMBERS_PAGE_LIMIT).clamp(1, MAX_MEMBERS_PAGE_LIMIT);
+    let limit = limit
+        .unwrap_or(DEFAULT_MEMBERS_PAGE_LIMIT)
+        .clamp(1, MAX_MEMBERS_PAGE_LIMIT);
 
     let mut qb = QueryBuilder::<MySql>::new(
         r#"

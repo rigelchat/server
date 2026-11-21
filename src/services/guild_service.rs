@@ -16,12 +16,12 @@ use crate::models::channel::{
 };
 use crate::models::gateway::presence::{build_presence_value, serialize_presence_user};
 use crate::models::guild::{BaseGuild, GatewayGuild, Guild};
-use crate::models::rest::guilds::ListGuildsQuery;
 use crate::models::guild_member::{
     BaseGuildMember, GatewayGuildMember, GuildMemberFields, GuildMemberResponse,
     GuildMemberUserRef, GuildMemberUserRow,
 };
 use crate::models::permission::OverwriteType;
+use crate::models::rest::guilds::ListGuildsQuery;
 use crate::models::role::{Role, RolePerm, RoleRow};
 use crate::services::{channel_service, member_service, permission_service, role_service};
 use crate::utils::snowflake::DISCORD_SNOWFLAKE;
@@ -121,10 +121,34 @@ pub async fn create_guild(state: &AppState, name: &str, owner_id: &str) -> Resul
     let default_permissions = PermissionFlags::DEFAULT_EVERYONE.bits();
 
     let channels = [
-        (&text_category_id, ChannelType::GuildCategory, 0u32, None, "Text channels"),
-        (&voice_category_id, ChannelType::GuildCategory, 1u32, None, "Voice channels"),
-        (&system_channel_id, ChannelType::GuildText, 0u32, Some(&text_category_id), "general"),
-        (&afk_channel_id, ChannelType::GuildVoice, 0u32, Some(&voice_category_id), "General"),
+        (
+            &text_category_id,
+            ChannelType::GuildCategory,
+            0u32,
+            None,
+            "Text channels",
+        ),
+        (
+            &voice_category_id,
+            ChannelType::GuildCategory,
+            1u32,
+            None,
+            "Voice channels",
+        ),
+        (
+            &system_channel_id,
+            ChannelType::GuildText,
+            0u32,
+            Some(&text_category_id),
+            "general",
+        ),
+        (
+            &afk_channel_id,
+            ChannelType::GuildVoice,
+            0u32,
+            Some(&voice_category_id),
+            "General",
+        ),
     ];
 
     sqlx::query(
@@ -183,16 +207,14 @@ pub async fn create_guild(state: &AppState, name: &str, owner_id: &str) -> Resul
 
     let gateway_guild = build_full_gateway_guild(state, &guild_id, owner_id).await?;
     let props = gateway_guild.properties.clone();
-    state.dispatch_user(events::GUILD_CREATE, &gateway_guild, owner_id).await;
+    state
+        .dispatch_user(events::GUILD_CREATE, &gateway_guild, owner_id)
+        .await;
 
     Ok(props)
 }
 
-pub async fn get_guild(
-    state: &AppState,
-    guild_id: &str,
-    user_id: &str,
-) -> Result<Guild, AppError> {
+pub async fn get_guild(state: &AppState, guild_id: &str, user_id: &str) -> Result<Guild, AppError> {
     let base = sqlx::query_as::<_, BaseGuild>("SELECT * FROM guilds WHERE id = ?")
         .bind(guild_id)
         .fetch_optional(&state.db)
@@ -258,7 +280,10 @@ pub async fn get_user_guilds(
     qb.push(" ORDER BY CAST(g.id AS UNSIGNED) ASC LIMIT ");
     qb.push_bind(limit);
 
-    let rows = qb.build_query_as::<BaseGuild>().fetch_all(&state.db).await?;
+    let rows = qb
+        .build_query_as::<BaseGuild>()
+        .fetch_all(&state.db)
+        .await?;
     if rows.is_empty() {
         return Ok(vec![]);
     }
@@ -367,7 +392,10 @@ async fn load_guilds_base_data(
         sep.push_bind(gid);
     }
     gqb.push(") ORDER BY CAST(id AS UNSIGNED) ASC");
-    let guilds = gqb.build_query_as::<BaseGuild>().fetch_all(&state.db).await?;
+    let guilds = gqb
+        .build_query_as::<BaseGuild>()
+        .fetch_all(&state.db)
+        .await?;
 
     if guilds.is_empty() {
         return Ok(GuildsBaseData {
@@ -387,7 +415,10 @@ async fn load_guilds_base_data(
         sep.push_bind(&g.id);
     }
     cqb.push(") ORDER BY position ASC");
-    let channel_rows = cqb.build_query_as::<GuildChannel>().fetch_all(&state.db).await?;
+    let channel_rows = cqb
+        .build_query_as::<GuildChannel>()
+        .fetch_all(&state.db)
+        .await?;
 
     let mut overwrites_by_channel: HashMap<String, Vec<PermissionOverwrite>> = HashMap::new();
     if !channel_rows.is_empty() {
@@ -496,7 +527,8 @@ pub async fn build_gateway_guilds_batch(
         .fetch_all(&state.db)
         .await?;
 
-    let mut self_members: HashMap<String, BaseGuildMember> = HashMap::with_capacity(self_rows.len());
+    let mut self_members: HashMap<String, BaseGuildMember> =
+        HashMap::with_capacity(self_rows.len());
     for r in self_rows {
         self_members.insert(
             r.guild_id,
@@ -541,7 +573,10 @@ pub async fn build_gateway_guilds_batch(
             continue;
         };
         let roles = base.roles_by_guild.remove(&guild.id).unwrap_or_default();
-        let role_perms = base.role_perms_by_guild.remove(&guild.id).unwrap_or_default();
+        let role_perms = base
+            .role_perms_by_guild
+            .remove(&guild.id)
+            .unwrap_or_default();
         let member_roles = self_roles.remove(&guild.id).unwrap_or_default();
         let all_channels = base.channels_by_guild.remove(&guild.id).unwrap_or_default();
         let channels = permission_service::filter_visible_channels_with_context(
@@ -635,7 +670,10 @@ pub async fn build_full_gateway_guilds_batch(
 
     let mut members_by_guild: HashMap<String, Vec<GuildMemberBatchRow>> = HashMap::new();
     for m in member_rows {
-        members_by_guild.entry(m.guild_id.clone()).or_default().push(m);
+        members_by_guild
+            .entry(m.guild_id.clone())
+            .or_default()
+            .push(m);
     }
 
     let mut out = Vec::with_capacity(base.guilds.len());
@@ -645,7 +683,10 @@ pub async fn build_full_gateway_guilds_batch(
         let viewer_roles = guild_member_roles.get(user_id).cloned().unwrap_or_default();
 
         let roles = base.roles_by_guild.remove(&guild.id).unwrap_or_default();
-        let role_perms = base.role_perms_by_guild.remove(&guild.id).unwrap_or_default();
+        let role_perms = base
+            .role_perms_by_guild
+            .remove(&guild.id)
+            .unwrap_or_default();
         let all_channels = base.channels_by_guild.remove(&guild.id).unwrap_or_default();
         let channels = permission_service::filter_visible_channels_with_context(
             &guild.owner_id,

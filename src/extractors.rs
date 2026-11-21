@@ -59,8 +59,7 @@ where
             session_id,
         } = token::verify(token, &state.config.auth.secret).map_err(AppError::invalid_token)?;
 
-        if !crate::services::auth_service::is_session_active(&state, &session_id, &user_id).await?
-        {
+        if !crate::services::auth_service::is_session_active(&state, &session_id, &user_id).await? {
             return Err(AppError::invalid_token(
                 "Invalid or expired authorization token",
             ));

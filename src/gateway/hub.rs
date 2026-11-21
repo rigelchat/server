@@ -9,8 +9,6 @@ use crate::constants::user::PresenceStatus;
 use crate::gateway::session::GatewaySession;
 use crate::models::user::{CustomStatus, PartialUser};
 
-
-
 pub fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -327,10 +325,7 @@ impl GatewayHub {
         }
     }
 
-    fn user_live_state_locked(
-        inner: &HubInner,
-        user_id: &str,
-    ) -> (&'static str, bool, bool) {
+    fn user_live_state_locked(inner: &HubInner, user_id: &str) -> (&'static str, bool, bool) {
         let Some(usids) = inner.user_sessions.get(user_id) else {
             return ("offline", false, false);
         };
@@ -522,11 +517,7 @@ impl GatewayHub {
 
     pub fn get_custom_status(&self, user_id: &str) -> Option<CustomStatus> {
         let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
-        inner
-            .user_custom_statuses
-            .get(user_id)
-            .cloned()
-            .flatten()
+        inner.user_custom_statuses.get(user_id).cloned().flatten()
     }
 
     pub fn set_user_status(&self, user_id: &str, status: &str) {
@@ -555,7 +546,8 @@ impl GatewayHub {
                         .filter(|s| {
                             now.saturating_sub(s.last_heartbeat_ms()) > HEARTBEAT_TIMEOUT_MS
                                 || (!s.is_authenticated()
-                                    && now.saturating_sub(s.connected_at_ms()) > IDENTIFY_TIMEOUT_MS)
+                                    && now.saturating_sub(s.connected_at_ms())
+                                        > IDENTIFY_TIMEOUT_MS)
                         })
                         .cloned()
                         .collect()
@@ -635,9 +627,39 @@ mod tests {
         hub.register(Arc::new(GatewaySession::new("s3".into(), tx3)));
 
         let guilds = vec!["g1".to_string()];
-        hub.authenticate("s1", "u1".into(), "a1".into(), PresenceStatus::Online, false, false, &guilds, test_user("u1"), None);
-        hub.authenticate("s2", "u2".into(), "a2".into(), PresenceStatus::Dnd, false, true, &guilds, test_user("u2"), None);
-        hub.authenticate("s3", "u3".into(), "a3".into(), PresenceStatus::Invisible, false, false, &guilds, test_user("u3"), None);
+        hub.authenticate(
+            "s1",
+            "u1".into(),
+            "a1".into(),
+            PresenceStatus::Online,
+            false,
+            false,
+            &guilds,
+            test_user("u1"),
+            None,
+        );
+        hub.authenticate(
+            "s2",
+            "u2".into(),
+            "a2".into(),
+            PresenceStatus::Dnd,
+            false,
+            true,
+            &guilds,
+            test_user("u2"),
+            None,
+        );
+        hub.authenticate(
+            "s3",
+            "u3".into(),
+            "a3".into(),
+            PresenceStatus::Invisible,
+            false,
+            false,
+            &guilds,
+            test_user("u3"),
+            None,
+        );
 
         let presences = hub.ready_presences_for_guilds("u1", &guilds);
         assert_eq!(presences.len(), 1);

@@ -150,8 +150,17 @@ impl CurrentUser {
             hidden_profile_badges: vec![],
             account_limited: false,
             claimed: has_password,
-            account_tier: if has_password { "verified" } else { "unclaimed" }.to_string(),
-            verification_need: if has_password { None } else { Some("password".to_string()) },
+            account_tier: if has_password {
+                "verified"
+            } else {
+                "unclaimed"
+            }
+            .to_string(),
+            verification_need: if has_password {
+                None
+            } else {
+                Some("password".to_string())
+            },
             has_password,
             date_of_birth_required: false,
             profile_restricted: false,
@@ -585,6 +594,9 @@ mod tests {
         assert_eq!(folders[0].id, 1);
         assert_eq!(folders[0].guild_ids, vec!["g1".to_string()]);
         assert_eq!(folders[1].id, -1);
-        assert_eq!(folders[1].guild_ids, vec!["g3".to_string(), "g2".to_string()]);
+        assert_eq!(
+            folders[1].guild_ids,
+            vec!["g3".to_string(), "g2".to_string()]
+        );
     }
 }

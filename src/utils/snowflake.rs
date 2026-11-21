@@ -22,7 +22,7 @@ pub struct Snowflake {
     epoch: u64,
     process_id: u64,
     worker_id: u64,
-    increment: AtomicU16
+    increment: AtomicU16,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -30,7 +30,7 @@ pub struct GenerateOptions {
     pub increment: Option<u16>,
     pub timestamp: Option<u64>,
     pub worker_id: Option<u64>,
-    pub process_id: Option<u64>
+    pub process_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +40,7 @@ pub struct DeconstructedSnowflake {
     pub worker_id: u64,
     pub process_id: u64,
     pub increment: u64,
-    pub epoch: u64
+    pub epoch: u64,
 }
 
 impl Snowflake {
@@ -49,7 +49,7 @@ impl Snowflake {
             epoch,
             process_id: 1,
             worker_id: 0,
-            increment: AtomicU16::new(0)
+            increment: AtomicU16::new(0),
         };
     }
 
@@ -91,7 +91,10 @@ impl Snowflake {
             return current & MAXIMUM_INCREMENT;
         }) as u64;
 
-        return (timestamp.saturating_sub(self.epoch) << 22) | (worker_id << 17) | (process_id << 12) | increment;
+        return (timestamp.saturating_sub(self.epoch) << 22)
+            | (worker_id << 17)
+            | (process_id << 12)
+            | increment;
     }
 
     pub fn deconstruct(&self, id: u64) -> DeconstructedSnowflake {
@@ -110,7 +113,7 @@ impl Snowflake {
     }
 
     pub fn timestamp_from(&self, id: u64) -> u64 {
-        return  (id >> 22) + self.epoch;
+        return (id >> 22) + self.epoch;
     }
 
     pub fn compare_strings(a: &str, b: &str) -> Ordering {
