@@ -451,12 +451,23 @@ pub fn reconcile_guild_folders(folders: &mut Vec<GuildFolder>, actual_guild_ids:
     let actual: HashSet<&str> = actual_guild_ids.iter().map(String::as_str).collect();
     let mut seen: HashSet<String> = HashSet::new();
 
-    folders.retain_mut(|folder| {
-        folder
-            .guild_ids
-            .retain(|gid| actual.contains(gid.as_str()) && seen.insert(gid.clone()));
-        folder.id == -1 || !folder.guild_ids.is_empty()
-    });
+    for folder in folders.iter_mut() {
+        if folder.id != -1 {
+            folder
+                .guild_ids
+                .retain(|gid| actual.contains(gid.as_str()) && seen.insert(gid.clone()));
+        }
+    }
+
+    for folder in folders.iter_mut() {
+        if folder.id == -1 {
+            folder
+                .guild_ids
+                .retain(|gid| actual.contains(gid.as_str()) && seen.insert(gid.clone()));
+        }
+    }
+
+    folders.retain(|folder| folder.id == -1 || !folder.guild_ids.is_empty());
 
     let missing: Vec<String> = actual_guild_ids
         .iter()
@@ -478,7 +489,7 @@ pub fn reconcile_guild_folders(folders: &mut Vec<GuildFolder>, actual_guild_ids:
                 name: None,
                 color: 0,
                 flags: 0,
-                icon: "folder".to_string(),
+                icon: default_folder_icon(),
                 guild_ids: missing,
             },
         );
@@ -544,13 +555,82 @@ impl UserSettings {
     }
 }
 
+fn default_folder_icon() -> String {
+    "folder".to_string()
+}
+
+fn deserialize_folder_id<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IdVal {
+        Int(i64),
+        Str(String),
+    }
+
+    match Option::<IdVal>::deserialize(deserializer)? {
+        Some(IdVal::Int(i)) => Ok(i),
+        Some(IdVal::Str(s)) => s
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| serde::de::Error::custom("invalid folder id")),
+        None => Ok(0),
+    }
+}
+
+fn deserialize_u32_or_default<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Int(u32),
+        Str(String),
+    }
+
+    match Option::<NumOrStr>::deserialize(deserializer)? {
+        Some(NumOrStr::Int(v)) => Ok(v),
+        Some(NumOrStr::Str(s)) => s
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| serde::de::Error::custom("invalid integer")),
+        None => Ok(0),
+    }
+}
+
+fn deserialize_folder_icon<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<String>::deserialize(deserializer)? {
+        Some(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Ok(default_folder_icon())
+            } else {
+                Ok(trimmed.to_string())
+            }
+        }
+        None => Ok(default_folder_icon()),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuildFolder {
+    #[serde(default, deserialize_with = "deserialize_folder_id")]
     pub id: i64,
+    #[serde(default)]
     pub name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_u32_or_default")]
     pub color: u32,
+    #[serde(default, deserialize_with = "deserialize_u32_or_default")]
     pub flags: u32,
+    #[serde(default = "default_folder_icon", deserialize_with = "deserialize_folder_icon")]
     pub icon: String,
+    #[serde(default)]
     pub guild_ids: Vec<String>,
 }
 
@@ -561,6 +641,14 @@ mod tests {
     #[test]
     fn reconcile_keeps_valid_dedupes_and_prepends_new() {
         let mut folders = vec![
+            GuildFolder {
+                id: -1,
+                name: None,
+                color: 0,
+                flags: 0,
+                icon: "folder".to_string(),
+                guild_ids: vec!["g1".to_string(), "g2".to_string()],
+            },
             GuildFolder {
                 id: 1,
                 name: Some("Gaming".to_string()),
@@ -577,26 +665,31 @@ mod tests {
                 icon: "folder".to_string(),
                 guild_ids: vec!["g_left_2".to_string()],
             },
-            GuildFolder {
-                id: -1,
-                name: None,
-                color: 0,
-                flags: 0,
-                icon: "folder".to_string(),
-                guild_ids: vec!["g1".to_string(), "g2".to_string()],
-            },
         ];
 
         let actual = vec!["g1".to_string(), "g2".to_string(), "g3".to_string()];
         reconcile_guild_folders(&mut folders, &actual);
 
         assert_eq!(folders.len(), 2);
-        assert_eq!(folders[0].id, 1);
-        assert_eq!(folders[0].guild_ids, vec!["g1".to_string()]);
-        assert_eq!(folders[1].id, -1);
+        assert_eq!(folders[0].id, -1);
         assert_eq!(
-            folders[1].guild_ids,
+            folders[0].guild_ids,
             vec!["g3".to_string(), "g2".to_string()]
         );
+        assert_eq!(folders[1].id, 1);
+        assert_eq!(folders[1].guild_ids, vec!["g1".to_string()]);
+    }
+
+    #[test]
+    fn guild_folder_accepts_null_and_omitted_metadata() {
+        let f: GuildFolder = serde_json::from_str(
+            r#"{"id":null,"name":null,"color":null,"icon":null,"guild_ids":["123"]}"#,
+        )
+        .unwrap();
+        assert_eq!(f.id, 0);
+        assert_eq!(f.color, 0);
+        assert_eq!(f.flags, 0);
+        assert_eq!(f.icon, "folder");
+        assert_eq!(f.guild_ids, vec!["123".to_string()]);
     }
 }

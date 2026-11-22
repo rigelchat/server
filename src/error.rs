@@ -37,6 +37,7 @@ pub enum ApiErrorCode {
     ChannelTypeConversionNotSupported,
     UnknownRole,
     MaxGuildRoles,
+    GuildTemplateInvalid,
     InternalServerError,
 }
 
@@ -70,6 +71,7 @@ impl ApiErrorCode {
             Self::ChannelTypeConversionNotSupported => "CHANNEL_TYPE_CONVERSION_NOT_SUPPORTED",
             Self::UnknownRole => "UNKNOWN_ROLE",
             Self::MaxGuildRoles => "MAX_GUILD_ROLES",
+            Self::GuildTemplateInvalid => "GUILD_TEMPLATE_INVALID",
             Self::InternalServerError => "INTERNAL_SERVER_ERROR",
         }
     }
@@ -324,6 +326,14 @@ impl AppError {
             StatusCode::NOT_FOUND,
             ApiErrorCode::UnknownRole,
             "Unknown role",
+        )
+    }
+
+    pub fn guild_template_invalid(message: impl Into<String>) -> Self {
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::GuildTemplateInvalid,
+            message,
         )
     }
 

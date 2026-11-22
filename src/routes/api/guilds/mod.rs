@@ -33,7 +33,7 @@ async fn create_guild(
     auth: AuthUser,
     AppJson(payload): AppJson<CreateGuildRequest>,
 ) -> Result<Json<Guild>, AppError> {
-    let guild = guild_service::create_guild(&state, &payload.name, &auth.user_id).await?;
+    let guild = guild_service::create_guild(&state, payload, &auth.user_id).await?;
     Ok(Json(guild))
 }
 

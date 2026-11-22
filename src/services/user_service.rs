@@ -622,7 +622,7 @@ pub async fn update_settings(
         extras.friend_source_flags = fsf;
         has_extra_updates = true;
     }
-    if let Some(folders) = payload.guild_folders {
+    if let Some(mut folders) = payload.guild_folders {
         if folders.len() > MAX_GUILD_FOLDERS {
             return Err(AppError::validation(
                 "guild_folders",
@@ -630,7 +630,24 @@ pub async fn update_settings(
                 "Too many guild folders.",
             ));
         }
-        for folder in &folders {
+        let mut next_id = folders
+            .iter()
+            .map(|f| f.id)
+            .filter(|&id| id > 0)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        for folder in &mut folders {
+            if folder.id == 0 {
+                folder.id = next_id;
+                next_id += 1;
+            }
+            folder.name = folder
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
             if folder
                 .name
                 .as_ref()

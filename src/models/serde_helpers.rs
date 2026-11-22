@@ -31,6 +31,49 @@ where
 {
     Option::<T>::deserialize(deserializer).map(Some)
 }
+pub fn deserialize_string_or_int<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrInt {
+        Str(String),
+        Int(i64),
+        Uint(u64),
+    }
+
+    match StringOrInt::deserialize(deserializer)? {
+        StringOrInt::Str(s) => Ok(s),
+        StringOrInt::Int(i) => Ok(i.to_string()),
+        StringOrInt::Uint(u) => Ok(u.to_string()),
+    }
+}
+
+pub fn deserialize_template_overwrite_type<'de, D>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum TypeOrStr {
+        Int(u32),
+        Str(String),
+    }
+
+    match Option::<TypeOrStr>::deserialize(deserializer)? {
+        Some(TypeOrStr::Int(v)) => Ok(Some(v)),
+        Some(TypeOrStr::Str(s)) => match s.trim().to_ascii_lowercase().as_str() {
+            "0" | "role" => Ok(Some(0)),
+            "1" | "member" => Ok(Some(1)),
+            _ => Ok(None),
+        },
+        None => Ok(None),
+    }
+}
+
 pub fn deserialize_opt_u64_string_or_int<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
     D: Deserializer<'de>,
