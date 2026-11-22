@@ -325,6 +325,19 @@ impl GatewayHub {
         }
     }
 
+    pub fn remove_guild(&self, guild_id: &str) {
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let Some(sids) = inner.guild_sessions.remove(guild_id) else {
+            return;
+        };
+        for sid in sids {
+            if let Some(session) = inner.sessions.get(&sid) {
+                session.remove_guild(guild_id);
+                session.remove_member_list_subscription(guild_id);
+            }
+        }
+    }
+
     fn user_live_state_locked(inner: &HubInner, user_id: &str) -> (&'static str, bool, bool) {
         let Some(usids) = inner.user_sessions.get(user_id) else {
             return ("offline", false, false);

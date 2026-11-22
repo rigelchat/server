@@ -15,10 +15,16 @@ pub struct RoleRow {
     pub position: u32,
     pub name: String,
     pub color: u32,
+    pub hoist_position: Option<i32>,
+    pub icon: Option<String>,
     pub unicode_emoji: Option<String>,
     pub hoist: bool,
     pub mentionable: bool,
     pub permissions: u64,
+}
+
+impl RoleRow {
+    pub const SELECT_COLS: &'static str = "id, position, name, color, hoist_position, icon, unicode_emoji, hoist, mentionable, permissions";
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,11 +49,11 @@ impl From<RoleRow> for Role {
             name: r.name,
             color: r.color,
             position: r.position,
-            hoist_position: None,
+            hoist_position: r.hoist_position,
             permissions: r.permissions,
             hoist: r.hoist,
             mentionable: r.mentionable,
-            icon: None,
+            icon: r.icon,
             unicode_emoji: r.unicode_emoji,
         }
     }

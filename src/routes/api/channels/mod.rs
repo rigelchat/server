@@ -4,19 +4,30 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{Path, State},
-    routing::{get, post},
+    http::StatusCode,
+    routing::{get, post, put},
 };
 
 use crate::AppState;
 use crate::error::AppError;
-use crate::extractors::AuthUser;
+use crate::extractors::{AppJson, AuthUser};
 use crate::models::channel::ChannelResponse;
 use crate::models::invite::{CreateInviteRequest, CreatedInvite};
+use crate::models::rest::channels::{SetPermissionOverwriteRequest, UpdateChannelRequest};
 use crate::services::{channel_service, invite_service};
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/{id}", get(get_channel))
+        .route(
+            "/{id}",
+            get(get_channel)
+                .patch(update_channel)
+                .delete(delete_channel),
+        )
+        .route(
+            "/{id}/permissions/{overwrite_id}",
+            put(set_permission_overwrite).delete(delete_permission_overwrite),
+        )
         .nest("/{id}/messages", messages::router())
         .route("/{id}/invites", post(create_channel_invite))
 }
@@ -28,6 +39,53 @@ async fn get_channel(
 ) -> Result<Json<ChannelResponse>, AppError> {
     let channel = channel_service::get_channel(&state, &channel_id, &auth.user_id).await?;
     Ok(Json(channel))
+}
+
+async fn update_channel(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(channel_id): Path<String>,
+    AppJson(payload): AppJson<UpdateChannelRequest>,
+) -> Result<Json<ChannelResponse>, AppError> {
+    let channel =
+        channel_service::update_channel(&state, &channel_id, &auth.user_id, payload).await?;
+    Ok(Json(channel))
+}
+
+async fn delete_channel(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(channel_id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    channel_service::delete_channel(&state, &channel_id, &auth.user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn set_permission_overwrite(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((channel_id, overwrite_id)): Path<(String, String)>,
+    AppJson(payload): AppJson<SetPermissionOverwriteRequest>,
+) -> Result<StatusCode, AppError> {
+    channel_service::set_permission_overwrite(
+        &state,
+        &channel_id,
+        &overwrite_id,
+        &auth.user_id,
+        payload,
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_permission_overwrite(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((channel_id, overwrite_id)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    channel_service::delete_permission_overwrite(&state, &channel_id, &overwrite_id, &auth.user_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn create_channel_invite(

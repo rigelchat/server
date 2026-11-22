@@ -1,9 +1,11 @@
 pub mod auth;
+pub mod channels;
 pub mod discoverable_guilds;
 pub mod discovery;
 pub mod gateway;
 pub mod guilds;
 pub mod messages;
 pub mod ping;
+pub mod roles;
 pub mod users;
 pub mod well_known;

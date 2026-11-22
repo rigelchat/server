@@ -31,6 +31,33 @@ where
 {
     Option::<T>::deserialize(deserializer).map(Some)
 }
+pub fn deserialize_opt_u64_string_or_int<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrUint {
+        Str(String),
+        Uint(u64),
+    }
+
+    match Option::<StringOrUint>::deserialize(deserializer)? {
+        Some(StringOrUint::Str(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Ok(Some(0));
+            }
+            trimmed
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|_| serde::de::Error::custom("invalid integer string"))
+        }
+        Some(StringOrUint::Uint(u)) => Ok(Some(u)),
+        None => Ok(None),
+    }
+}
+
 pub fn deserialize_opt_string_or_int<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -144,6 +171,20 @@ mod tests {
             serde_json::from_str::<NonceBox>(r#"{}"#).unwrap().nonce,
             None
         );
+    }
+
+    #[derive(Deserialize)]
+    struct PermBox {
+        #[serde(default, deserialize_with = "deserialize_opt_u64_string_or_int")]
+        allow: Option<u64>,
+    }
+
+    #[test]
+    fn u64_string_or_int_parses_all_variants() {
+        assert_eq!(serde_json::from_str::<PermBox>(r#"{"allow":"1024"}"#).unwrap().allow, Some(1024));
+        assert_eq!(serde_json::from_str::<PermBox>(r#"{"allow":2048}"#).unwrap().allow, Some(2048));
+        assert_eq!(serde_json::from_str::<PermBox>(r#"{"allow":null}"#).unwrap().allow, None);
+        assert!(serde_json::from_str::<PermBox>(r#"{"allow":"-5"}"#).is_err());
     }
 
     #[test]

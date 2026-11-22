@@ -1,5 +1,7 @@
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
+use sqlx::FromRow;
 use tracing::error;
 
 use crate::AppState;
@@ -15,8 +17,18 @@ use crate::models::guild_member::{GuildMemberFields, GuildMemberRole, GuildMembe
 use crate::models::role::RolePerm;
 use crate::models::user::{CustomStatus, PartialUser};
 use crate::services::permission_service;
+use crate::utils::snowflake::Snowflake;
 
 use super::presence;
+
+#[derive(FromRow)]
+struct SnapshotRoleRow {
+    id: String,
+    position: u32,
+    hoist: bool,
+    hoist_position: Option<i32>,
+    permissions: u64,
+}
 
 struct SnapshotMember {
     user: PartialUser,
@@ -29,10 +41,25 @@ struct SnapshotMember {
     custom_status: Option<CustomStatus>,
 }
 
+struct MemberListBucket {
+    id: String,
+    members: Vec<SnapshotMember>,
+}
+
 struct GuildMemberListSnapshot {
-    online_members: Vec<SnapshotMember>,
-    offline_members: Vec<SnapshotMember>,
+    buckets: Vec<MemberListBucket>,
+    online_count: usize,
+    member_count: usize,
     viewer_allowed: HashSet<String>,
+}
+
+fn compare_hoisted_roles(a: &SnapshotRoleRow, b: &SnapshotRoleRow) -> Ordering {
+    let rank_a = a.hoist_position.unwrap_or(a.position as i32);
+    let rank_b = b.hoist_position.unwrap_or(b.position as i32);
+    rank_b
+        .cmp(&rank_a)
+        .then_with(|| b.position.cmp(&a.position))
+        .then_with(|| Snowflake::compare_strings(&b.id, &a.id))
 }
 
 impl GuildMemberListSnapshot {
@@ -59,67 +86,47 @@ impl GuildMemberListSnapshot {
             }
         };
 
-        let online_count = self.online_members.len();
-        let offline_count = self.offline_members.len();
-        let total_member_count = online_count + offline_count;
+        let groups: Vec<MemberListGroup> = self
+            .buckets
+            .iter()
+            .map(|b| MemberListGroup {
+                id: b.id.clone(),
+                count: b.members.len(),
+            })
+            .collect();
 
-        let mut groups = Vec::new();
-        let mut online_group = None;
-        let mut offline_group = None;
-
-        if online_count > 0 {
-            let group = MemberListGroup {
-                id: "online".to_string(),
-                count: online_count,
-            };
-            groups.push(group.clone());
-            online_group = Some(group);
-        }
-
-        if offline_count > 0 {
-            let group = MemberListGroup {
-                id: "offline".to_string(),
-                count: offline_count,
-            };
-            groups.push(group.clone());
-            offline_group = Some(group);
-        }
-
-        let online_span = if online_count > 0 {
-            1 + online_count
-        } else {
-            0
-        };
-        let offline_span = if offline_count > 0 {
-            1 + offline_count
-        } else {
-            0
-        };
-        let total_items = online_span + offline_span;
-
+        let total_items: usize = self.buckets.iter().map(|b| 1 + b.members.len()).sum();
         let start = (range[0].max(0) as usize).min(total_items);
         let end = ((range[1] + 1).max(0) as usize).min(total_items);
         let mut sliced_items = Vec::with_capacity(end.saturating_sub(start));
 
-        for idx in start..end {
-            if online_span > 0 && idx < online_span {
-                if idx == 0 {
-                    if let Some(ref g) = online_group {
-                        sliced_items.push(MemberListItem::Group { group: g.clone() });
-                    }
+        let mut cursor = 0usize;
+        for bucket in &self.buckets {
+            let bucket_len = 1 + bucket.members.len();
+            let bucket_end = cursor + bucket_len;
+            if bucket_end <= start {
+                cursor = bucket_end;
+                continue;
+            }
+            if cursor >= end {
+                break;
+            }
+
+            let local_start = start.saturating_sub(cursor);
+            let local_end = (end - cursor).min(bucket_len);
+            for local_idx in local_start..local_end {
+                if local_idx == 0 {
+                    sliced_items.push(MemberListItem::Group {
+                        group: MemberListGroup {
+                            id: bucket.id.clone(),
+                            count: bucket.members.len(),
+                        },
+                    });
                 } else {
-                    sliced_items.push(to_item(&self.online_members[idx - 1]));
-                }
-            } else {
-                let off_idx = idx - online_span;
-                if off_idx == 0 {
-                    if let Some(ref g) = offline_group {
-                        sliced_items.push(MemberListItem::Group { group: g.clone() });
-                    }
-                } else {
-                    sliced_items.push(to_item(&self.offline_members[off_idx - 1]));
+                    sliced_items.push(to_item(&bucket.members[local_idx - 1]));
                 }
             }
+            cursor = bucket_end;
         }
 
         GuildMemberListUpdate {
@@ -131,8 +138,8 @@ impl GuildMemberListSnapshot {
                 range,
                 items: sliced_items,
             }],
-            online_count,
-            member_count: total_member_count,
+            online_count: self.online_count,
+            member_count: self.member_count,
             groups,
         }
     }
@@ -160,12 +167,35 @@ async fn fetch_snapshot(
         .ok()
         .flatten()?;
 
-    let guild_roles: Vec<RolePerm> =
-        sqlx::query_as("SELECT id, permissions FROM roles WHERE guild_id = ?")
-            .bind(guild_id)
-            .fetch_all(&state.db)
-            .await
-            .unwrap_or_default();
+    let role_rows: Vec<SnapshotRoleRow> = sqlx::query_as(
+        "SELECT id, position, hoist, hoist_position, permissions FROM roles WHERE guild_id = ?",
+    )
+    .bind(guild_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let guild_roles: Vec<RolePerm> = role_rows
+        .iter()
+        .map(|r| RolePerm {
+            id: r.id.clone(),
+            permissions: r.permissions,
+        })
+        .collect();
+
+    let mut hoisted_roles: Vec<SnapshotRoleRow> = role_rows
+        .into_iter()
+        .filter(|r| r.hoist && r.id != guild_id)
+        .collect();
+    hoisted_roles.sort_by(compare_hoisted_roles);
+
+    let hoisted_rank_by_id: HashMap<String, usize> = hoisted_roles
+        .iter()
+        .enumerate()
+        .map(|(idx, r)| (r.id.clone(), idx))
+        .collect();
+    let mut hoisted_buckets: Vec<Vec<SnapshotMember>> =
+        (0..hoisted_roles.len()).map(|_| Vec::new()).collect();
 
     let overwrites: Vec<PermissionOverwrite> = sqlx::query_as::<_, ChannelOverwriteRow>(
         "SELECT channel_id, type, target_id, allow, deny FROM channel_permission_overwrites WHERE channel_id = ?",
@@ -202,7 +232,7 @@ async fn fetch_snapshot(
         }
     };
 
-    let role_rows = sqlx::query_as::<_, GuildMemberRole>(
+    let member_role_rows = sqlx::query_as::<_, GuildMemberRole>(
         "SELECT user_id, role_id FROM guild_member_roles WHERE guild_id = ? AND role_id != ?",
     )
     .bind(guild_id)
@@ -212,13 +242,14 @@ async fn fetch_snapshot(
     .unwrap_or_default();
 
     let mut roles_by_user: HashMap<String, Vec<String>> = HashMap::new();
-    for r in role_rows {
+    for r in member_role_rows {
         roles_by_user.entry(r.user_id).or_default().push(r.role_id);
     }
 
-    let mut online_members = Vec::new();
+    let mut online_unhoisted = Vec::new();
     let mut offline_members = Vec::new();
     let mut viewer_allowed = HashSet::new();
+    let mut online_count = 0usize;
 
     for row in member_rows {
         let roles = roles_by_user.remove(&row.user_id).unwrap_or_default();
@@ -249,6 +280,14 @@ async fn fetch_snapshot(
             .unwrap_or(("offline", false, false, None));
 
         let is_visibly_online = status != "offline";
+        let hoisted_idx = if is_visibly_online {
+            roles
+                .iter()
+                .filter_map(|rid| hoisted_rank_by_id.get(rid).copied())
+                .min()
+        } else {
+            None
+        };
 
         let nick = row.nick.clone();
         let joined_at = row.joined_at;
@@ -264,15 +303,44 @@ async fn fetch_snapshot(
         };
 
         if is_visibly_online {
-            online_members.push(member);
+            online_count += 1;
+            if let Some(idx) = hoisted_idx {
+                hoisted_buckets[idx].push(member);
+            } else {
+                online_unhoisted.push(member);
+            }
         } else {
             offline_members.push(member);
         }
     }
 
+    let member_count = online_count + offline_members.len();
+    let mut buckets = Vec::with_capacity(hoisted_roles.len() + 2);
+    for (role, members) in hoisted_roles.into_iter().zip(hoisted_buckets) {
+        if !members.is_empty() {
+            buckets.push(MemberListBucket {
+                id: role.id,
+                members,
+            });
+        }
+    }
+    if !online_unhoisted.is_empty() {
+        buckets.push(MemberListBucket {
+            id: "online".to_string(),
+            members: online_unhoisted,
+        });
+    }
+    if !offline_members.is_empty() {
+        buckets.push(MemberListBucket {
+            id: "offline".to_string(),
+            members: offline_members,
+        });
+    }
+
     Some(GuildMemberListSnapshot {
-        online_members,
-        offline_members,
+        buckets,
+        online_count,
+        member_count,
         viewer_allowed,
     })
 }
@@ -433,5 +501,111 @@ pub async fn refresh_guild_member_lists(state: &AppState, guild_id: &str) {
             let update = snapshot.build_update(guild_id, &channel_id, range);
             session.dispatch(events::GUILD_MEMBER_LIST_UPDATE, update);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_member(id: &str, status: &'static str) -> SnapshotMember {
+        SnapshotMember {
+            user: PartialUser {
+                id: id.to_string(),
+                username: format!("user_{id}"),
+                discriminator: "0000".to_string(),
+                global_name: None,
+                avatar: None,
+                avatar_color: None,
+                bot: false,
+                flags: 0,
+            },
+            nick: None,
+            roles: vec![],
+            joined_at: 0,
+            status,
+            mobile: false,
+            afk: false,
+            custom_status: None,
+        }
+    }
+
+    #[test]
+    fn hoisted_groups_and_range_slicing_work() {
+        let snapshot = GuildMemberListSnapshot {
+            buckets: vec![
+                MemberListBucket {
+                    id: "role_admin".to_string(),
+                    members: vec![test_member("u1", "online")],
+                },
+                MemberListBucket {
+                    id: "online".to_string(),
+                    members: vec![test_member("u2", "online")],
+                },
+                MemberListBucket {
+                    id: "offline".to_string(),
+                    members: vec![test_member("u3", "offline")],
+                },
+            ],
+            online_count: 2,
+            member_count: 3,
+            viewer_allowed: HashSet::new(),
+        };
+
+        let full = snapshot.build_update("g1", "c1", [0, 99]);
+        assert_eq!(full.groups.len(), 3);
+        assert_eq!(full.online_count, 2);
+        assert_eq!(full.member_count, 3);
+        assert_eq!(full.ops[0].items.len(), 6);
+
+        let sliced = snapshot.build_update("g1", "c1", [1, 3]);
+        assert_eq!(sliced.ops[0].items.len(), 3);
+        assert!(matches!(sliced.ops[0].items[0], MemberListItem::Member { .. }));
+        assert!(matches!(sliced.ops[0].items[1], MemberListItem::Group { .. }));
+        assert!(matches!(sliced.ops[0].items[2], MemberListItem::Member { .. }));
+    }
+
+    #[test]
+    fn hoisted_roles_sort_descending_by_hoist_position_with_position_fallback() {
+        let roi = SnapshotRoleRow {
+            id: "1".into(),
+            position: 39,
+            hoist: true,
+            hoist_position: Some(21),
+            permissions: 0,
+        };
+        let dev = SnapshotRoleRow {
+            id: "2".into(),
+            position: 37,
+            hoist: true,
+            hoist_position: Some(19),
+            permissions: 0,
+        };
+        let hokage = SnapshotRoleRow {
+            id: "3".into(),
+            position: 30,
+            hoist: true,
+            hoist_position: Some(20),
+            permissions: 0,
+        };
+        let membre = SnapshotRoleRow {
+            id: "4".into(),
+            position: 19,
+            hoist: true,
+            hoist_position: Some(1),
+            permissions: 0,
+        };
+        let new_top = SnapshotRoleRow {
+            id: "5".into(),
+            position: 40,
+            hoist: true,
+            hoist_position: None,
+            permissions: 0,
+        };
+
+        let mut list = vec![membre, dev, hokage, roi, new_top];
+        list.sort_by(compare_hoisted_roles);
+        let ids: Vec<&str> = list.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["5", "1", "3", "2", "4"]);
     }
 }

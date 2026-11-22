@@ -32,6 +32,11 @@ pub enum ApiErrorCode {
     RegistrationClosed,
     MaxInvites,
     MaxGuilds,
+    MaxGuildChannels,
+    MaxCategoryChannels,
+    ChannelTypeConversionNotSupported,
+    UnknownRole,
+    MaxGuildRoles,
     InternalServerError,
 }
 
@@ -60,6 +65,11 @@ impl ApiErrorCode {
             Self::RegistrationClosed => "REGISTRATION_CLOSED",
             Self::MaxInvites => "MAX_INVITES",
             Self::MaxGuilds => "MAX_GUILDS",
+            Self::MaxGuildChannels => "MAX_GUILD_CHANNELS",
+            Self::MaxCategoryChannels => "MAX_CATEGORY_CHANNELS",
+            Self::ChannelTypeConversionNotSupported => "CHANNEL_TYPE_CONVERSION_NOT_SUPPORTED",
+            Self::UnknownRole => "UNKNOWN_ROLE",
+            Self::MaxGuildRoles => "MAX_GUILD_ROLES",
             Self::InternalServerError => "INTERNAL_SERVER_ERROR",
         }
     }
@@ -84,6 +94,27 @@ pub enum ValidationCode {
     StringLengthInvalid,
     InvalidFormat,
     CannotLeaveGuildAsOwner,
+    ValueMustBeIntegerInRange,
+    SystemChannelMustBeInGuild,
+    SystemChannelMustBeText,
+    AfkChannelMustBeInGuild,
+    AfkChannelMustBeVoice,
+    DiscoverableGuildVerificationLevelTooLow,
+    NameEmptyAfterNormalization,
+    InvalidParentChannel,
+    ParentChannelNotInGuild,
+    ParentMustBeCategory,
+    CategoriesCannotHaveParents,
+    InvalidUrlFormat,
+    UrlLengthInvalid,
+    ChannelNotFound,
+    CannotPositionChannelRelativeToItself,
+    PrecedingChannelMustShareParent,
+    InvalidRoleId,
+    CannotReorderEveryoneRole,
+    RoleIconAndEmojiExclusive,
+    RoleIconSourceAndIconExclusive,
+    CannotSetIconOnEveryoneRole,
 }
 
 impl ValidationCode {
@@ -105,6 +136,31 @@ impl ValidationCode {
             Self::StringLengthInvalid => "STRING_LENGTH_INVALID",
             Self::InvalidFormat => "INVALID_FORMAT",
             Self::CannotLeaveGuildAsOwner => "CANNOT_LEAVE_GUILD_AS_OWNER",
+            Self::ValueMustBeIntegerInRange => "VALUE_MUST_BE_INTEGER_IN_RANGE",
+            Self::SystemChannelMustBeInGuild => "SYSTEM_CHANNEL_MUST_BE_IN_GUILD",
+            Self::SystemChannelMustBeText => "SYSTEM_CHANNEL_MUST_BE_TEXT",
+            Self::AfkChannelMustBeInGuild => "AFK_CHANNEL_MUST_BE_IN_GUILD",
+            Self::AfkChannelMustBeVoice => "AFK_CHANNEL_MUST_BE_VOICE",
+            Self::DiscoverableGuildVerificationLevelTooLow => {
+                "DISCOVERABLE_GUILD_VERIFICATION_LEVEL_TOO_LOW"
+            }
+            Self::NameEmptyAfterNormalization => "NAME_EMPTY_AFTER_NORMALIZATION",
+            Self::InvalidParentChannel => "INVALID_PARENT_CHANNEL",
+            Self::ParentChannelNotInGuild => "PARENT_CHANNEL_NOT_IN_GUILD",
+            Self::ParentMustBeCategory => "PARENT_MUST_BE_CATEGORY",
+            Self::CategoriesCannotHaveParents => "CATEGORIES_CANNOT_HAVE_PARENTS",
+            Self::InvalidUrlFormat => "INVALID_URL_FORMAT",
+            Self::UrlLengthInvalid => "URL_LENGTH_INVALID",
+            Self::ChannelNotFound => "CHANNEL_NOT_FOUND",
+            Self::CannotPositionChannelRelativeToItself => {
+                "CANNOT_POSITION_CHANNEL_RELATIVE_TO_ITSELF"
+            }
+            Self::PrecedingChannelMustShareParent => "PRECEDING_CHANNEL_MUST_SHARE_PARENT",
+            Self::InvalidRoleId => "INVALID_ROLE_ID",
+            Self::CannotReorderEveryoneRole => "CANNOT_REORDER_EVERYONE_ROLE",
+            Self::RoleIconAndEmojiExclusive => "ROLE_ICON_AND_EMOJI_EXCLUSIVE",
+            Self::RoleIconSourceAndIconExclusive => "ROLE_ICON_SOURCE_AND_ICON_EXCLUSIVE",
+            Self::CannotSetIconOnEveryoneRole => "CANNOT_SET_ICON_ON_EVERYONE_ROLE",
         }
     }
 }
@@ -263,6 +319,22 @@ impl AppError {
         )
     }
 
+    pub fn unknown_role() -> Self {
+        Self::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownRole,
+            "Unknown role",
+        )
+    }
+
+    pub fn max_guild_roles() -> Self {
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::MaxGuildRoles,
+            "Maximum number of roles reached for this community.",
+        )
+    }
+
     pub fn unknown_member() -> Self {
         Self::coded(
             StatusCode::NOT_FOUND,
@@ -308,6 +380,30 @@ impl AppError {
             StatusCode::FORBIDDEN,
             ApiErrorCode::CannotEditOtherUserMessage,
             "You can't edit another user's message.",
+        )
+    }
+
+    pub fn max_guild_channels() -> Self {
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::MaxGuildChannels,
+            "Maximum number of channels reached for this community.",
+        )
+    }
+
+    pub fn max_category_channels() -> Self {
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::MaxCategoryChannels,
+            "Maximum number of channels reached for this category.",
+        )
+    }
+
+    pub fn channel_type_conversion_not_supported() -> Self {
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::ChannelTypeConversionNotSupported,
+            "Channel type conversion is not supported.",
         )
     }
 

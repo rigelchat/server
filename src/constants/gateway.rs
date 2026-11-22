@@ -141,8 +141,17 @@ pub mod events {
     pub const SESSIONS_REPLACE: &str = "SESSIONS_REPLACE";
     pub const RESUMED: &str = "RESUMED";
     pub const GUILD_CREATE: &str = "GUILD_CREATE";
+    pub const GUILD_UPDATE: &str = "GUILD_UPDATE";
     pub const GUILD_DELETE: &str = "GUILD_DELETE";
+    pub const CHANNEL_CREATE: &str = "CHANNEL_CREATE";
+    pub const CHANNEL_UPDATE: &str = "CHANNEL_UPDATE";
+    pub const CHANNEL_DELETE: &str = "CHANNEL_DELETE";
+    pub const GUILD_ROLE_CREATE: &str = "GUILD_ROLE_CREATE";
+    pub const GUILD_ROLE_UPDATE: &str = "GUILD_ROLE_UPDATE";
+    pub const GUILD_ROLE_UPDATE_BULK: &str = "GUILD_ROLE_UPDATE_BULK";
+    pub const GUILD_ROLE_DELETE: &str = "GUILD_ROLE_DELETE";
     pub const GUILD_MEMBER_ADD: &str = "GUILD_MEMBER_ADD";
+    pub const GUILD_MEMBER_UPDATE: &str = "GUILD_MEMBER_UPDATE";
     pub const GUILD_MEMBER_REMOVE: &str = "GUILD_MEMBER_REMOVE";
     pub const GUILD_MEMBER_LIST_UPDATE: &str = "GUILD_MEMBER_LIST_UPDATE";
     pub const MESSAGE_CREATE: &str = "MESSAGE_CREATE";

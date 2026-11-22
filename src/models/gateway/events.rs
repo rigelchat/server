@@ -2,6 +2,7 @@ use serde::Serialize;
 
 use crate::models::guild_member::{GuildMemberFields, GuildMemberResponse};
 use crate::models::message::Message;
+use crate::models::role::Role;
 
 pub type MessageMember = GuildMemberFields;
 
@@ -11,6 +12,8 @@ pub struct GuildMemberAddEvent {
     #[serde(flatten)]
     pub member: GuildMemberResponse,
 }
+
+pub type GuildMemberUpdateEvent = GuildMemberAddEvent;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GatewayMessageEvent {
@@ -44,4 +47,22 @@ pub struct MessageDeleteEvent<'a> {
     pub id: &'a str,
     pub channel_id: &'a str,
     pub guild_id: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GuildRoleEvent<'a> {
+    pub guild_id: &'a str,
+    pub role: &'a Role,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GuildRoleBulkEvent<'a> {
+    pub guild_id: &'a str,
+    pub roles: &'a [Role],
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GuildRoleDeleteEvent<'a> {
+    pub guild_id: &'a str,
+    pub role_id: &'a str,
 }

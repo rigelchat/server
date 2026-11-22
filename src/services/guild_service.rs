@@ -7,13 +7,20 @@ use crate::AppState;
 use crate::config::GuildCreationPolicy;
 use crate::constants::flags::{PermissionFlags, UserFlags};
 use crate::constants::gateway::events;
+use crate::constants::guild::{
+    MAX_AFK_TIMEOUT, MAX_DEFAULT_MESSAGE_NOTIFICATIONS, MAX_EXPLICIT_CONTENT_FILTER,
+    MAX_GUILD_DESCRIPTION_LENGTH, MAX_VERIFICATION_LEVEL, MIN_AFK_TIMEOUT,
+    SYSTEM_CHANNEL_FLAGS_MASK, VerificationLevel,
+};
 use crate::constants::limits::{
-    GUILD_LIST_PERMISSION_LIMIT, MAX_GUILD_NAME_LENGTH, MAX_GUILDS_PAGE_LIMIT, MAX_GUILDS_PER_USER,
+    GUILD_LIST_PERMISSION_LIMIT, MAX_ASSET_HASH_LENGTH, MAX_GUILD_NAME_LENGTH,
+    MAX_GUILDS_PAGE_LIMIT, MAX_GUILDS_PER_USER,
 };
 use crate::error::{AppError, ValidationCode};
 use crate::models::channel::{
-    ChannelOverwriteRow, ChannelResponse, ChannelType, GuildChannel, PermissionOverwrite,
+    ChannelOverwriteRow, ChannelResponse, ChannelRow, ChannelType, PermissionOverwrite,
 };
+use crate::models::gateway::events::GuildDeleteEvent;
 use crate::models::gateway::presence::{build_presence_value, serialize_presence_user};
 use crate::models::guild::{BaseGuild, GatewayGuild, Guild};
 use crate::models::guild_member::{
@@ -21,10 +28,10 @@ use crate::models::guild_member::{
     GuildMemberUserRef, GuildMemberUserRow,
 };
 use crate::models::permission::OverwriteType;
-use crate::models::rest::guilds::ListGuildsQuery;
+use crate::models::rest::guilds::{ListGuildsQuery, UpdateGuildRequest};
 use crate::models::role::{Role, RolePerm, RoleRow};
 use crate::services::{channel_service, member_service, permission_service, role_service};
-use crate::utils::snowflake::DISCORD_SNOWFLAKE;
+use crate::utils::snowflake::{DISCORD_SNOWFLAKE, validate_snowflake};
 
 #[derive(FromRow)]
 struct GuildRoleBatchRow {
@@ -33,6 +40,8 @@ struct GuildRoleBatchRow {
     position: u32,
     name: String,
     color: u32,
+    hoist_position: Option<i32>,
+    icon: Option<String>,
     unicode_emoji: Option<String>,
     hoist: bool,
     mentionable: bool,
@@ -246,6 +255,361 @@ pub async fn get_guild(state: &AppState, guild_id: &str, user_id: &str) -> Resul
     Ok(guild)
 }
 
+pub async fn update_guild(
+    state: &AppState,
+    guild_id: &str,
+    user_id: &str,
+    payload: UpdateGuildRequest,
+) -> Result<Guild, AppError> {
+    let perms = permission_service::compute_guild_permissions(state, guild_id, user_id).await?;
+    if !perms.contains(PermissionFlags::MANAGE_GUILD) {
+        return Err(AppError::missing_permissions());
+    }
+
+    let mut tx = state.db.begin().await?;
+
+    let current = sqlx::query_as::<_, BaseGuild>("SELECT * FROM guilds WHERE id = ? FOR UPDATE")
+        .bind(guild_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(AppError::unknown_guild)?;
+
+    let mut query = QueryBuilder::<MySql>::new("UPDATE guilds SET ");
+    let mut sep = query.separated(", ");
+    let mut has_updates = false;
+
+    if let Some(raw_name) = &payload.name {
+        let trimmed = raw_name.trim();
+        if trimmed.is_empty() || trimmed.chars().count() > MAX_GUILD_NAME_LENGTH {
+            return Err(AppError::validation(
+                "name",
+                ValidationCode::StringLengthInvalid,
+                "String length must be between 1 and 100 characters.",
+            ));
+        }
+        sep.push("name = ");
+        sep.push_bind_unseparated(trimmed.to_string());
+        has_updates = true;
+    }
+
+    if let Some(icon) = &payload.icon {
+        let value = validate_guild_asset_opt("icon", icon.as_deref())?;
+        sep.push("icon = ");
+        sep.push_bind_unseparated(value);
+        has_updates = true;
+    }
+
+    if let Some(banner) = &payload.banner {
+        let value = validate_guild_asset_opt("banner", banner.as_deref())?;
+        sep.push("banner = ");
+        sep.push_bind_unseparated(value);
+        has_updates = true;
+    }
+
+    if let Some(description) = &payload.description {
+        let value = description
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(text) = value
+            && text.chars().count() > MAX_GUILD_DESCRIPTION_LENGTH
+        {
+            return Err(AppError::validation(
+                "description",
+                ValidationCode::ContentExceedsMaxLength,
+                "Description must not exceed 300 characters.",
+            ));
+        }
+        sep.push("description = ");
+        sep.push_bind_unseparated(value.map(str::to_string));
+        has_updates = true;
+    }
+
+    if let Some(system_channel_id) = &payload.system_channel_id {
+        let value = match system_channel_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(cid) => {
+                validate_snowflake("system_channel_id", cid)?;
+                let ch_type: Option<u32> =
+                    sqlx::query_scalar("SELECT type FROM channels WHERE id = ? AND guild_id = ?")
+                        .bind(cid)
+                        .bind(guild_id)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                match ch_type {
+                    None => {
+                        return Err(AppError::validation(
+                            "system_channel_id",
+                            ValidationCode::SystemChannelMustBeInGuild,
+                            "System channel must belong to this community.",
+                        ));
+                    }
+                    Some(t)
+                        if t != ChannelType::GuildText as u32
+                            && t != ChannelType::GuildAnnouncement as u32 =>
+                    {
+                        return Err(AppError::validation(
+                            "system_channel_id",
+                            ValidationCode::SystemChannelMustBeText,
+                            "System channel must be a text or announcement channel.",
+                        ));
+                    }
+                    Some(_) => Some(cid.to_string()),
+                }
+            }
+            None => None,
+        };
+        sep.push("system_channel_id = ");
+        sep.push_bind_unseparated(value);
+        has_updates = true;
+    }
+
+    if let Some(flags) = payload.system_channel_flags {
+        sep.push("system_channel_flags = ");
+        sep.push_bind_unseparated(flags & SYSTEM_CHANNEL_FLAGS_MASK);
+        has_updates = true;
+    }
+
+    if let Some(rules_channel_id) = &payload.rules_channel_id {
+        let value = match rules_channel_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(cid) => {
+                validate_snowflake("rules_channel_id", cid)?;
+                let ch_type: Option<u32> =
+                    sqlx::query_scalar("SELECT type FROM channels WHERE id = ? AND guild_id = ?")
+                        .bind(cid)
+                        .bind(guild_id)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                match ch_type {
+                    None => {
+                        return Err(AppError::validation(
+                            "rules_channel_id",
+                            ValidationCode::InvalidFormat,
+                            "Rules channel must belong to this community.",
+                        ));
+                    }
+                    Some(t)
+                        if t != ChannelType::GuildText as u32
+                            && t != ChannelType::GuildAnnouncement as u32 =>
+                    {
+                        return Err(AppError::validation(
+                            "rules_channel_id",
+                            ValidationCode::InvalidFormat,
+                            "Rules channel must be a text or announcement channel.",
+                        ));
+                    }
+                    Some(_) => Some(cid.to_string()),
+                }
+            }
+            None => None,
+        };
+        sep.push("rules_channel_id = ");
+        sep.push_bind_unseparated(value);
+        has_updates = true;
+    }
+
+    if let Some(afk_channel_id) = &payload.afk_channel_id {
+        let value = match afk_channel_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(cid) => {
+                validate_snowflake("afk_channel_id", cid)?;
+                let ch_type: Option<u32> =
+                    sqlx::query_scalar("SELECT type FROM channels WHERE id = ? AND guild_id = ?")
+                        .bind(cid)
+                        .bind(guild_id)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                match ch_type {
+                    None => {
+                        return Err(AppError::validation(
+                            "afk_channel_id",
+                            ValidationCode::AfkChannelMustBeInGuild,
+                            "AFK channel must belong to this community.",
+                        ));
+                    }
+                    Some(t) if t != ChannelType::GuildVoice as u32 => {
+                        return Err(AppError::validation(
+                            "afk_channel_id",
+                            ValidationCode::AfkChannelMustBeVoice,
+                            "AFK channel must be a voice channel.",
+                        ));
+                    }
+                    Some(_) => Some(cid.to_string()),
+                }
+            }
+            None => None,
+        };
+        sep.push("afk_channel_id = ");
+        sep.push_bind_unseparated(value);
+        has_updates = true;
+    }
+
+    if let Some(timeout) = payload.afk_timeout {
+        if !(MIN_AFK_TIMEOUT..=MAX_AFK_TIMEOUT).contains(&timeout) {
+            return Err(AppError::validation(
+                "afk_timeout",
+                ValidationCode::ValueMustBeIntegerInRange,
+                "AFK timeout must be between 60 and 3600 seconds.",
+            ));
+        }
+        sep.push("afk_timeout = ");
+        sep.push_bind_unseparated(timeout);
+        has_updates = true;
+    }
+
+    if let Some(notif) = payload.default_message_notifications {
+        if notif > MAX_DEFAULT_MESSAGE_NOTIFICATIONS {
+            return Err(AppError::validation(
+                "default_message_notifications",
+                ValidationCode::ValueMustBeIntegerInRange,
+                "Invalid default message notifications value.",
+            ));
+        }
+        sep.push("default_message_notifications = ");
+        sep.push_bind_unseparated(notif);
+        has_updates = true;
+    }
+
+    if let Some(level) = payload.verification_level {
+        if level > MAX_VERIFICATION_LEVEL {
+            return Err(AppError::validation(
+                "verification_level",
+                ValidationCode::ValueMustBeIntegerInRange,
+                "Verification level must be between 0 and 3.",
+            ));
+        }
+        if current.discoverable && level < VerificationLevel::Low as u8 {
+            return Err(AppError::validation(
+                "verification_level",
+                ValidationCode::DiscoverableGuildVerificationLevelTooLow,
+                "Discoverable communities must have at least low verification level.",
+            ));
+        }
+        sep.push("verification_level = ");
+        sep.push_bind_unseparated(level);
+        has_updates = true;
+    }
+
+    if let Some(filter) = payload.explicit_content_filter {
+        if filter > MAX_EXPLICIT_CONTENT_FILTER {
+            return Err(AppError::validation(
+                "explicit_content_filter",
+                ValidationCode::ValueMustBeIntegerInRange,
+                "Explicit content filter must be between 0 and 2.",
+            ));
+        }
+        sep.push("explicit_content_filter = ");
+        sep.push_bind_unseparated(filter);
+        has_updates = true;
+    }
+
+    let resolved_nsfw = if let Some(nsfw) = payload.nsfw {
+        Some(nsfw)
+    } else if let Some(nsfw_level) = payload.nsfw_level {
+        match nsfw_level {
+            0 | 2 => Some(false),
+            1 | 3 => Some(true),
+            _ => {
+                return Err(AppError::validation(
+                    "nsfw_level",
+                    ValidationCode::ValueMustBeIntegerInRange,
+                    "Invalid NSFW level value.",
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(nsfw) = resolved_nsfw {
+        sep.push("nsfw = ");
+        sep.push_bind_unseparated(nsfw);
+        has_updates = true;
+    }
+
+    if !has_updates {
+        tx.commit().await?;
+        return Ok(Guild::from(current));
+    }
+
+    query.push(" WHERE id = ");
+    query.push_bind(guild_id);
+    query.build().execute(&mut *tx).await?;
+
+    let updated_base = sqlx::query_as::<_, BaseGuild>("SELECT * FROM guilds WHERE id = ?")
+        .bind(guild_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    let updated = Guild::from(updated_base);
+    state
+        .dispatch_guild(events::GUILD_UPDATE, &updated, guild_id)
+        .await;
+
+    Ok(updated)
+}
+
+pub async fn delete_guild(state: &AppState, guild_id: &str, user_id: &str) -> Result<(), AppError> {
+    let owner_id: String = sqlx::query_scalar("SELECT owner_id FROM guilds WHERE id = ?")
+        .bind(guild_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(AppError::unknown_guild)?;
+
+    if owner_id != user_id {
+        return Err(AppError::missing_permissions());
+    }
+
+    let res = sqlx::query("DELETE FROM guilds WHERE id = ?")
+        .bind(guild_id)
+        .execute(&state.db)
+        .await?;
+
+    if res.rows_affected() == 0 {
+        return Err(AppError::unknown_guild());
+    }
+
+    state
+        .dispatch_guild(
+            events::GUILD_DELETE,
+            &GuildDeleteEvent { id: guild_id },
+            guild_id,
+        )
+        .await;
+    state.remove_guild(guild_id).await;
+
+    Ok(())
+}
+
+fn validate_guild_asset_opt(field: &str, value: Option<&str>) -> Result<Option<String>, AppError> {
+    let Some(trimmed) = value.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if trimmed.len() > MAX_ASSET_HASH_LENGTH
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(AppError::validation(
+            field,
+            ValidationCode::InvalidFormat,
+            format!("Invalid {field} identifier."),
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 pub async fn get_user_guilds(
     state: &AppState,
     user_id: &str,
@@ -407,16 +771,17 @@ async fn load_guilds_base_data(
         });
     }
 
-    let mut cqb = QueryBuilder::<MySql>::new(
-        "SELECT id, type, position, guild_id, parent_id, name, last_message_id FROM channels WHERE guild_id IN (",
-    );
+    let mut cqb = QueryBuilder::<MySql>::new(format!(
+        "SELECT {} FROM channels WHERE guild_id IN (",
+        ChannelRow::SELECT_COLS
+    ));
     let mut sep = cqb.separated(", ");
     for g in &guilds {
         sep.push_bind(&g.id);
     }
     cqb.push(") ORDER BY position ASC");
     let channel_rows = cqb
-        .build_query_as::<GuildChannel>()
+        .build_query_as::<ChannelRow>()
         .fetch_all(&state.db)
         .await?;
 
@@ -450,17 +815,17 @@ async fn load_guilds_base_data(
         channels_by_guild
             .entry(gid)
             .or_default()
-            .push(ChannelResponse::from_parts(ch, ows));
+            .push(ChannelResponse::from_row(ch, ows));
     }
 
     let mut rqb = QueryBuilder::<MySql>::new(
-        "SELECT guild_id, id, position, name, color, unicode_emoji, hoist, mentionable, permissions FROM roles WHERE guild_id IN (",
+        "SELECT guild_id, id, position, name, color, hoist_position, icon, unicode_emoji, hoist, mentionable, permissions FROM roles WHERE guild_id IN (",
     );
     let mut sep = rqb.separated(", ");
     for g in &guilds {
         sep.push_bind(&g.id);
     }
-    rqb.push(") ORDER BY position DESC");
+    rqb.push(") ORDER BY position DESC, CAST(id AS UNSIGNED) DESC");
     let role_rows = rqb
         .build_query_as::<GuildRoleBatchRow>()
         .fetch_all(&state.db)
@@ -484,6 +849,8 @@ async fn load_guilds_base_data(
                 position: r.position,
                 name: r.name,
                 color: r.color,
+                hoist_position: r.hoist_position,
+                icon: r.icon,
                 unicode_emoji: r.unicode_emoji,
                 hoist: r.hoist,
                 mentionable: r.mentionable,

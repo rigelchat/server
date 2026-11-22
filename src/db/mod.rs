@@ -98,7 +98,11 @@ pub async fn init(database_url: &str, max_connections: u32) -> Result<MySqlPool,
             afk_timeout INT UNSIGNED NOT NULL DEFAULT 300,
             system_channel_id VARCHAR(20) DEFAULT NULL,
             system_channel_flags INT UNSIGNED NOT NULL DEFAULT 0,
-            discoverable BOOLEAN NOT NULL DEFAULT FALSE
+            discoverable BOOLEAN NOT NULL DEFAULT FALSE,
+            verification_level TINYINT UNSIGNED NOT NULL DEFAULT 0,
+            default_message_notifications TINYINT UNSIGNED NOT NULL DEFAULT 0,
+            explicit_content_filter TINYINT UNSIGNED NOT NULL DEFAULT 0,
+            nsfw BOOLEAN NOT NULL DEFAULT FALSE
         )
         "#,
     )
@@ -113,6 +117,8 @@ pub async fn init(database_url: &str, max_connections: u32) -> Result<MySqlPool,
             position INT UNSIGNED NOT NULL,
             name VARCHAR(100) NOT NULL,
             color INT UNSIGNED NOT NULL DEFAULT 0,
+            hoist_position INT DEFAULT NULL,
+            icon VARCHAR(255) DEFAULT NULL,
             unicode_emoji VARCHAR(32) DEFAULT NULL,
             hoist BOOLEAN NOT NULL DEFAULT FALSE,
             mentionable BOOLEAN NOT NULL DEFAULT FALSE,
@@ -134,6 +140,16 @@ pub async fn init(database_url: &str, max_connections: u32) -> Result<MySqlPool,
             parent_id VARCHAR(20) DEFAULT NULL,
             name TEXT NOT NULL,
             last_message_id VARCHAR(20) DEFAULT NULL,
+            topic VARCHAR(1024) DEFAULT NULL,
+            url VARCHAR(2048) DEFAULT NULL,
+            nsfw BOOLEAN NOT NULL DEFAULT FALSE,
+            nsfw_override BOOLEAN DEFAULT NULL,
+            content_warning_level TINYINT UNSIGNED NOT NULL DEFAULT 0,
+            content_warning_text VARCHAR(200) DEFAULT NULL,
+            rate_limit_per_user INT UNSIGNED NOT NULL DEFAULT 0,
+            bitrate INT UNSIGNED DEFAULT NULL,
+            user_limit INT UNSIGNED DEFAULT NULL,
+            voice_connection_limit INT UNSIGNED DEFAULT NULL,
             FOREIGN KEY (guild_id) REFERENCES guilds(id) ON DELETE CASCADE,
             FOREIGN KEY (parent_id) REFERENCES channels(id) ON DELETE SET NULL
         )
@@ -244,23 +260,29 @@ pub async fn init(database_url: &str, max_connections: u32) -> Result<MySqlPool,
     .execute(&pool)
     .await?;
 
-    let has_last_message_id: (i64,) = sqlx::query_as(
-        r#"
-        SELECT COUNT(*)
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME = 'channels'
-          AND COLUMN_NAME = 'last_message_id'
-        "#,
+    ensure_column(&pool, "channels", "last_message_id", "VARCHAR(20) DEFAULT NULL").await?;
+    ensure_column(&pool, "channels", "topic", "VARCHAR(1024) DEFAULT NULL").await?;
+    ensure_column(&pool, "channels", "url", "VARCHAR(2048) DEFAULT NULL").await?;
+    ensure_column(&pool, "channels", "nsfw", "BOOLEAN NOT NULL DEFAULT FALSE").await?;
+    ensure_column(&pool, "channels", "nsfw_override", "BOOLEAN DEFAULT NULL").await?;
+    ensure_column(&pool, "channels", "content_warning_level", "TINYINT UNSIGNED NOT NULL DEFAULT 0").await?;
+    ensure_column(&pool, "channels", "content_warning_text", "VARCHAR(200) DEFAULT NULL").await?;
+    ensure_column(&pool, "channels", "rate_limit_per_user", "INT UNSIGNED NOT NULL DEFAULT 0").await?;
+    ensure_column(&pool, "channels", "bitrate", "INT UNSIGNED DEFAULT NULL").await?;
+    ensure_column(&pool, "channels", "user_limit", "INT UNSIGNED DEFAULT NULL").await?;
+    ensure_column(&pool, "channels", "voice_connection_limit", "INT UNSIGNED DEFAULT NULL").await?;
+    ensure_column(&pool, "roles", "hoist_position", "INT DEFAULT NULL").await?;
+    ensure_column(&pool, "roles", "icon", "VARCHAR(255) DEFAULT NULL").await?;
+    ensure_column(&pool, "guilds", "verification_level", "TINYINT UNSIGNED NOT NULL DEFAULT 0").await?;
+    ensure_column(
+        &pool,
+        "guilds",
+        "default_message_notifications",
+        "TINYINT UNSIGNED NOT NULL DEFAULT 0",
     )
-    .fetch_one(&pool)
     .await?;
-
-    if has_last_message_id.0 == 0 {
-        sqlx::query("ALTER TABLE channels ADD COLUMN last_message_id VARCHAR(20) DEFAULT NULL")
-            .execute(&pool)
-            .await?;
-    }
+    ensure_column(&pool, "guilds", "explicit_content_filter", "TINYINT UNSIGNED NOT NULL DEFAULT 0").await?;
+    ensure_column(&pool, "guilds", "nsfw", "BOOLEAN NOT NULL DEFAULT FALSE").await?;
 
     ensure_index(&pool, "guilds", "idx_guilds_discoverable", "discoverable").await?;
     ensure_index(
@@ -272,6 +294,34 @@ pub async fn init(database_url: &str, max_connections: u32) -> Result<MySqlPool,
     .await?;
 
     Ok(pool)
+}
+
+async fn ensure_column(
+    pool: &MySqlPool,
+    table: &str,
+    column_name: &str,
+    definition_sql: &str,
+) -> Result<(), sqlx::Error> {
+    let exists: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = ?
+          AND COLUMN_NAME = ?
+        "#,
+    )
+    .bind(table)
+    .bind(column_name)
+    .fetch_one(pool)
+    .await?;
+
+    if exists.0 == 0 {
+        let ddl = format!("ALTER TABLE {table} ADD COLUMN {column_name} {definition_sql}");
+        sqlx::query(&ddl).execute(pool).await?;
+    }
+
+    Ok(())
 }
 
 // TODO: review whether runtime index checks can move to dedicated migrations

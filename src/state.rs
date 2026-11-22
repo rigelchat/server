@@ -27,6 +27,10 @@ impl AppState {
         self.hub.remove_user_guild(user_id, guild_id);
     }
 
+    pub async fn remove_guild(&self, guild_id: &str) {
+        self.hub.remove_guild(guild_id);
+    }
+
     pub fn dispatch_to_sessions<T: Serialize>(
         &self,
         sessions: &[Arc<GatewaySession>],

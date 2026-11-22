@@ -21,6 +21,10 @@ pub struct BaseGuild {
     pub system_channel_id: Option<String>,
     pub system_channel_flags: u32,
     pub discoverable: bool,
+    pub verification_level: u8,
+    pub default_message_notifications: u8,
+    pub explicit_content_filter: u8,
+    pub nsfw: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -108,14 +112,14 @@ impl From<BaseGuild> for Guild {
                 vec![]
             },
             badge_ids: vec![],
-            verification_level: 0,
+            verification_level: g.verification_level,
             mfa_level: 0,
-            nsfw_level: 0,
-            nsfw: false,
+            nsfw_level: if g.nsfw { 3 } else { 0 },
+            nsfw: g.nsfw,
             content_warning_level: 0,
             content_warning_text: None,
-            explicit_content_filter: 0,
-            default_message_notifications: 0,
+            explicit_content_filter: g.explicit_content_filter,
+            default_message_notifications: g.default_message_notifications,
             disabled_operations: 0,
             message_history_cutoff: None,
             permissions: None,
