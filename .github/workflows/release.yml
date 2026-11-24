@@ -94,6 +94,7 @@ jobs:
           - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu }
           - { os: ubuntu-latest,  target: armv7-unknown-linux-gnueabihf }
           - { os: ubuntu-latest,  target: arm-unknown-linux-musleabihf }
+          - { os: ubuntu-latest,  target: riscv64gc-unknown-linux-gnu }
 
           # Android
           - { os: ubuntu-latest,  target: aarch64-linux-android }
@@ -156,7 +157,13 @@ jobs:
             ${PREV_TAG:+-f previous_tag_name="$PREV_TAG"} \
             --jq '.body' || echo "")
 
-          COMMITS=$(git log "$RANGE" --pretty=format:"* %s ([%h](${{ github.server_url }}/${{ github.repository }}/commit/%H))" --no-merges)
+          COMMITS=$(git log "$RANGE" --pretty=format:"- %s ([%h](${{ github.server_url }}/${{ github.repository }}/commit/%H))" --no-merges)
+          CONTRIBUTORS=$(git log "$RANGE" --pretty=format:"- %an" | sort -u)
+
+          COMPARE_URL=""
+          if [ -n "$PREV_TAG" ]; then
+            COMPARE_URL="${{ github.server_url }}/${{ github.repository }}/compare/${PREV_TAG}...${{ github.ref_name }}"
+          fi
 
           DELIM="GH_EOF_$(date +%s%N)"
           {
@@ -166,12 +173,18 @@ jobs:
             echo "commits<<${DELIM}"
             echo "$COMMITS"
             echo "${DELIM}"
+            echo "contributors<<${DELIM}"
+            echo "$CONTRIBUTORS"
+            echo "${DELIM}"
+            echo "compare_url=${COMPARE_URL}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build Release Body
         env:
           GH_NOTES: ${{ steps.notes.outputs.gh_notes }}
           COMMITS: ${{ steps.notes.outputs.commits }}
+          CONTRIBUTORS: ${{ steps.notes.outputs.contributors }}
+          COMPARE_URL: ${{ steps.notes.outputs.compare_url }}
         run: |
           BASE_URL="${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ env.BIN_NAME }}"
           cat << 'EOF' > release_body.md
@@ -179,26 +192,36 @@ jobs:
 
           | OS | Architecture | Package | Checksum |
           | :--- | :--- | :---: | :---: |
-          | 🪟 **Windows** | `x86_64` (64-bit) | [📦 .zip](BASE_URL-x86_64-pc-windows-msvc.zip) | [🔒 sha256](BASE_URL-x86_64-pc-windows-msvc.sha256) |
-          | | `i686` (32-bit) | [📦 .zip](BASE_URL-i686-pc-windows-msvc.zip) | [🔒 sha256](BASE_URL-i686-pc-windows-msvc.sha256) |
-          | 🍎 **macOS** | Apple Silicon (`aarch64`) | [📦 .tar.gz](BASE_URL-aarch64-apple-darwin.tar.gz) | [🔒 sha256](BASE_URL-aarch64-apple-darwin.sha256) |
-          | | Intel (`x86_64`) | [📦 .tar.gz](BASE_URL-x86_64-apple-darwin.tar.gz) | [🔒 sha256](BASE_URL-x86_64-apple-darwin.sha256) |
-          | 🐧 **Linux** | `x86_64` (glibc) | [📦 .tar.gz](BASE_URL-x86_64-unknown-linux-gnu.tar.gz) | [🔒 sha256](BASE_URL-x86_64-unknown-linux-gnu.sha256) |
-          | | `x86_64` (musl static) | [📦 .tar.gz](BASE_URL-x86_64-unknown-linux-musl.tar.gz) | [🔒 sha256](BASE_URL-x86_64-unknown-linux-musl.sha256) |
-          | | `ARM64` (AArch64) | [📦 .tar.gz](BASE_URL-aarch64-unknown-linux-gnu.tar.gz) | [🔒 sha256](BASE_URL-aarch64-unknown-linux-gnu.sha256) |
-          | | `ARMv7` (32-bit HF) | [📦 .tar.gz](BASE_URL-armv7-unknown-linux-gnueabihf.tar.gz) | [🔒 sha256](BASE_URL-armv7-unknown-linux-gnueabihf.sha256) |
-          | | `ARMv6` (32-bit musl) | [📦 .tar.gz](BASE_URL-arm-unknown-linux-musleabihf.tar.gz) | [🔒 sha256](BASE_URL-arm-unknown-linux-musleabihf.sha256) |
-          | 🤖 **Android** | `ARM64` (AArch64) | [📦 .tar.gz](BASE_URL-aarch64-linux-android.tar.gz) | [🔒 sha256](BASE_URL-aarch64-linux-android.sha256) |
+          | 🪟 **Windows** | `x86_64` (64-bit) | [.zip](BASE_URL-x86_64-pc-windows-msvc.zip) | [sha256](BASE_URL-x86_64-pc-windows-msvc.sha256) |
+          | | `i686` (32-bit) | [.zip](BASE_URL-i686-pc-windows-msvc.zip) | [sha256](BASE_URL-i686-pc-windows-msvc.sha256) |
+          | 🍎 **macOS** | Apple Silicon (`aarch64`) | [.tar.gz](BASE_URL-aarch64-apple-darwin.tar.gz) | [sha256](BASE_URL-aarch64-apple-darwin.sha256) |
+          | | Intel (`x86_64`) | [.tar.gz](BASE_URL-x86_64-apple-darwin.tar.gz) | [sha256](BASE_URL-x86_64-apple-darwin.sha256) |
+          | 🐧 **Linux** | `x86_64` (glibc) | [.tar.gz](BASE_URL-x86_64-unknown-linux-gnu.tar.gz) | [sha256](BASE_URL-x86_64-unknown-linux-gnu.sha256) |
+          | | `x86_64` (musl static) | [.tar.gz](BASE_URL-x86_64-unknown-linux-musl.tar.gz) | [sha256](BASE_URL-x86_64-unknown-linux-musl.sha256) |
+          | | `ARM64` (AArch64) | [.tar.gz](BASE_URL-aarch64-unknown-linux-gnu.tar.gz) | [sha256](BASE_URL-aarch64-unknown-linux-gnu.sha256) |
+          | | `ARMv7` (32-bit HF) | [.tar.gz](BASE_URL-armv7-unknown-linux-gnueabihf.tar.gz) | [sha256](BASE_URL-armv7-unknown-linux-gnueabihf.sha256) |
+          | | `ARMv6` (32-bit musl) | [.tar.gz](BASE_URL-arm-unknown-linux-musleabihf.tar.gz) | [sha256](BASE_URL-arm-unknown-linux-musleabihf.sha256) |
+          | | `RISC-V 64` (`riscv64gc`) | [.tar.gz](BASE_URL-riscv64gc-unknown-linux-gnu.tar.gz) | [sha256](BASE_URL-riscv64gc-unknown-linux-gnu.sha256) |
+          | 🤖 **Android** | `ARM64` (AArch64) | [.tar.gz](BASE_URL-aarch64-linux-android.tar.gz) | [sha256](BASE_URL-aarch64-linux-android.sha256) |
 
-          ---
           EOF
           sed -i "s|BASE_URL|${BASE_URL}|g" release_body.md
 
-          if [ -n "$GH_NOTES" ]; then
-            printf '\n%s\n' "$GH_NOTES" >> release_body.md
+          if echo "$GH_NOTES" | grep -q "## What's Changed"; then
+            printf '%s\n\n' "$GH_NOTES" >> release_body.md
           fi
 
-          printf '\n<details>\n<summary>📝 Commits in this release</summary>\n\n%s\n\n</details>\n' "$COMMITS" >> release_body.md
+          if [ -n "$COMMITS" ]; then
+            printf '## Commits\n\n%s\n\n' "$COMMITS" >> release_body.md
+          fi
+
+          if [ -n "$CONTRIBUTORS" ]; then
+            printf '## Contributors\n\n%s\n\n' "$CONTRIBUTORS" >> release_body.md
+          fi
+
+          if [ -n "$COMPARE_URL" ] && ! echo "$GH_NOTES" | grep -q "## What's Changed"; then
+            printf '**Full Changelog**: %s\n' "$COMPARE_URL" >> release_body.md
+          fi
 
           cat release_body.md
 
