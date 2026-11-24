@@ -206,7 +206,7 @@ jobs:
           | | `RISC-V 64` (`riscv64gc`) | [.tar.gz](BASE_URL-riscv64gc-unknown-linux-gnu.tar.gz) | [sha256](BASE_URL-riscv64gc-unknown-linux-gnu.sha256) |
           | 🤖 **Android** | `ARM64` (AArch64) | [.tar.gz](BASE_URL-aarch64-linux-android.tar.gz) | [sha256](BASE_URL-aarch64-linux-android.sha256) |
 
-          <sub>For Linux, prefer <code>musl static</code> on Docker, Alpine, or older distributions.</sub>
+          *For Linux, prefer <code>musl static</code> on Docker, Alpine, or older distributions.*
 
           EOF
           sed -i "s|BASE_URL|${BASE_URL}|g" release_body.md
