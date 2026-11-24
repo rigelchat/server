@@ -149,7 +149,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PREV_TAG=$(git describe --tags --abbrev=0 --match "v[0-9]*" HEAD^ 2>/dev/null || echo "")
-
+  
+          COMMIT_COUNT=$(git rev-list --count "${PREV_TAG:+${PREV_TAG}..}HEAD")
+          CONTRIB_COUNT=$(git log "${PREV_TAG:+${PREV_TAG}..}HEAD" --format="%ae" | sort -u | wc -l)
+  
           GH_NOTES=""
           if [ -n "$PREV_TAG" ]; then
             GH_NOTES=$(gh api "repos/${{ github.repository }}/releases/generate-notes" \
@@ -188,7 +191,7 @@ jobs:
         run: |
           BASE_URL="${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ env.BIN_NAME }}"
           cat << 'EOF' > release_body.md
-          `rigel-server` TAG_NAME is ready.
+          Rigel Server **TAG_NAME** is now available, with COMMIT_COUNT changes from CONTRIB_COUNT contributors.
 
           ## Downloads
 
