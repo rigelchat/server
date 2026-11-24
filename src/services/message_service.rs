@@ -5,15 +5,16 @@ use crate::AppState;
 use crate::constants::flags::PermissionFlags;
 use crate::constants::gateway::events;
 use crate::constants::limits::{
-    DEFAULT_MESSAGES_PAGE_LIMIT, MAX_MESSAGE_LENGTH, MAX_MESSAGES_PAGE_LIMIT,
+    DEFAULT_MESSAGES_PAGE_LIMIT, MAX_MESSAGE_LENGTH, MAX_MESSAGE_NONCE_LENGTH,
+    MAX_MESSAGES_PAGE_LIMIT,
 };
 use crate::error::{AppError, ValidationCode};
 use crate::models::channel::ChannelType;
 use crate::models::gateway::events::{GatewayMessageEvent, MessageDeleteEvent, MessageMember};
 use crate::models::message::{Message, MessageDbRow, MessageType};
 use crate::models::rest::messages::GetMessagesQuery;
-use crate::services::permission_service;
-use crate::utils::snowflake::DISCORD_SNOWFLAKE;
+use crate::services::{permission_service, queries, user};
+use crate::utils::snowflake::{DISCORD_SNOWFLAKE, validate_snowflake};
 
 #[derive(FromRow)]
 struct ChannelMetaRow {
@@ -34,6 +35,34 @@ fn validate_message_content(content: &str) -> Result<(), AppError> {
         ));
     }
     Ok(())
+}
+
+fn validate_nonce(raw: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(trimmed) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if trimmed.chars().count() > MAX_MESSAGE_NONCE_LENGTH || trimmed.chars().any(char::is_control) {
+        return Err(AppError::validation(
+            "nonce",
+            ValidationCode::StringLengthInvalid,
+            "Nonce must be between 1 and 32 characters.",
+        ));
+    }
+    Ok(Some(trimmed))
+}
+
+fn parse_snowflake_opt(field: &str, value: Option<&str>) -> Result<Option<u64>, AppError> {
+    let Some(s) = value else {
+        return Ok(None);
+    };
+    validate_snowflake(field, s)?;
+    s.parse::<u64>().map(Some).map_err(|_| {
+        AppError::validation(
+            field,
+            ValidationCode::InvalidFormat,
+            format!("Invalid snowflake for '{field}'."),
+        )
+    })
 }
 
 async fn get_channel_meta(state: &AppState, channel_id: &str) -> Result<ChannelMetaRow, AppError> {
@@ -63,37 +92,20 @@ async fn fetch_message_member(
     let (nick, joined_at) = row?;
     let roles = match preloaded_roles {
         Some(r) => r,
-        None => sqlx::query_scalar(
-            "SELECT role_id FROM guild_member_roles WHERE guild_id = ? AND user_id = ? AND role_id != ?",
-        )
-        .bind(guild_id)
-        .bind(user_id)
-        .bind(guild_id)
-        .fetch_all(&state.db)
-        .await
-        .unwrap_or_default(),
+        None => queries::fetch_member_roles(&state.db, guild_id, user_id)
+            .await
+            .unwrap_or_default(),
     };
 
     Some(MessageMember::new(nick, roles, joined_at))
 }
 
 async fn fetch_message(state: &AppState, message_id: &str) -> Result<Message, AppError> {
-    let row = sqlx::query_as::<_, MessageDbRow>(
-        r#"
-        SELECT
-            m.id, m.channel_id, m.content, m.timestamp, m.edited_timestamp,
-            m.type AS kind, m.flags,
-            u.id AS author_id, u.username, u.discriminator, u.global_name, u.avatar,
-            u.bot, u.public_flags
-        FROM messages m
-        INNER JOIN users u ON u.id = m.author_id
-        WHERE m.id = ?
-        "#,
-    )
-    .bind(message_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(AppError::unknown_message)?;
+    let row = sqlx::query_as::<_, MessageDbRow>(&format!("{SELECT_MSG_COLS} WHERE m.id = ?"))
+        .bind(message_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(AppError::unknown_message)?;
 
     Ok(Message::from(row))
 }
@@ -114,9 +126,9 @@ pub async fn get_messages(
     user_id: &str,
     query: GetMessagesQuery,
 ) -> Result<Vec<Message>, AppError> {
-    crate::utils::snowflake::validate_snowflake_opt("before", query.before.as_deref())?;
-    crate::utils::snowflake::validate_snowflake_opt("after", query.after.as_deref())?;
-    crate::utils::snowflake::validate_snowflake_opt("around", query.around.as_deref())?;
+    let before_num = parse_snowflake_opt("before", query.before.as_deref())?;
+    let after_num = parse_snowflake_opt("after", query.after.as_deref())?;
+    let around_num = parse_snowflake_opt("around", query.around.as_deref())?;
 
     let meta = get_channel_meta(state, channel_id).await?;
     let perms = permission_service::require_channel_permission(
@@ -127,7 +139,9 @@ pub async fn get_messages(
         PermissionFlags::VIEW_CHANNEL,
     )
     .await?;
-    if meta.channel_type == ChannelType::GuildCategory as u32 {
+    if meta.channel_type == ChannelType::GuildCategory as u32
+        || meta.channel_type == ChannelType::GuildLink as u32
+    {
         return Err(AppError::invalid_channel_type());
     }
 
@@ -140,11 +154,11 @@ pub async fn get_messages(
         .unwrap_or(DEFAULT_MESSAGES_PAGE_LIMIT)
         .clamp(1, MAX_MESSAGES_PAGE_LIMIT);
 
-    let rows = if let Some(around) = &query.around {
+    let rows = if let Some(around) = around_num {
         let half_newer = limit / 2;
         let mut newer = if half_newer > 0 {
             let mut n = sqlx::query_as::<_, MessageDbRow>(&format!(
-                "{SELECT_MSG_COLS} WHERE m.channel_id = ? AND CAST(m.id AS UNSIGNED) > CAST(? AS UNSIGNED) ORDER BY CAST(m.id AS UNSIGNED) ASC LIMIT ?"
+                "{SELECT_MSG_COLS} WHERE m.channel_id = ? AND m.id_num > ? ORDER BY m.id_num ASC LIMIT ?"
             ))
             .bind(channel_id)
             .bind(around)
@@ -160,7 +174,7 @@ pub async fn get_messages(
         let remaining = limit.saturating_sub(newer.len() as u32).max(1);
 
         let older = sqlx::query_as::<_, MessageDbRow>(&format!(
-            "{SELECT_MSG_COLS} WHERE m.channel_id = ? AND CAST(m.id AS UNSIGNED) <= CAST(? AS UNSIGNED) ORDER BY CAST(m.id AS UNSIGNED) DESC LIMIT ?"
+            "{SELECT_MSG_COLS} WHERE m.channel_id = ? AND m.id_num <= ? ORDER BY m.id_num DESC LIMIT ?"
         ))
         .bind(channel_id)
         .bind(around)
@@ -170,9 +184,9 @@ pub async fn get_messages(
 
         newer.extend(older);
         newer
-    } else if let Some(after) = &query.after {
+    } else if let Some(after) = after_num {
         let mut rows = sqlx::query_as::<_, MessageDbRow>(&format!(
-            "{SELECT_MSG_COLS} WHERE m.channel_id = ? AND CAST(m.id AS UNSIGNED) > CAST(? AS UNSIGNED) ORDER BY CAST(m.id AS UNSIGNED) ASC LIMIT ?"
+            "{SELECT_MSG_COLS} WHERE m.channel_id = ? AND m.id_num > ? ORDER BY m.id_num ASC LIMIT ?"
         ))
         .bind(channel_id)
         .bind(after)
@@ -181,9 +195,9 @@ pub async fn get_messages(
         .await?;
         rows.reverse();
         rows
-    } else if let Some(before) = &query.before {
+    } else if let Some(before) = before_num {
         sqlx::query_as::<_, MessageDbRow>(&format!(
-            "{SELECT_MSG_COLS} WHERE m.channel_id = ? AND CAST(m.id AS UNSIGNED) < CAST(? AS UNSIGNED) ORDER BY CAST(m.id AS UNSIGNED) DESC LIMIT ?"
+            "{SELECT_MSG_COLS} WHERE m.channel_id = ? AND m.id_num < ? ORDER BY m.id_num DESC LIMIT ?"
         ))
         .bind(channel_id)
         .bind(before)
@@ -192,7 +206,7 @@ pub async fn get_messages(
         .await?
     } else {
         sqlx::query_as::<_, MessageDbRow>(&format!(
-            "{SELECT_MSG_COLS} WHERE m.channel_id = ? ORDER BY CAST(m.id AS UNSIGNED) DESC LIMIT ?"
+            "{SELECT_MSG_COLS} WHERE m.channel_id = ? ORDER BY m.id_num DESC LIMIT ?"
         ))
         .bind(channel_id)
         .bind(limit)
@@ -211,6 +225,7 @@ pub async fn create_message(
     nonce: Option<String>,
 ) -> Result<Message, AppError> {
     validate_message_content(&content)?;
+    let nonce = validate_nonce(nonce)?;
 
     let meta = get_channel_meta(state, channel_id).await?;
     let (perm_ctx, member_roles, _) = permission_service::require_channel_permission_with_ctx(
@@ -221,7 +236,9 @@ pub async fn create_message(
         PermissionFlags::VIEW_CHANNEL | PermissionFlags::SEND_MESSAGES,
     )
     .await?;
-    if meta.channel_type == ChannelType::GuildCategory as u32 {
+    if meta.channel_type == ChannelType::GuildCategory as u32
+        || meta.channel_type == ChannelType::GuildLink as u32
+    {
         return Err(AppError::cannot_send_in_non_text_channel());
     }
 
@@ -250,8 +267,30 @@ pub async fn create_message(
 
     tx.commit().await?;
 
-    let mut msg = fetch_message(state, &message_id).await?;
-    msg.nonce = nonce;
+    let author = match state.hub.get_cached_partial_user(user_id) {
+        Some(u) => u,
+        None => user::get_partial_user(state, user_id).await?,
+    };
+
+    let msg = Message {
+        id: message_id,
+        channel_id: channel_id.to_string(),
+        author,
+        kind: MessageType::Default as u32,
+        flags: 0,
+        content,
+        timestamp,
+        edited_timestamp: None,
+        pinned: false,
+        mention_everyone: false,
+        tts: false,
+        mentions: vec![],
+        mention_roles: vec![],
+        embeds: vec![],
+        attachments: vec![],
+        stickers: vec![],
+        nonce,
+    };
 
     let member = fetch_message_member(state, &meta.guild_id, user_id, member_roles).await;
     let event = GatewayMessageEvent {
@@ -379,7 +418,7 @@ pub async fn delete_message(
         SET last_message_id = (
             SELECT m.id FROM messages m
             WHERE m.channel_id = ?
-            ORDER BY CAST(m.id AS UNSIGNED) DESC
+            ORDER BY m.id_num DESC
             LIMIT 1
         )
         WHERE id = ? AND last_message_id = ?
@@ -408,4 +447,35 @@ pub async fn delete_message(
     .await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_message_content_and_nonce() {
+        assert!(validate_message_content("   ").is_err());
+        assert!(validate_message_content("hello").is_ok());
+        assert!(validate_message_content(&"a".repeat(MAX_MESSAGE_LENGTH + 1)).is_err());
+
+        assert_eq!(validate_nonce(None).unwrap(), None);
+        assert_eq!(validate_nonce(Some("   ".to_string())).unwrap(), None);
+        assert_eq!(
+            validate_nonce(Some(" 12345 ".to_string())).unwrap(),
+            Some("12345".to_string())
+        );
+        assert!(validate_nonce(Some("x".repeat(MAX_MESSAGE_NONCE_LENGTH + 1))).is_err());
+        assert!(validate_nonce(Some("bad\nnonce".to_string())).is_err());
+    }
+
+    #[test]
+    fn parses_optional_snowflakes() {
+        assert_eq!(parse_snowflake_opt("before", None).unwrap(), None);
+        assert_eq!(
+            parse_snowflake_opt("before", Some("123456789012345678")).unwrap(),
+            Some(123456789012345678)
+        );
+        assert!(parse_snowflake_opt("before", Some("abc")).is_err());
+    }
 }

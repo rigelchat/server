@@ -52,7 +52,6 @@ pub struct AuthConfig {
 pub struct FeatureConfig {
     pub guild_creation_policy: GuildCreationPolicy,
     pub enable_attachments: bool,
-    pub enable_auto_emoji_sync: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -117,24 +116,26 @@ impl AppConfig {
             _ => GuildCreationPolicy::Staff,
         };
 
+        let secret = require_env("AUTH_SECRET");
+        assert!(
+            secret != "replace_with_a_secure_random_secret" && secret.trim().len() >= 32,
+            "AUTH_SECRET must be changed from the example placeholder and be at least 32 characters long"
+        );
+
         Self {
             host: optional_env("HOST").unwrap_or_else(|| "127.0.0.1".to_string()),
             port: env_parse("PORT", 3000),
-            public_http_url: require_env("PUBLIC_HTTP_URL"),
-            public_ws_url: require_env("PUBLIC_WS_URL"),
+            public_http_url: require_env("PUBLIC_HTTP_URL")
+                .trim_end_matches('/')
+                .to_string(),
+            public_ws_url: require_env("PUBLIC_WS_URL")
+                .trim_end_matches('/')
+                .to_string(),
             cors_allowed_origins,
             database_url: require_env("DATABASE_URL"),
             db_max_connections: env_parse("DB_MAX_CONNECTIONS", 16),
             auth: AuthConfig {
-                secret: {
-                    let s = require_env("AUTH_SECRET");
-                    if s == "replace_with_a_secure_random_secret" || s.len() < 32 {
-                        tracing::warn!(
-                            "AUTH_SECRET is weak or uses the example placeholder; set a random secret of at least 32 characters in production"
-                        );
-                    }
-                    s
-                },
+                secret,
                 login_mode,
                 tag_style,
                 registration_mode,
@@ -143,7 +144,7 @@ impl AppConfig {
                 name: optional_env("INSTANCE_NAME").unwrap_or_else(|| "Rigel".to_string()),
                 description: optional_env("INSTANCE_DESCRIPTION"),
                 image: optional_env("INSTANCE_IMAGE"),
-                color: optional_env("INSTANCE_COLOR"),
+                color: optional_env("INSTANCE_COLOR").map(|c| c.trim().to_ascii_lowercase()),
                 country_code: optional_env("INSTANCE_COUNTRY_CODE")
                     .unwrap_or_else(|| "FR".to_string())
                     .to_ascii_uppercase(),
@@ -158,7 +159,6 @@ impl AppConfig {
             features: FeatureConfig {
                 guild_creation_policy,
                 enable_attachments: env_bool("ENABLE_ATTACHMENTS", false),
-                enable_auto_emoji_sync: env_bool("ENABLE_AUTO_EMOJI_SYNC", true),
             },
         }
     }

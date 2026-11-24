@@ -15,7 +15,7 @@ use crate::models::rest::users::{
     UpdateProfileRequest, UpdateSettingsRequest, UpdateUserRequest, UserProfileResponse,
 };
 use crate::models::user::{CurrentUser, UserSettings};
-use crate::services::{guild_service, member_service, user_service};
+use crate::services::{guild, member_service, user};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -33,7 +33,7 @@ async fn get_current_user(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<CurrentUser>, AppError> {
-    let user = user_service::get_current_user(&state, &auth.user_id).await?;
+    let user = user::get_current_user(&state, &auth.user_id).await?;
     Ok(Json(user))
 }
 
@@ -42,7 +42,7 @@ async fn update_user(
     auth: AuthUser,
     AppJson(payload): AppJson<UpdateUserRequest>,
 ) -> Result<Json<CurrentUser>, AppError> {
-    let updated = user_service::update_user(&state, &auth.user_id, payload).await?;
+    let updated = user::update_user(&state, &auth.user_id, payload).await?;
     Ok(Json(updated))
 }
 
@@ -51,7 +51,7 @@ async fn update_profile(
     auth: AuthUser,
     AppJson(payload): AppJson<UpdateProfileRequest>,
 ) -> Result<Json<UserProfileResponse>, AppError> {
-    let profile = user_service::update_profile(&state, &auth.user_id, payload).await?;
+    let profile = user::update_profile(&state, &auth.user_id, payload).await?;
     Ok(Json(profile))
 }
 
@@ -59,7 +59,7 @@ async fn get_settings(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<UserSettings>, AppError> {
-    let settings = user_service::get_settings(&state, &auth.user_id).await?;
+    let settings = user::get_settings(&state, &auth.user_id).await?;
     Ok(Json(settings))
 }
 
@@ -68,7 +68,7 @@ async fn update_settings(
     auth: AuthUser,
     AppJson(payload): AppJson<UpdateSettingsRequest>,
 ) -> Result<Json<UserSettings>, AppError> {
-    let settings = user_service::update_settings(&state, &auth.user_id, payload).await?;
+    let settings = user::update_settings(&state, &auth.user_id, payload).await?;
     Ok(Json(settings))
 }
 
@@ -100,6 +100,6 @@ async fn get_guilds(
     auth: AuthUser,
     Query(query): Query<ListGuildsQuery>,
 ) -> Result<Json<Vec<Guild>>, AppError> {
-    let guilds = guild_service::get_user_guilds(&state, &auth.user_id, query).await?;
+    let guilds = guild::get_user_guilds(&state, &auth.user_id, query).await?;
     Ok(Json(guilds))
 }

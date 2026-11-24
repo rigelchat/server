@@ -12,9 +12,10 @@ use crate::AppState;
 use crate::error::AppError;
 use crate::extractors::{AppJson, AuthUser};
 use crate::models::channel::ChannelResponse;
-use crate::models::invite::{CreateInviteRequest, CreatedInvite};
+use crate::models::invite::CreatedInvite;
 use crate::models::rest::channels::{SetPermissionOverwriteRequest, UpdateChannelRequest};
-use crate::services::{channel_service, invite_service};
+use crate::models::rest::invites::CreateInviteRequest;
+use crate::services::{channel, invite_service};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -37,7 +38,7 @@ async fn get_channel(
     auth: AuthUser,
     Path(channel_id): Path<String>,
 ) -> Result<Json<ChannelResponse>, AppError> {
-    let channel = channel_service::get_channel(&state, &channel_id, &auth.user_id).await?;
+    let channel = channel::get_channel(&state, &channel_id, &auth.user_id).await?;
     Ok(Json(channel))
 }
 
@@ -47,8 +48,7 @@ async fn update_channel(
     Path(channel_id): Path<String>,
     AppJson(payload): AppJson<UpdateChannelRequest>,
 ) -> Result<Json<ChannelResponse>, AppError> {
-    let channel =
-        channel_service::update_channel(&state, &channel_id, &auth.user_id, payload).await?;
+    let channel = channel::update_channel(&state, &channel_id, &auth.user_id, payload).await?;
     Ok(Json(channel))
 }
 
@@ -57,7 +57,7 @@ async fn delete_channel(
     auth: AuthUser,
     Path(channel_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    channel_service::delete_channel(&state, &channel_id, &auth.user_id).await?;
+    channel::delete_channel(&state, &channel_id, &auth.user_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -67,14 +67,8 @@ async fn set_permission_overwrite(
     Path((channel_id, overwrite_id)): Path<(String, String)>,
     AppJson(payload): AppJson<SetPermissionOverwriteRequest>,
 ) -> Result<StatusCode, AppError> {
-    channel_service::set_permission_overwrite(
-        &state,
-        &channel_id,
-        &overwrite_id,
-        &auth.user_id,
-        payload,
-    )
-    .await?;
+    channel::set_permission_overwrite(&state, &channel_id, &overwrite_id, &auth.user_id, payload)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -83,8 +77,7 @@ async fn delete_permission_overwrite(
     auth: AuthUser,
     Path((channel_id, overwrite_id)): Path<(String, String)>,
 ) -> Result<StatusCode, AppError> {
-    channel_service::delete_permission_overwrite(&state, &channel_id, &overwrite_id, &auth.user_id)
-        .await?;
+    channel::delete_permission_overwrite(&state, &channel_id, &overwrite_id, &auth.user_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

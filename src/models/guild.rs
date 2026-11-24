@@ -2,6 +2,7 @@ use serde::Serialize;
 use sqlx::FromRow;
 
 use crate::models::channel::ChannelResponse;
+use crate::models::gateway::presence::GatewayPresence;
 use crate::models::guild_member::GatewayGuildMember;
 use crate::models::role::Role;
 use crate::models::serde_helpers::serialize_millis_iso;
@@ -147,7 +148,7 @@ pub struct GatewayGuild<M = GatewayGuildMember> {
     pub members: Vec<M>,
     pub emojis: Vec<serde_json::Value>,
     pub stickers: Vec<serde_json::Value>,
-    pub presences: Vec<serde_json::Value>,
+    pub presences: Vec<GatewayPresence>,
     pub voice_states: Vec<serde_json::Value>,
     pub threads: Vec<serde_json::Value>,
     pub properties: GatewayGuildProperties,

@@ -5,6 +5,7 @@ pub mod error;
 pub mod extractors;
 pub mod gateway;
 pub mod models;
+pub mod rate_limit;
 pub mod routes;
 pub mod services;
 pub mod state;
@@ -46,10 +47,16 @@ pub fn build_app(state: AppState) -> Router {
             .allow_headers(CorsAny)
     };
 
+    let limiter = rate_limit::RateLimiter::new();
+
     Router::new()
         .nest_service("/static", ServeDir::new("static"))
         .merge(routes::router())
         .route("/gateway", axum::routing::get(gateway::handler))
+        .layer(axum::middleware::from_fn_with_state(
+            limiter,
+            rate_limit::middleware,
+        ))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)

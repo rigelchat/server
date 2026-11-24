@@ -6,7 +6,7 @@ This guide covers deploying **Rigel Server** from pre-built binaries or source, 
 
 ## 1. Prerequisites
 
-* **MySQL** `>= 8.0` or **MariaDB** `>= 10.5`
+* **MySQL** `>= 8.0` (recommended) or **MariaDB** `>= 10.5`
 * *(From source only)* **Rust** (latest stable, edition 2024)
 * *(Recommended for production)* A reverse proxy with TLS termination (**Nginx**, **Caddy**, etc.)
 
@@ -23,7 +23,7 @@ GRANT ALL PRIVILEGES ON rigel.* TO 'rigel'@'localhost';
 FLUSH PRIVILEGES;
 ```
 
-> Schema tables and idempotent column migrations are applied automatically on startup.
+> Schema tables, virtual generated columns, and indexes are created automatically on startup.
 
 ---
 
@@ -37,7 +37,7 @@ FLUSH PRIVILEGES;
    ```bash
    cp .env.example .env
    ```
-4. Start the binary:
+4. Start the binary from that directory (the server resolves `.env` and `./static/` relative to the current working directory; ensure `./static/` is writable for automatic Twemoji SVG downloads):
    ```bash
    # Linux / macOS
    chmod +x rigel-server
@@ -62,7 +62,7 @@ cargo build --release
 
 ## 4. Environment Configuration (`.env`)
 
-Generate a strong `AUTH_SECRET` before starting in production:
+Generate a strong `AUTH_SECRET` before starting (the server refuses to start if `AUTH_SECRET` uses the example placeholder or is shorter than 32 characters):
 
 ```bash
 openssl rand -base64 32
@@ -74,9 +74,9 @@ openssl rand -base64 32
 | --- | --- | --- | --- |
 | `HOST` | No | `127.0.0.1` | IP address the HTTP/WebSocket server binds to. Use `0.0.0.0` if exposed directly or across containers. |
 | `PORT` | No | `3000` | TCP port to listen on. |
-| `PUBLIC_HTTP_URL` | **Yes** | — | Public base URL without trailing slash (e.g. `https://chat.example.com`). Used in discovery endpoints. |
-| `PUBLIC_WS_URL` | **Yes** | — | Public WebSocket base URL without trailing slash (e.g. `wss://chat.example.com`). |
-| `CORS_ALLOWED_ORIGINS` | No | `*` | Comma-separated list of allowed origins (e.g. `https://chat.example.com,https://app.example.com`), or `*` to allow all. |
+| `PUBLIC_HTTP_URL` | **Yes** | — | Public base URL (e.g. `https://chat.example.com`; trailing slashes are trimmed automatically). Used in discovery endpoints. |
+| `PUBLIC_WS_URL` | **Yes** | — | Public WebSocket base URL (e.g. `wss://chat.example.com`; trailing slashes are trimmed automatically). |
+| `CORS_ALLOWED_ORIGINS` | No | `*` | Comma-separated list of allowed origins (e.g. `https://chat.example.com,https://app.example.com`). Empty or `*` allows all origins (restrict this in production). |
 | `RUST_LOG` | No | `info` | Log filter (`error`, `warn`, `info`, `debug`, `trace`). |
 
 ### Database
@@ -90,7 +90,7 @@ openssl rand -base64 32
 
 | Variable | Required | Default | Values / Description |
 | --- | --- | --- | --- |
-| `AUTH_SECRET` | **Yes** | — | Secret key used to sign session tokens (HMAC-SHA256). Rotating it invalidates all existing sessions. |
+| `AUTH_SECRET` | **Yes** | — | Secret key (>= 32 chars) used to sign session tokens (HMAC-SHA256). Rotating it invalidates all existing sessions; sessions expire after 30 days of inactivity. |
 | `AUTH_LOGIN_MODE` | No | `username` | `username` (email-less accounts) or `email` (requires and stores unique email addresses). |
 | `AUTH_TAG_STYLE` | No | `none` | `none` (fixed `0000` discriminator) or `random` (assigns a random 4-digit tag on registration). |
 | `AUTH_REGISTRATION_MODE` | No | `open` | `open` (anyone can register) or `closed` (disables registration). |
@@ -101,12 +101,12 @@ openssl rand -base64 32
 | --- | --- | --- | --- |
 | `INSTANCE_NAME` | No | `Rigel` | Public display name of your instance. |
 | `INSTANCE_DESCRIPTION` | No | — | Short instance description returned by `/api/ping`. |
-| `INSTANCE_IMAGE` | No | — | Public URL to the instance logo/icon. |
+| `INSTANCE_IMAGE` | No | — | Public URL to the instance logo/icon (returned by `/api/ping` and `/.well-known/fluxer`). |
 | `INSTANCE_COLOR` | No | — | Brand accent color in `#rrggbb` format. |
 | `INSTANCE_COUNTRY_CODE` | No | `FR` | Two-letter ISO 3166-1 alpha-2 country code sent in Gateway `READY`. |
 | `INSTANCE_CONTACT_EMAIL` | No | — | Public operator contact email returned by `/api/ping`. |
 | `INSTANCE_OWNER_ID` | No | — | User ID of the instance operator returned by `/api/ping`. |
-| `INSTANCE_WEBSITE_URL` | No | — | Public website / marketing URL. |
+| `INSTANCE_WEBSITE_URL` | No | — | Public website / marketing URL (returned by `/api/ping` and `/.well-known/fluxer`). |
 | `INSTANCE_TERMS_URL` | No | — | Terms of Service URL. |
 | `INSTANCE_PRIVACY_URL` | No | — | Privacy Policy URL. |
 | `INSTANCE_GUIDELINES_URL` | No | — | Community Guidelines URL. |
@@ -117,14 +117,15 @@ openssl rand -base64 32
 | Variable | Required | Default | Values / Description |
 | --- | --- | --- | --- |
 | `GUILD_CREATION_POLICY` | No | `staff` | `staff` (only users with the `STAFF` flag can create guilds) or `everyone` (any registered user can create guilds). |
-| `ENABLE_ATTACHMENTS` | No | `false` | Advertises attachment upload capability in `/api/.well-known/fluxer` metadata (upload endpoints are not yet implemented). |
-| `ENABLE_AUTO_EMOJI_SYNC` | No | `true` | Automatically downloads Twemoji SVG assets into `static/emoji/` in the background on startup if missing. |
+| `ENABLE_ATTACHMENTS` | No | `false` | Advertises attachment upload capability in `/.well-known/fluxer` metadata (upload endpoints are not yet implemented). |
 
 ---
 
-## 5. Reverse Proxy Setup
+## 5. Reverse Proxy & Rate Limiting
 
 Make sure `PUBLIC_HTTP_URL` uses `https://` and `PUBLIC_WS_URL` uses `wss://` when behind TLS.
+
+Rigel includes built-in in-memory HTTP and WebSocket rate limiting. When running behind a local reverse proxy (`127.0.0.1` / `::1`), `X-Real-IP` / `X-Forwarded-For` headers are used to identify client IPs, so make sure your proxy sets them accurately.
 
 ### Caddy
 
@@ -165,4 +166,4 @@ server {
 
 1. Start the server and register your first account via your client (or `POST /api/auth/register`).
 2. The first non-bot account registered automatically receives the `STAFF` flag, allowing it to create the initial guilds when `GUILD_CREATION_POLICY="staff"`.
-3. On first boot (with `ENABLE_AUTO_EMOJI_SYNC=true`), Twemoji SVG icons are downloaded automatically in the background into `static/emoji/` and served under `/static/emoji/`.
+3. On first boot, Twemoji SVG icons are downloaded automatically in the background into `static/emoji/` and served under `/static/emoji/`.

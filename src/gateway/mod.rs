@@ -163,7 +163,21 @@ async fn handle_socket(ws: WebSocket, state: AppState, zstd_stream: bool) {
 
     tokio::select! {
         _ = &mut send_task => recv_task.abort(),
-        _ = &mut recv_task => send_task.abort(),
+        _ = &mut recv_task => {
+            if session.is_closed() {
+                if tokio::time::timeout(
+                    Duration::from_secs(GATEWAY_WRITE_TIMEOUT_SECS),
+                    &mut send_task,
+                )
+                .await
+                .is_err()
+                {
+                    send_task.abort();
+                }
+            } else {
+                send_task.abort();
+            }
+        }
         _ = session.wait_for_close() => {
             send_task.abort();
             recv_task.abort();
@@ -269,45 +283,43 @@ async fn process_gateway_message(text: &str, session_id: &str, state: &AppState)
         }
     };
 
+    let Some(session) = state.hub.get(session_id) else {
+        return;
+    };
+
+    let authenticated = session.is_authenticated();
+    let is_expensive = matches!(payload.op, Opcode::LazyRequest | Opcode::PresenceUpdate);
+    if !session.check_rate_limit(authenticated, is_expensive) {
+        warn!(session_id = %session_id, op = ?payload.op, "Closing rate-limited gateway session");
+        session.close(close_codes::RATE_LIMITED);
+        return;
+    }
+
     debug!(op = ?payload.op, bytes = text.len(), "Received gateway message");
 
-    if !matches!(payload.op, Opcode::Identify | Opcode::Heartbeat) {
-        let authenticated = state
-            .hub
-            .get(session_id)
-            .is_some_and(|s| s.is_authenticated());
-        if !authenticated {
-            state
-                .hub
-                .close_session(session_id, close_codes::NOT_AUTHENTICATED);
-            return;
-        }
+    if !matches!(payload.op, Opcode::Identify | Opcode::Heartbeat) && !authenticated {
+        session.close(close_codes::NOT_AUTHENTICATED);
+        return;
     }
 
     match payload.op {
         Opcode::Identify => {
             let Some(d) = payload.d else {
-                state
-                    .hub
-                    .close_session(session_id, close_codes::DECODE_ERROR);
+                session.close(close_codes::DECODE_ERROR);
                 return;
             };
             match serde_json::from_value::<IdentifyPayload>(d) {
                 Ok(identify) => handlers::identify::handle(session_id, state, identify).await,
                 Err(err) => {
                     error!(error = %err, "Failed to parse IDENTIFY payload");
-                    state
-                        .hub
-                        .close_session(session_id, close_codes::DECODE_ERROR);
+                    session.close(close_codes::DECODE_ERROR);
                 }
             }
         }
         Opcode::Heartbeat => handlers::heartbeat::handle(session_id, state).await,
         Opcode::PresenceUpdate => {
             let Some(d) = payload.d else {
-                state
-                    .hub
-                    .close_session(session_id, close_codes::DECODE_ERROR);
+                session.close(close_codes::DECODE_ERROR);
                 return;
             };
             match serde_json::from_value::<PresenceUpdatePayload>(d) {
@@ -316,9 +328,7 @@ async fn process_gateway_message(text: &str, session_id: &str, state: &AppState)
                 }
                 Err(err) => {
                     error!(error = %err, "Failed to parse PRESENCE_UPDATE payload");
-                    state
-                        .hub
-                        .close_session(session_id, close_codes::DECODE_ERROR);
+                    session.close(close_codes::DECODE_ERROR);
                 }
             }
         }

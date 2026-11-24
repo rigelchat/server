@@ -8,6 +8,11 @@ pub const IDENTIFY_TIMEOUT_MS: u64 = 30_000;
 pub const REAPER_INTERVAL_SECS: u64 = 15;
 
 pub const MAX_PAYLOAD_BYTES: usize = 16_384;
+pub const GATEWAY_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+pub const GATEWAY_MAX_EVENTS_PER_WINDOW: u32 = 120;
+pub const GATEWAY_PRE_AUTH_MAX_EVENTS: u32 = 10;
+pub const GATEWAY_MAX_EXPENSIVE_OPS_PER_WINDOW: u32 = 30;
+pub const MAX_GATEWAY_SESSIONS_PER_USER: usize = 100;
 pub const GATEWAY_SEND_QUEUE_CAPACITY: usize = 512;
 pub const GATEWAY_WRITE_TIMEOUT_SECS: u64 = 5;
 pub const ZSTD_DECODE_CHUNK_BYTES: usize = 4_096;
@@ -118,8 +123,7 @@ pub mod close_codes {
         4009,
         "Your session timed out. Reconnect and start a new one.",
     );
-    pub const INVALID_SHARD: (u16, &str) =
-        (4010, "You sent us an invalid shard when identifying.");
+    pub const INVALID_SHARD: (u16, &str) = (4010, "You sent us an invalid shard when identifying.");
     pub const SHARDING_REQUIRED: (u16, &str) = (
         4011,
         "The session would have handled too many guilds - you are required to shard your connection in order to connect.",

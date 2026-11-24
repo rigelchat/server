@@ -125,8 +125,10 @@ impl ChannelResponse {
             last_pin_timestamp: None,
             bitrate: is_voice.then(|| row.bitrate.unwrap_or(DEFAULT_VOICE_BITRATE)),
             user_limit: is_voice.then(|| row.user_limit.unwrap_or(0)),
-            voice_connection_limit: is_voice
-                .then(|| row.voice_connection_limit.unwrap_or(DEFAULT_VOICE_CONNECTION_LIMIT)),
+            voice_connection_limit: is_voice.then(|| {
+                row.voice_connection_limit
+                    .unwrap_or(DEFAULT_VOICE_CONNECTION_LIMIT)
+            }),
             rtc_region: is_voice.then_some(None),
             rtc_p2p: is_voice.then_some(false),
             permission_overwrites,
@@ -165,4 +167,64 @@ pub enum ChannelType {
     GuildCategory = 4,
     GuildAnnouncement = 5,
     GuildLink = 998,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_row(kind: ChannelType) -> ChannelRow {
+        ChannelRow {
+            id: "100".to_string(),
+            kind: kind as u32,
+            position: 0,
+            guild_id: "1".to_string(),
+            parent_id: None,
+            name: "chan".to_string(),
+            last_message_id: None,
+            topic: None,
+            url: Some("https://example.com".to_string()),
+            nsfw: false,
+            nsfw_override: Some(true),
+            content_warning_level: 0,
+            content_warning_text: None,
+            rate_limit_per_user: 0,
+            bitrate: None,
+            user_limit: None,
+            voice_connection_limit: None,
+        }
+    }
+
+    #[test]
+    fn channel_response_serializes_type_specific_fields_only_when_applicable() {
+        let text = serde_json::to_value(ChannelResponse::from_row(
+            base_row(ChannelType::GuildText),
+            vec![],
+        ))
+        .unwrap();
+        assert_eq!(text["nsfw"], true);
+        assert!(text.get("url").is_none());
+        assert!(text.get("bitrate").is_none());
+
+        let voice = serde_json::to_value(ChannelResponse::from_row(
+            base_row(ChannelType::GuildVoice),
+            vec![],
+        ))
+        .unwrap();
+        assert_eq!(voice["bitrate"], DEFAULT_VOICE_BITRATE);
+        assert_eq!(
+            voice["voice_connection_limit"],
+            DEFAULT_VOICE_CONNECTION_LIMIT
+        );
+        assert_eq!(voice["rtc_p2p"], false);
+        assert!(voice.get("url").is_none());
+
+        let link = serde_json::to_value(ChannelResponse::from_row(
+            base_row(ChannelType::GuildLink),
+            vec![],
+        ))
+        .unwrap();
+        assert_eq!(link["url"], "https://example.com");
+        assert!(link.get("bitrate").is_none());
+    }
 }

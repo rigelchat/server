@@ -12,7 +12,7 @@ use crate::models::rest::roles::{
     CreateRoleRequest, RoleHoistPositionUpdate, RolePositionUpdate, UpdateRoleRequest,
 };
 use crate::models::role::Role;
-use crate::services::role_service;
+use crate::services::role;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -34,7 +34,7 @@ async fn get_roles(
     auth: AuthUser,
     Path(guild_id): Path<String>,
 ) -> Result<Json<Vec<Role>>, AppError> {
-    let roles = role_service::get_guild_roles(&state, &guild_id, &auth.user_id).await?;
+    let roles = role::get_guild_roles(&state, &guild_id, &auth.user_id).await?;
     Ok(Json(roles))
 }
 
@@ -44,7 +44,7 @@ async fn create_role(
     Path(guild_id): Path<String>,
     AppJson(payload): AppJson<CreateRoleRequest>,
 ) -> Result<Json<Role>, AppError> {
-    let role = role_service::create_role(&state, &guild_id, &auth.user_id, payload).await?;
+    let role = role::create_role(&state, &guild_id, &auth.user_id, payload).await?;
     Ok(Json(role))
 }
 
@@ -54,8 +54,7 @@ async fn update_role(
     Path((guild_id, role_id)): Path<(String, String)>,
     AppJson(payload): AppJson<UpdateRoleRequest>,
 ) -> Result<Json<Role>, AppError> {
-    let role =
-        role_service::update_role(&state, &guild_id, &role_id, &auth.user_id, payload).await?;
+    let role = role::update_role(&state, &guild_id, &role_id, &auth.user_id, payload).await?;
     Ok(Json(role))
 }
 
@@ -64,7 +63,7 @@ async fn delete_role(
     auth: AuthUser,
     Path((guild_id, role_id)): Path<(String, String)>,
 ) -> Result<StatusCode, AppError> {
-    role_service::delete_role(&state, &guild_id, &role_id, &auth.user_id).await?;
+    role::delete_role(&state, &guild_id, &role_id, &auth.user_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -74,7 +73,7 @@ async fn modify_role_positions(
     Path(guild_id): Path<String>,
     AppJson(payload): AppJson<Vec<RolePositionUpdate>>,
 ) -> Result<StatusCode, AppError> {
-    role_service::modify_role_positions(&state, &guild_id, &auth.user_id, payload).await?;
+    role::modify_role_positions(&state, &guild_id, &auth.user_id, payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -84,7 +83,7 @@ async fn modify_role_hoist_positions(
     Path(guild_id): Path<String>,
     AppJson(payload): AppJson<Vec<RoleHoistPositionUpdate>>,
 ) -> Result<StatusCode, AppError> {
-    role_service::modify_role_hoist_positions(&state, &guild_id, &auth.user_id, payload).await?;
+    role::modify_role_hoist_positions(&state, &guild_id, &auth.user_id, payload).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -93,6 +92,6 @@ async fn reset_role_hoist_positions(
     auth: AuthUser,
     Path(guild_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    role_service::reset_role_hoist_positions(&state, &guild_id, &auth.user_id).await?;
+    role::reset_role_hoist_positions(&state, &guild_id, &auth.user_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

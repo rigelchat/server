@@ -16,7 +16,7 @@ Rigel is an independent, minimalist chat backend built with Rust, Axum, and MySQ
 
 ## Prerequisites
 
-* **MySQL** (`>= 8.0`) or **MariaDB** (`>= 10.5`)
+* **MySQL** (`>= 8.0`) *(recommended; uses `VIRTUAL` generated columns for indexed snowflake and case-insensitive lookups)* or **MariaDB** (`>= 10.5`)
 * *(From source only)* **Rust** (latest stable, edition 2024)
 
 ## Installation & Setup
@@ -33,7 +33,7 @@ CREATE DATABASE rigel CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 cp .env.example .env
 ```
 
-Edit `.env` with your `DATABASE_URL`, a strong `AUTH_SECRET`, and your public URLs (`PUBLIC_HTTP_URL`, `PUBLIC_WS_URL`).
+Edit `.env` with your `DATABASE_URL`, a strong `AUTH_SECRET` (at least 32 characters, never the example placeholder), and your public URLs (`PUBLIC_HTTP_URL`, `PUBLIC_WS_URL`).
 
 > **Note:** On a fresh instance, the first registered non-bot account automatically receives staff privileges to bootstrap initial communities.
 
@@ -42,7 +42,7 @@ Edit `.env` with your `DATABASE_URL`, a strong `AUTH_SECRET`, and your public UR
 #### Option A: Pre-built Binary (Recommended)
 
 1. Download the archive matching your OS and architecture from the [**Latest Releases**](https://github.com/rigelchat/server/releases/latest).
-2. Extract the archive next to your `.env`.
+2. Extract the archive next to your `.env` in a writable working directory (used for `static/emoji/` for automatic Twemoji SVG downloads).
 3. Start the server:
 
 ```bash
@@ -72,7 +72,7 @@ By default, Rigel listens on `127.0.0.1:3000`:
 | --- | --- |
 | **REST API** | `http://localhost:3000/api` (`/api/v9`) |
 | **WebSocket Gateway** | `ws://localhost:3000/gateway` |
-| **Discovery** | `/api/.well-known/fluxer` · `/.well-known/spacebar/client` |
+| **Discovery** | `/.well-known/fluxer` · `/.well-known/spacebar/client` |
 | **Static Assets** | `http://localhost:3000/static` |
 
 ---

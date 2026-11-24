@@ -4,16 +4,15 @@ use sqlx::{MySql, QueryBuilder};
 use tracing::{debug, error};
 
 use crate::AppState;
-use crate::constants::gateway::events;
+use crate::constants::gateway::{close_codes, events};
 use crate::constants::user::PresenceStatus;
 use crate::gateway::hub::LivePresenceSnapshot;
-use crate::models::gateway::presence::{
-    PresenceUpdatePayload, build_presence_value, serialize_presence_user,
-};
+use crate::models::gateway::presence::{GatewayPresence, PresenceUpdatePayload, PresenceUser};
 use crate::models::gateway::ready::ClientSessionInfo;
-use crate::models::rest::users::CustomStatusInput;
-use crate::models::user::{CustomStatus, PartialUser, UserRow, UserSettingsExtras};
-use crate::services::user_service;
+use crate::models::user::{
+    CustomStatus, CustomStatusInput, PartialUser, UserRow, UserSettingsExtras,
+};
+use crate::services::user;
 
 pub fn combined_status<'a>(statuses: impl IntoIterator<Item = &'a str>) -> &'static str {
     let mut has_online = false;
@@ -90,7 +89,10 @@ async fn fetch_partial_users_batched(
         return HashMap::new();
     }
 
-    let mut qb = QueryBuilder::<MySql>::new("SELECT * FROM users WHERE id IN (");
+    let mut qb = QueryBuilder::<MySql>::new(format!(
+        "SELECT {} FROM users WHERE id IN (",
+        UserRow::SELECT_COLS
+    ));
     let mut sep = qb.separated(", ");
     for uid in user_ids {
         sep.push_bind(uid);
@@ -106,32 +108,36 @@ async fn fetch_partial_users_batched(
         .collect()
 }
 
-fn format_presence_json(
+fn build_gateway_presence(
     snap: &LivePresenceSnapshot,
     fetched_users: &HashMap<String, PartialUser>,
     guild_id: Option<&str>,
-) -> serde_json::Value {
-    let fluxer_user_val = serialize_presence_user(
-        &snap.user_id,
-        snap.partial_user
-            .as_ref()
-            .or_else(|| fetched_users.get(&snap.user_id)),
-    );
-    build_presence_value(
-        &fluxer_user_val,
-        snap.status,
-        snap.mobile,
-        snap.afk,
-        snap.custom_status.as_ref(),
-        guild_id,
-    )
+) -> GatewayPresence {
+    let user = match snap
+        .partial_user
+        .as_ref()
+        .or_else(|| fetched_users.get(&snap.user_id))
+    {
+        Some(u) => PresenceUser::Partial(u.clone()),
+        None => PresenceUser::IdOnly {
+            id: snap.user_id.clone(),
+        },
+    };
+    GatewayPresence {
+        user,
+        status: snap.status.to_string(),
+        mobile: snap.mobile,
+        afk: snap.afk,
+        custom_status: snap.custom_status.clone(),
+        guild_id: guild_id.map(str::to_string),
+    }
 }
 
 pub async fn build_ready_presences(
     state: &AppState,
     viewer_id: &str,
     guild_ids: &[String],
-) -> Vec<serde_json::Value> {
+) -> Vec<GatewayPresence> {
     let snapshots = state.hub.ready_presences_for_guilds(viewer_id, guild_ids);
     if snapshots.is_empty() {
         return vec![];
@@ -146,7 +152,7 @@ pub async fn build_ready_presences(
 
     snapshots
         .iter()
-        .map(|snap| format_presence_json(snap, &fetched, None))
+        .map(|snap| build_gateway_presence(snap, &fetched, None))
         .collect()
 }
 
@@ -154,7 +160,7 @@ pub async fn build_presence_payloads(
     state: &AppState,
     user_ids: &[String],
     guild_id: Option<&str>,
-) -> Vec<serde_json::Value> {
+) -> Vec<GatewayPresence> {
     if user_ids.is_empty() {
         return vec![];
     }
@@ -169,12 +175,15 @@ pub async fn build_presence_payloads(
 
     snapshots
         .iter()
-        .map(|snap| format_presence_json(snap, &fetched, guild_id))
+        .map(|snap| build_gateway_presence(snap, &fetched, guild_id))
         .collect()
 }
 
 pub async fn handle(session_id: &str, state: &AppState, payload: PresenceUpdatePayload) {
     let Some(session_status) = PresenceStatus::parse(&payload.status) else {
+        state
+            .hub
+            .close_session(session_id, close_codes::DECODE_ERROR);
         return;
     };
 
@@ -195,15 +204,20 @@ pub async fn handle(session_id: &str, state: &AppState, payload: PresenceUpdateP
         "Received OP 3 PRESENCE_UPDATE"
     );
 
-    if session_status != PresenceStatus::Offline
-        && payload.afk != Some(true)
-        && let Err(err) = sqlx::query("UPDATE user_settings SET status = ? WHERE id = ?")
-            .bind(&payload.status)
+    if payload.afk != Some(true) {
+        let persisted_status = if session_status == PresenceStatus::Offline {
+            "invisible"
+        } else {
+            session_status.as_str()
+        };
+        if let Err(err) = sqlx::query("UPDATE user_settings SET status = ? WHERE id = ?")
+            .bind(persisted_status)
             .bind(&user_id)
             .execute(&state.db)
             .await
-    {
-        error!(error = %err, "Failed to update status in user_settings");
+        {
+            error!(error = %err, "Failed to update status in user_settings");
+        }
     }
 
     let custom_status = if let Some(cs_opt) = payload.custom_status {
@@ -284,7 +298,7 @@ pub async fn broadcast_presence(
 
     let cached_user = match state.hub.get_cached_partial_user(user_id) {
         Some(u) => Some(u),
-        None => user_service::get_partial_user(state, user_id).await.ok(),
+        None => user::get_partial_user(state, user_id).await.ok(),
     };
 
     broadcast_presence_with_user(
@@ -322,7 +336,12 @@ pub async fn broadcast_presence_with_user(
         custom_status
     };
 
-    let fluxer_user_val = serialize_presence_user(user_id, partial_user);
+    let user = match partial_user {
+        Some(u) => PresenceUser::Partial(u.clone()),
+        None => PresenceUser::IdOnly {
+            id: user_id.to_string(),
+        },
+    };
     let Ok(event_json) = serde_json::to_string(events::PRESENCE_UPDATE) else {
         return;
     };
@@ -333,14 +352,14 @@ pub async fn broadcast_presence_with_user(
             let data_json = match serialized_by_guild.entry(guild_id) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
-                    let payload = build_presence_value(
-                        &fluxer_user_val,
-                        public_status,
+                    let payload = GatewayPresence {
+                        user: user.clone(),
+                        status: public_status.to_string(),
                         mobile,
                         afk,
-                        custom_status,
-                        Some(entry.key()),
-                    );
+                        custom_status: custom_status.cloned(),
+                        guild_id: Some(entry.key().clone()),
+                    };
                     let Ok(s) = serde_json::to_string(&payload) else {
                         continue;
                     };

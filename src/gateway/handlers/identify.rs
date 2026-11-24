@@ -3,17 +3,19 @@ use std::collections::{HashMap, HashSet};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::AppState;
-use crate::constants::gateway::{READY_VERSION, close_codes, events};
+use crate::constants::gateway::{
+    MAX_GATEWAY_SESSIONS_PER_USER, READY_VERSION, close_codes, events,
+};
 use crate::constants::limits::MAX_SESSION_PROPERTY_LENGTH;
 use crate::constants::user::PresenceStatus;
 use crate::models::gateway::IdentifyPayload;
 use crate::models::gateway::ready::{ReadyData, RtcRegion};
 use crate::models::guild::GatewayGuild;
 use crate::models::user::{CurrentUser, PartialUser, UserProfileRow, UserRow};
-use crate::services::{auth_service, guild_service, user_service};
+use crate::services::{auth_service, guild, user};
 use crate::utils::token::{TokenClaims, strip_auth_prefix, verify};
 
 use super::{lazy_request, presence};
@@ -45,18 +47,26 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         }
     };
 
-    if !auth_service::is_session_active(state, &auth_session_id, &user_id)
-        .await
-        .unwrap_or(false)
-    {
-        session.close(close_codes::AUTHENTICATION_FAILED);
-        return;
+    match auth_service::is_session_active(state, &auth_session_id, &user_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            session.close(close_codes::AUTHENTICATION_FAILED);
+            return;
+        }
+        Err(err) => {
+            error!(error = %err, "Database error verifying session during identify");
+            session.close(close_codes::UNKNOWN_ERROR);
+            return;
+        }
     }
 
-    let user_row = match sqlx::query_as::<_, UserRow>("SELECT * FROM users WHERE id = ?")
-        .bind(&user_id)
-        .fetch_optional(&state.db)
-        .await
+    let user_row = match sqlx::query_as::<_, UserRow>(&format!(
+        "SELECT {} FROM users WHERE id = ?",
+        UserRow::SELECT_COLS
+    ))
+    .bind(&user_id)
+    .fetch_optional(&state.db)
+    .await
     {
         Ok(Some(u)) => u,
         Ok(None) => {
@@ -70,6 +80,13 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
             return;
         }
     };
+
+    if !user_row.bot && state.hub.sessions_for_user(&user_id).len() >= MAX_GATEWAY_SESSIONS_PER_USER
+    {
+        warn!(user_id = %user_id, "Max concurrent gateway sessions reached for user");
+        session.close(close_codes::RATE_LIMITED);
+        return;
+    }
 
     let os: String = payload
         .properties
@@ -108,23 +125,35 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         {
             Ok(ids) => ids,
             Err(err) => {
-                error!(error = %err, "Failed to load user guilds");
-                vec![]
+                error!(error = %err, "Failed to load user guilds during identify");
+                session.close(close_codes::UNKNOWN_ERROR);
+                return;
             }
         };
 
-    let profile = sqlx::query_as::<_, UserProfileRow>(
+    let profile = match sqlx::query_as::<_, UserProfileRow>(
         "SELECT bio, pronouns, accent_color, theme_color_primary, theme_color_secondary FROM user_profiles WHERE id = ?",
     )
     .bind(&user_id)
     .fetch_optional(&state.db)
     .await
-    .ok()
-    .flatten();
+    {
+        Ok(p) => p,
+        Err(err) => {
+            error!(error = %err, "Failed to load user profile during identify");
+            session.close(close_codes::UNKNOWN_ERROR);
+            return;
+        }
+    };
 
-    let user_settings = user_service::get_settings(state, &user_id)
-        .await
-        .unwrap_or_default();
+    let user_settings = match user::get_settings(state, &user_id).await {
+        Ok(s) => s,
+        Err(err) => {
+            error!(error = %err, "Failed to load user settings during identify");
+            session.close(close_codes::UNKNOWN_ERROR);
+            return;
+        }
+    };
 
     let saved_status = user_settings.status.clone();
     let prop_mobile = payload
@@ -178,16 +207,17 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         return;
     };
 
-    debug!(user_id = %user_id, "User identified, sending READY");
-
     let guilds: Vec<GatewayGuild> =
-        match guild_service::build_gateway_guilds_batch(state, &guild_ids, &user_id).await {
+        match guild::build_gateway_guilds_batch(state, &guild_ids, &user_id).await {
             Ok(g) => g,
             Err(err) => {
                 error!(error = %err, "Failed to build gateway guilds batch");
-                vec![]
+                session.close(close_codes::UNKNOWN_ERROR);
+                return;
             }
         };
+
+    debug!(user_id = %user_id, "User identified, sending READY");
 
     let ready = ReadyData {
         auth_session_id_hash: hash_session_id(&auth_session_id),
@@ -231,9 +261,13 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
             custom_status.as_ref(),
         )
         .await;
+        let active_guilds: Vec<&String> = my_guilds
+            .iter()
+            .filter(|gid| !state.hub.guild_member_list_subscribers(gid).is_empty())
+            .collect();
         futures_util::future::join_all(
-            my_guilds
-                .iter()
+            active_guilds
+                .into_iter()
                 .map(|gid| lazy_request::refresh_guild_member_lists(state, gid)),
         )
         .await;

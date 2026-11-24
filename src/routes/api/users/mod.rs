@@ -11,7 +11,7 @@ use crate::error::AppError;
 use crate::extractors::AuthUser;
 use crate::models::rest::users::{GetProfileQuery, UserProfileResponse};
 use crate::models::user::PartialUser;
-use crate::services::user_service;
+use crate::services::user;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -25,7 +25,7 @@ async fn get_user(
     _auth: AuthUser,
     Path(user_id): Path<String>,
 ) -> Result<Json<PartialUser>, AppError> {
-    let user = user_service::get_partial_user(&state, &user_id).await?;
+    let user = user::get_partial_user(&state, &user_id).await?;
     Ok(Json(user))
 }
 
@@ -35,6 +35,6 @@ async fn get_user_profile(
     Path(user_id): Path<String>,
     Query(query): Query<GetProfileQuery>,
 ) -> Result<Json<UserProfileResponse>, AppError> {
-    let profile = user_service::get_profile(&state, &auth.user_id, &user_id, query).await?;
+    let profile = user::get_profile(&state, &auth.user_id, &user_id, query).await?;
     Ok(Json(profile))
 }

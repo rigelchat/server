@@ -1,12 +1,15 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, RwLock};
 
 use axum::extract::ws::{CloseFrame, Message};
 use serde::Serialize;
 use tokio::sync::{mpsc, watch};
 
-use crate::constants::gateway::{Opcode, close_codes};
+use crate::constants::gateway::{
+    GATEWAY_MAX_EVENTS_PER_WINDOW, GATEWAY_MAX_EXPENSIVE_OPS_PER_WINDOW,
+    GATEWAY_PRE_AUTH_MAX_EVENTS, GATEWAY_RATE_LIMIT_WINDOW_SECS, Opcode, close_codes,
+};
 use crate::constants::user::PresenceStatus;
 use crate::gateway::hub::now_millis;
 use crate::models::gateway::GatewayPayload;
@@ -22,6 +25,51 @@ struct SessionState {
     member_list_subscriptions: HashMap<String, (String, [i64; 2])>,
 }
 
+struct GatewayRateLimiter {
+    window_start_ms: u64,
+    total_events: u32,
+    expensive_events: u32,
+    pre_auth_events: u32,
+}
+
+impl GatewayRateLimiter {
+    fn new(now_ms: u64) -> Self {
+        Self {
+            window_start_ms: now_ms,
+            total_events: 0,
+            expensive_events: 0,
+            pre_auth_events: 0,
+        }
+    }
+
+    fn check(&mut self, now_ms: u64, authenticated: bool, is_expensive: bool) -> bool {
+        if !authenticated {
+            self.pre_auth_events = self.pre_auth_events.saturating_add(1);
+            return self.pre_auth_events <= GATEWAY_PRE_AUTH_MAX_EVENTS;
+        }
+
+        if now_ms.saturating_sub(self.window_start_ms) >= GATEWAY_RATE_LIMIT_WINDOW_SECS * 1000 {
+            self.window_start_ms = now_ms;
+            self.total_events = 0;
+            self.expensive_events = 0;
+        }
+
+        self.total_events = self.total_events.saturating_add(1);
+        if self.total_events > GATEWAY_MAX_EVENTS_PER_WINDOW {
+            return false;
+        }
+
+        if is_expensive {
+            self.expensive_events = self.expensive_events.saturating_add(1);
+            if self.expensive_events > GATEWAY_MAX_EXPENSIVE_OPS_PER_WINDOW {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
 pub struct GatewaySession {
     pub id: String,
     sender: mpsc::Sender<Message>,
@@ -31,6 +79,7 @@ pub struct GatewaySession {
     close_tx: watch::Sender<bool>,
     closed: AtomicBool,
     state: RwLock<SessionState>,
+    rate_limiter: Mutex<GatewayRateLimiter>,
 }
 
 impl GatewaySession {
@@ -54,7 +103,16 @@ impl GatewaySession {
                 guilds: HashSet::new(),
                 member_list_subscriptions: HashMap::new(),
             }),
+            rate_limiter: Mutex::new(GatewayRateLimiter::new(now)),
         }
+    }
+
+    pub fn check_rate_limit(&self, authenticated: bool, is_expensive: bool) -> bool {
+        let now = now_millis();
+        self.rate_limiter
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .check(now, authenticated, is_expensive)
     }
 
     pub fn touch_heartbeat(&self) {
@@ -252,7 +310,9 @@ impl GatewaySession {
     }
 
     pub fn close(&self, (code, reason): (u16, &'static str)) {
-        self.closed.store(true, Ordering::Release);
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let frame = CloseFrame {
             code,
             reason: reason.into(),
@@ -290,5 +350,28 @@ impl GatewaySession {
                 tracing::debug!(session_id = %self.id, "Failed to send to gateway client (disconnected)");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_rate_limiter_enforces_pre_auth_expensive_and_window_reset() {
+        let mut rl = GatewayRateLimiter::new(1_000);
+
+        for _ in 0..GATEWAY_PRE_AUTH_MAX_EVENTS {
+            assert!(rl.check(1_000, false, false));
+        }
+        assert!(!rl.check(1_000, false, false));
+
+        for _ in 0..GATEWAY_MAX_EXPENSIVE_OPS_PER_WINDOW {
+            assert!(rl.check(1_000, true, true));
+        }
+        assert!(!rl.check(1_000, true, true));
+
+        let next_window = 1_000 + GATEWAY_RATE_LIMIT_WINDOW_SECS * 1000;
+        assert!(rl.check(next_window, true, true));
     }
 }

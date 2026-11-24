@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::Serialize;
-use sqlx::{MySql, QueryBuilder};
+use sqlx::{MySql, MySqlConnection, QueryBuilder};
+use tracing::error;
 
 use crate::AppState;
 use crate::constants::flags::PermissionFlags;
@@ -14,7 +15,6 @@ use crate::models::channel::{
 use crate::models::guild_member::GuildMemberRole;
 use crate::models::permission::OverwriteType;
 use crate::models::role::RolePerm;
-use crate::services::member_service;
 
 #[derive(Debug, Clone)]
 pub struct ChannelPermissionContext {
@@ -118,14 +118,14 @@ pub fn compute_channel_permissions(
     perms
 }
 
-async fn load_guild_role_context(
-    state: &AppState,
+async fn load_guild_role_context_conn(
+    conn: &mut MySqlConnection,
     guild_id: &str,
     user_id: &str,
 ) -> Result<(String, Vec<RolePerm>, Vec<String>), AppError> {
     let owner_id: String = sqlx::query_scalar("SELECT owner_id FROM guilds WHERE id = ?")
         .bind(guild_id)
-        .fetch_optional(&state.db)
+        .fetch_optional(&mut *conn)
         .await?
         .ok_or_else(AppError::unknown_guild)?;
 
@@ -133,12 +133,21 @@ async fn load_guild_role_context(
         return Ok((owner_id, Vec::new(), Vec::new()));
     }
 
-    member_service::require_member(state, guild_id, user_id).await?;
+    let is_member: Option<(i32,)> =
+        sqlx::query_as("SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ? LIMIT 1")
+            .bind(guild_id)
+            .bind(user_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+
+    if is_member.is_none() {
+        return Err(AppError::missing_permissions());
+    }
 
     let roles =
         sqlx::query_as::<_, RolePerm>("SELECT id, permissions FROM roles WHERE guild_id = ?")
             .bind(guild_id)
-            .fetch_all(&state.db)
+            .fetch_all(&mut *conn)
             .await?;
 
     let member_roles: Vec<String> = sqlx::query_scalar(
@@ -147,7 +156,7 @@ async fn load_guild_role_context(
     .bind(guild_id)
     .bind(user_id)
     .bind(guild_id)
-    .fetch_all(&state.db)
+    .fetch_all(&mut *conn)
     .await?;
 
     Ok((owner_id, roles, member_roles))
@@ -158,7 +167,9 @@ pub async fn compute_guild_permissions(
     guild_id: &str,
     user_id: &str,
 ) -> Result<PermissionFlags, AppError> {
-    let (owner_id, roles, member_roles) = load_guild_role_context(state, guild_id, user_id).await?;
+    let mut conn = state.db.acquire().await?;
+    let (owner_id, roles, member_roles) =
+        load_guild_role_context_conn(&mut conn, guild_id, user_id).await?;
     Ok(compute_base_permissions(
         &owner_id,
         guild_id,
@@ -168,13 +179,14 @@ pub async fn compute_guild_permissions(
     ))
 }
 
-pub async fn compute_user_channel_permissions(
-    state: &AppState,
+pub async fn compute_user_channel_permissions_conn(
+    conn: &mut MySqlConnection,
     guild_id: &str,
     channel_id: &str,
     user_id: &str,
 ) -> Result<PermissionFlags, AppError> {
-    let (owner_id, roles, member_roles) = load_guild_role_context(state, guild_id, user_id).await?;
+    let (owner_id, roles, member_roles) =
+        load_guild_role_context_conn(conn, guild_id, user_id).await?;
     let base = compute_base_permissions(&owner_id, guild_id, user_id, &roles, &member_roles);
     if base.contains(PermissionFlags::ADMINISTRATOR) {
         return Ok(PermissionFlags::all());
@@ -184,7 +196,7 @@ pub async fn compute_user_channel_permissions(
         "SELECT channel_id, type, target_id, allow, deny FROM channel_permission_overwrites WHERE channel_id = ?",
     )
     .bind(channel_id)
-    .fetch_all(&state.db)
+    .fetch_all(conn)
     .await?
     .into_iter()
     .map(PermissionOverwrite::from)
@@ -197,6 +209,16 @@ pub async fn compute_user_channel_permissions(
         &member_roles,
         &overwrites,
     ))
+}
+
+pub async fn compute_user_channel_permissions(
+    state: &AppState,
+    guild_id: &str,
+    channel_id: &str,
+    user_id: &str,
+) -> Result<PermissionFlags, AppError> {
+    let mut conn = state.db.acquire().await?;
+    compute_user_channel_permissions_conn(&mut conn, guild_id, channel_id, user_id).await
 }
 
 pub async fn require_channel_permission(
@@ -227,7 +249,9 @@ pub async fn require_channel_permission_with_ctx(
     ),
     AppError,
 > {
-    let (owner_id, roles, member_roles) = load_guild_role_context(state, guild_id, user_id).await?;
+    let mut conn = state.db.acquire().await?;
+    let (owner_id, roles, member_roles) =
+        load_guild_role_context_conn(&mut conn, guild_id, user_id).await?;
     if owner_id == user_id {
         return Ok((None, None, PermissionFlags::all()));
     }
@@ -241,7 +265,7 @@ pub async fn require_channel_permission_with_ctx(
         "SELECT channel_id, type, target_id, allow, deny FROM channel_permission_overwrites WHERE channel_id = ?",
     )
     .bind(channel_id)
-    .fetch_all(&state.db)
+    .fetch_all(&mut *conn)
     .await?
     .into_iter()
     .map(PermissionOverwrite::from)
@@ -341,7 +365,9 @@ pub async fn filter_visible_channels(
         return Ok(channels);
     }
 
-    let (owner_id, roles, member_roles) = load_guild_role_context(state, guild_id, user_id).await?;
+    let mut conn = state.db.acquire().await?;
+    let (owner_id, roles, member_roles) =
+        load_guild_role_context_conn(&mut conn, guild_id, user_id).await?;
     Ok(filter_visible_channels_with_context(
         &owner_id,
         guild_id,
@@ -367,34 +393,48 @@ pub async fn filter_sessions_for_channel_with_ctx(
     let ctx = match ctx {
         Some(c) => c,
         None => {
-            let owner_id: Option<String> =
-                sqlx::query_scalar("SELECT owner_id FROM guilds WHERE id = ?")
-                    .bind(guild_id)
-                    .fetch_optional(&state.db)
-                    .await
-                    .ok()
-                    .flatten();
-            let Some(owner_id) = owner_id else {
-                return Vec::new();
+            let owner_id = match sqlx::query_scalar::<_, String>(
+                "SELECT owner_id FROM guilds WHERE id = ?",
+            )
+            .bind(guild_id)
+            .fetch_optional(&state.db)
+            .await
+            {
+                Ok(Some(id)) => id,
+                Ok(None) => return Vec::new(),
+                Err(err) => {
+                    error!(error = %err, guild_id = %guild_id, "Failed to load guild owner for channel dispatch");
+                    return Vec::new();
+                }
             };
 
-            let roles: Vec<RolePerm> =
-                sqlx::query_as("SELECT id, permissions FROM roles WHERE guild_id = ?")
-                    .bind(guild_id)
-                    .fetch_all(&state.db)
-                    .await
-                    .unwrap_or_default();
+            let roles: Vec<RolePerm> = match sqlx::query_as(
+                "SELECT id, permissions FROM roles WHERE guild_id = ?",
+            )
+            .bind(guild_id)
+            .fetch_all(&state.db)
+            .await
+            {
+                Ok(r) => r,
+                Err(err) => {
+                    error!(error = %err, guild_id = %guild_id, "Failed to load guild roles for channel dispatch");
+                    return Vec::new();
+                }
+            };
 
-            let overwrites: Vec<PermissionOverwrite> = sqlx::query_as::<_, ChannelOverwriteRow>(
+            let overwrites: Vec<PermissionOverwrite> = match sqlx::query_as::<_, ChannelOverwriteRow>(
                 "SELECT channel_id, type, target_id, allow, deny FROM channel_permission_overwrites WHERE channel_id = ?",
             )
             .bind(channel_id)
             .fetch_all(&state.db)
             .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(PermissionOverwrite::from)
-            .collect();
+            {
+                Ok(rows) => rows.into_iter().map(PermissionOverwrite::from).collect(),
+                Err(err) => {
+                    error!(error = %err, channel_id = %channel_id, "Failed to load channel overwrites for channel dispatch");
+                    return Vec::new();
+                }
+            };
 
             owned_ctx = ChannelPermissionContext {
                 owner_id,
@@ -428,11 +468,13 @@ pub async fn filter_sessions_for_channel_with_ctx(
         }
         qb.push(")");
 
-        let role_rows: Vec<GuildMemberRole> = qb
-            .build_query_as()
-            .fetch_all(&state.db)
-            .await
-            .unwrap_or_default();
+        let role_rows: Vec<GuildMemberRole> = match qb.build_query_as().fetch_all(&state.db).await {
+            Ok(rows) => rows,
+            Err(err) => {
+                error!(error = %err, guild_id = %guild_id, "Failed to load member roles for channel dispatch");
+                return Vec::new();
+            }
+        };
 
         for r in role_rows {
             roles_by_user.entry(r.user_id).or_default().push(r.role_id);
@@ -535,10 +577,11 @@ mod tests {
         let base = PermissionFlags::VIEW_CHANNEL
             | PermissionFlags::SEND_MESSAGES
             | PermissionFlags::ATTACH_FILES
-            | PermissionFlags::EMBED_LINKS;
+            | PermissionFlags::EMBED_LINKS
+            | PermissionFlags::MENTION_EVERYONE
+            | PermissionFlags::SEND_TTS_MESSAGES;
         let roles = vec!["r1".to_string(), "r2".to_string()];
 
-        // @everyone denies VIEW_CHANNEL, r1 denies SEND_MESSAGES, r2 allows VIEW_CHANNEL, member allows SEND_MESSAGES
         let overwrites = vec![
             ow_role(
                 "g1",
@@ -567,17 +610,54 @@ mod tests {
         assert!(perms.contains(PermissionFlags::SEND_MESSAGES));
         assert!(perms.contains(PermissionFlags::ATTACH_FILES));
 
-        // Without member overwrite, r1 denies SEND_MESSAGES -> implicitly drops ATTACH_FILES & EMBED_LINKS
         let perms_no_member =
             compute_channel_permissions(base, "g1", "u1", &roles, &overwrites[..3]);
         assert!(perms_no_member.contains(PermissionFlags::VIEW_CHANNEL));
         assert!(!perms_no_member.contains(PermissionFlags::SEND_MESSAGES));
         assert!(!perms_no_member.contains(PermissionFlags::ATTACH_FILES));
         assert!(!perms_no_member.contains(PermissionFlags::EMBED_LINKS));
+        assert!(!perms_no_member.contains(PermissionFlags::MENTION_EVERYONE));
+        assert!(!perms_no_member.contains(PermissionFlags::SEND_TTS_MESSAGES));
 
-        // Denying VIEW_CHANNEL removes all permissions
         let hidden = compute_channel_permissions(base, "g1", "u1", &[], &overwrites[..1]);
         assert!(hidden.is_empty());
+    }
+
+    #[test]
+    fn role_allow_overrides_other_role_deny_and_member_deny_wins() {
+        let base = PermissionFlags::VIEW_CHANNEL | PermissionFlags::SEND_MESSAGES;
+        let roles = vec!["r1".to_string(), "r2".to_string()];
+        let role_conflict = vec![
+            ow_role(
+                "r1",
+                PermissionFlags::empty(),
+                PermissionFlags::SEND_MESSAGES,
+            ),
+            ow_role(
+                "r2",
+                PermissionFlags::SEND_MESSAGES,
+                PermissionFlags::empty(),
+            ),
+        ];
+
+        let perms = compute_channel_permissions(base, "g1", "u1", &roles, &role_conflict);
+        assert!(perms.contains(PermissionFlags::SEND_MESSAGES));
+
+        let with_member_deny = vec![
+            ow_role(
+                "r2",
+                PermissionFlags::SEND_MESSAGES,
+                PermissionFlags::empty(),
+            ),
+            ow_member(
+                "u1",
+                PermissionFlags::empty(),
+                PermissionFlags::SEND_MESSAGES,
+            ),
+        ];
+        let perms2 = compute_channel_permissions(base, "g1", "u1", &roles, &with_member_deny);
+        assert!(perms2.contains(PermissionFlags::VIEW_CHANNEL));
+        assert!(!perms2.contains(PermissionFlags::SEND_MESSAGES));
     }
 
     #[test]
@@ -633,26 +713,5 @@ mod tests {
                 .collect();
 
         assert_eq!(visible, vec!["cat_empty", "cat_mixed", "ch_public"]);
-    }
-
-    #[test]
-    fn member_deny_overrides_role_allow() {
-        let base = PermissionFlags::VIEW_CHANNEL | PermissionFlags::SEND_MESSAGES;
-        let roles = vec!["r1".to_string()];
-        let overwrites = vec![
-            ow_role(
-                "r1",
-                PermissionFlags::SEND_MESSAGES,
-                PermissionFlags::empty(),
-            ),
-            ow_member(
-                "u1",
-                PermissionFlags::empty(),
-                PermissionFlags::SEND_MESSAGES,
-            ),
-        ];
-        let perms = compute_channel_permissions(base, "g1", "u1", &roles, &overwrites);
-        assert!(perms.contains(PermissionFlags::VIEW_CHANNEL));
-        assert!(!perms.contains(PermissionFlags::SEND_MESSAGES));
     }
 }

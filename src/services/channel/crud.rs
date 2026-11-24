@@ -1,33 +1,32 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::HashMap;
 
 use sqlx::{MySql, QueryBuilder};
 
 use crate::AppState;
 use crate::constants::flags::PermissionFlags;
 use crate::constants::gateway::events;
-use crate::constants::guild::{
-    DEFAULT_VOICE_BITRATE, DEFAULT_VOICE_CONNECTION_LIMIT, MAX_VOICE_BITRATE_CEILING,
-    MAX_VOICE_BITRATE_STANDARD, MAX_VOICE_USER_LIMIT, MAX_VOICE_CONNECTION_LIMIT,
-    MIN_VOICE_BITRATE, MIN_VOICE_CONNECTION_LIMIT,
-};
+use crate::constants::guild::{DEFAULT_VOICE_BITRATE, DEFAULT_VOICE_CONNECTION_LIMIT};
 use crate::constants::limits::{
-    MAX_CHANNEL_NAME_LENGTH, MAX_CHANNEL_OVERWRITES, MAX_CHANNEL_RATE_LIMIT_PER_USER,
-    MAX_CHANNEL_TOPIC_LENGTH, MAX_CHANNELS_PER_CATEGORY, MAX_CHANNELS_PER_GUILD,
-    MAX_CONTENT_WARNING_TEXT_LENGTH, MAX_LINK_CHANNEL_URL_LENGTH,
+    MAX_CHANNEL_NAME_LENGTH, MAX_CHANNEL_RATE_LIMIT_PER_USER, MAX_CHANNEL_TOPIC_LENGTH,
+    MAX_CHANNELS_PER_CATEGORY, MAX_CHANNELS_PER_GUILD, MAX_CONTENT_WARNING_TEXT_LENGTH,
+    MAX_LINK_CHANNEL_URL_LENGTH, MAX_VOICE_BITRATE_CEILING, MAX_VOICE_BITRATE_STANDARD,
+    MAX_VOICE_CONNECTION_LIMIT, MAX_VOICE_USER_LIMIT, MIN_VOICE_BITRATE,
+    MIN_VOICE_CONNECTION_LIMIT,
 };
 use crate::error::{AppError, ValidationCode};
-use crate::gateway::session::GatewaySession;
 use crate::models::channel::{
     ChannelOverwriteRow, ChannelResponse, ChannelRow, ChannelType, PermissionOverwrite,
 };
-use crate::models::permission::OverwriteType;
-use crate::models::rest::channels::{
-    ChannelPositionUpdate, CreateChannelRequest, PermissionOverwriteInput,
-    SetPermissionOverwriteRequest, UpdateChannelRequest,
-};
-use crate::services::{member_service, permission_service};
+use crate::models::guild::{BaseGuild, Guild};
+use crate::models::rest::channels::{CreateChannelRequest, UpdateChannelRequest};
+use crate::services::{member_service, permission_service, queries};
 use crate::utils::snowflake::{DISCORD_SNOWFLAKE, validate_snowflake};
+use crate::utils::validation::{collapse_channel_whitespace, slugify_channel_name};
+
+use super::overwrites::{
+    dispatch_channel_update_with_visibility, propagate_category_overwrites,
+    replace_channel_overwrites, validate_and_normalize_overwrites,
+};
 
 pub async fn get_channel(
     state: &AppState,
@@ -52,7 +51,7 @@ pub async fn get_channel(
     )
     .await?;
 
-    let overwrites = fetch_channel_overwrites(&state.db, channel_id).await?;
+    let overwrites = queries::fetch_channel_overwrites(&state.db, channel_id).await?;
     Ok(ChannelResponse::from_row(channel, overwrites))
 }
 
@@ -229,27 +228,30 @@ pub async fn create_guild_channel(
 
     let mut tx = state.db.begin().await?;
 
-    let owner_id: String = sqlx::query_scalar("SELECT owner_id FROM guilds WHERE id = ? FOR UPDATE")
-        .bind(guild_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(AppError::unknown_guild)?;
+    let owner_id: String =
+        sqlx::query_scalar("SELECT owner_id FROM guilds WHERE id = ? FOR UPDATE")
+            .bind(guild_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(AppError::unknown_guild)?;
 
-    let total_channels: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE guild_id = ?")
-        .bind(guild_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let total_channels: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE guild_id = ?")
+            .bind(guild_id)
+            .fetch_one(&mut *tx)
+            .await?;
     if total_channels as u64 >= MAX_CHANNELS_PER_GUILD {
         return Err(AppError::max_guild_channels());
     }
 
     if let Some(ref pid) = parent_id {
-        let cat_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE guild_id = ? AND parent_id = ?")
-                .bind(guild_id)
-                .bind(pid)
-                .fetch_one(&mut *tx)
-                .await?;
+        let cat_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM channels WHERE guild_id = ? AND parent_id = ?",
+        )
+        .bind(guild_id)
+        .bind(pid)
+        .fetch_one(&mut *tx)
+        .await?;
         if cat_count as u64 >= MAX_CHANNELS_PER_CATEGORY {
             return Err(AppError::max_category_channels());
         }
@@ -274,17 +276,19 @@ pub async fn create_guild_channel(
             .await?
         }
         None => match parent_id {
-            Some(ref pid) => fetch_channel_overwrites(&mut *tx, pid).await?,
+            Some(ref pid) => queries::fetch_channel_overwrites(&mut *tx, pid).await?,
             None => Vec::new(),
         },
     };
 
     let max_pos: Option<u32> = if let Some(ref pid) = parent_id {
-        sqlx::query_scalar("SELECT MAX(position) FROM channels WHERE guild_id = ? AND parent_id = ?")
-            .bind(guild_id)
-            .bind(pid)
-            .fetch_one(&mut *tx)
-            .await?
+        sqlx::query_scalar(
+            "SELECT MAX(position) FROM channels WHERE guild_id = ? AND parent_id = ?",
+        )
+        .bind(guild_id)
+        .bind(pid)
+        .fetch_one(&mut *tx)
+        .await?
     } else {
         sqlx::query_scalar(
             "SELECT MAX(position) FROM channels WHERE guild_id = ? AND parent_id IS NULL",
@@ -410,7 +414,7 @@ pub async fn update_channel(
     .await?
     .ok_or_else(AppError::unknown_channel)?;
 
-    let old_overwrites = fetch_channel_overwrites(&mut *tx, channel_id).await?;
+    let old_overwrites = queries::fetch_channel_overwrites(&mut *tx, channel_id).await?;
     let overwrites_changed = payload.permission_overwrites.is_some();
 
     let new_overwrites = if let Some(inputs) = payload.permission_overwrites {
@@ -527,6 +531,18 @@ pub async fn update_channel(
                 _ => {}
             }
             if current_locked.parent_id.as_deref() != Some(pid.as_str()) {
+                let target_perms = permission_service::compute_user_channel_permissions_conn(
+                    &mut tx,
+                    &current_locked.guild_id,
+                    pid,
+                    user_id,
+                )
+                .await?;
+                if !target_perms
+                    .contains(PermissionFlags::VIEW_CHANNEL | PermissionFlags::MANAGE_CHANNELS)
+                {
+                    return Err(AppError::missing_permissions());
+                }
                 let cat_count: i64 = sqlx::query_scalar(
                     "SELECT COUNT(*) FROM channels WHERE guild_id = ? AND parent_id = ?",
                 )
@@ -712,7 +728,7 @@ pub async fn delete_channel(
     )
     .await?;
 
-    let overwrites = fetch_channel_overwrites(&state.db, channel_id).await?;
+    let overwrites = queries::fetch_channel_overwrites(&state.db, channel_id).await?;
     let viewer_sessions = permission_service::filter_sessions_for_channel_with_ctx(
         state,
         &row.guild_id,
@@ -733,21 +749,34 @@ pub async fn delete_channel(
         Vec::new()
     };
 
-    sqlx::query(
+    let guild_update_res = sqlx::query(
         r#"
         UPDATE guilds
         SET system_channel_id = IF(system_channel_id = ?, NULL, system_channel_id),
             rules_channel_id = IF(rules_channel_id = ?, NULL, rules_channel_id),
             afk_channel_id = IF(afk_channel_id = ?, NULL, afk_channel_id)
         WHERE id = ?
+          AND (system_channel_id = ? OR rules_channel_id = ? OR afk_channel_id = ?)
         "#,
     )
     .bind(channel_id)
     .bind(channel_id)
     .bind(channel_id)
     .bind(&row.guild_id)
+    .bind(channel_id)
+    .bind(channel_id)
+    .bind(channel_id)
     .execute(&mut *tx)
     .await?;
+
+    let updated_guild_base = if guild_update_res.rows_affected() > 0 {
+        sqlx::query_as::<_, BaseGuild>("SELECT * FROM guilds WHERE id = ?")
+            .bind(&row.guild_id)
+            .fetch_optional(&mut *tx)
+            .await?
+    } else {
+        None
+    };
 
     let res = sqlx::query("DELETE FROM channels WHERE id = ?")
         .bind(channel_id)
@@ -758,20 +787,52 @@ pub async fn delete_channel(
         return Err(AppError::unknown_channel());
     }
 
-    let mut updated_children = Vec::with_capacity(child_ids.len());
-    for cid in child_ids {
-        if let Some(child_row) = sqlx::query_as::<_, ChannelRow>(&format!(
-            "SELECT {} FROM channels WHERE id = ?",
+    let updated_children = if child_ids.is_empty() {
+        Vec::new()
+    } else {
+        let mut cqb = QueryBuilder::<MySql>::new(format!(
+            "SELECT {} FROM channels WHERE id IN (",
             ChannelRow::SELECT_COLS
-        ))
-        .bind(&cid)
-        .fetch_optional(&mut *tx)
-        .await?
-        {
-            let child_ows = fetch_channel_overwrites(&mut *tx, &cid).await?;
-            updated_children.push(ChannelResponse::from_row(child_row, child_ows));
+        ));
+        let mut sep = cqb.separated(", ");
+        for cid in &child_ids {
+            sep.push_bind(cid);
         }
-    }
+        cqb.push(")");
+        let child_rows = cqb
+            .build_query_as::<ChannelRow>()
+            .fetch_all(&mut *tx)
+            .await?;
+
+        let mut oqb = QueryBuilder::<MySql>::new(
+            "SELECT channel_id, type, target_id, allow, deny FROM channel_permission_overwrites WHERE channel_id IN (",
+        );
+        let mut sep = oqb.separated(", ");
+        for cid in &child_ids {
+            sep.push_bind(cid);
+        }
+        oqb.push(")");
+        let child_ow_rows = oqb
+            .build_query_as::<ChannelOverwriteRow>()
+            .fetch_all(&mut *tx)
+            .await?;
+
+        let mut ow_by_ch: HashMap<String, Vec<PermissionOverwrite>> = HashMap::new();
+        for ow in child_ow_rows {
+            ow_by_ch
+                .entry(ow.channel_id.clone())
+                .or_default()
+                .push(PermissionOverwrite::from(ow));
+        }
+
+        child_rows
+            .into_iter()
+            .map(|c| {
+                let ows = ow_by_ch.remove(&c.id).unwrap_or_default();
+                ChannelResponse::from_row(c, ows)
+            })
+            .collect()
+    };
 
     tx.commit().await?;
 
@@ -797,677 +858,14 @@ pub async fn delete_channel(
         .await;
     }
 
-    Ok(())
-}
-
-pub async fn set_permission_overwrite(
-    state: &AppState,
-    channel_id: &str,
-    overwrite_id: &str,
-    user_id: &str,
-    payload: SetPermissionOverwriteRequest,
-) -> Result<(), AppError> {
-    let current = sqlx::query_as::<_, ChannelRow>(&format!(
-        "SELECT {} FROM channels WHERE id = ?",
-        ChannelRow::SELECT_COLS
-    ))
-    .bind(channel_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(AppError::unknown_channel)?;
-
-    let (perm_ctx, _, actor_perms) = permission_service::require_channel_permission_with_ctx(
-        state,
-        &current.guild_id,
-        channel_id,
-        user_id,
-        PermissionFlags::VIEW_CHANNEL | PermissionFlags::MANAGE_ROLES,
-    )
-    .await?;
-
-    let owner_id: String = sqlx::query_scalar("SELECT owner_id FROM guilds WHERE id = ?")
-        .bind(&current.guild_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(AppError::unknown_guild)?;
-
-    let is_owner_or_admin =
-        user_id == owner_id || actor_perms.contains(PermissionFlags::ADMINISTRATOR);
-
-    validate_snowflake("overwrite_id", overwrite_id)?;
-
-    let mut tx = state.db.begin().await?;
-    let old_overwrites = fetch_channel_overwrites(&mut *tx, channel_id).await?;
-
-    let mut next_inputs: Vec<PermissionOverwriteInput> = old_overwrites
-        .iter()
-        .filter(|o| o.id != overwrite_id)
-        .map(|o| PermissionOverwriteInput {
-            id: o.id.clone(),
-            kind: o.kind,
-            allow: Some(o.allow),
-            deny: Some(o.deny),
-        })
-        .collect();
-    next_inputs.push(PermissionOverwriteInput {
-        id: overwrite_id.to_string(),
-        kind: payload.kind,
-        allow: payload.allow,
-        deny: payload.deny,
-    });
-
-    let new_overwrites = validate_and_normalize_overwrites(
-        &mut tx,
-        &current.guild_id,
-        &next_inputs,
-        actor_perms,
-        is_owner_or_admin,
-        Some(&old_overwrites),
-    )
-    .await?;
-
-    let old_sessions = permission_service::filter_sessions_for_channel_with_ctx(
-        state,
-        &current.guild_id,
-        channel_id,
-        perm_ctx.as_ref(),
-    )
-    .await;
-
-    replace_channel_overwrites(&mut tx, channel_id, &new_overwrites).await?;
-
-    let synced_children = if current.kind == ChannelType::GuildCategory as u32 {
-        propagate_category_overwrites(
-            &mut tx,
-            &current.guild_id,
-            channel_id,
-            &old_overwrites,
-            &new_overwrites,
-        )
-        .await?
-    } else {
-        Vec::new()
-    };
-
-    tx.commit().await?;
-
-    let guild_id = current.guild_id.clone();
-    let updated = ChannelResponse::from_row(current, new_overwrites);
-    dispatch_channel_update_with_visibility(state, &guild_id, channel_id, old_sessions, &updated)
-        .await;
-
-    for child in synced_children {
-        permission_service::dispatch_channel_with_ctx(
-            state,
-            &guild_id,
-            &child.base.id,
-            None,
-            events::CHANNEL_UPDATE,
-            &child,
-        )
-        .await;
-    }
-
-    crate::gateway::handlers::lazy_request::refresh_guild_member_lists(state, &guild_id).await;
-
-    Ok(())
-}
-
-pub async fn delete_permission_overwrite(
-    state: &AppState,
-    channel_id: &str,
-    overwrite_id: &str,
-    user_id: &str,
-) -> Result<(), AppError> {
-    let current = sqlx::query_as::<_, ChannelRow>(&format!(
-        "SELECT {} FROM channels WHERE id = ?",
-        ChannelRow::SELECT_COLS
-    ))
-    .bind(channel_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(AppError::unknown_channel)?;
-
-    let (perm_ctx, _, actor_perms) = permission_service::require_channel_permission_with_ctx(
-        state,
-        &current.guild_id,
-        channel_id,
-        user_id,
-        PermissionFlags::VIEW_CHANNEL | PermissionFlags::MANAGE_ROLES,
-    )
-    .await?;
-
-    let owner_id: String = sqlx::query_scalar("SELECT owner_id FROM guilds WHERE id = ?")
-        .bind(&current.guild_id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(AppError::unknown_guild)?;
-
-    let is_owner_or_admin =
-        user_id == owner_id || actor_perms.contains(PermissionFlags::ADMINISTRATOR);
-
-    let mut tx = state.db.begin().await?;
-    let old_overwrites = fetch_channel_overwrites(&mut *tx, channel_id).await?;
-
-    let Some(target_ow) = old_overwrites.iter().find(|o| o.id == overwrite_id) else {
-        tx.commit().await?;
-        return Ok(());
-    };
-
-    if !is_owner_or_admin && (target_ow.deny & !actor_perms.bits()) != 0 {
-        return Err(AppError::missing_permissions());
-    }
-
-    let new_overwrites: Vec<PermissionOverwrite> = old_overwrites
-        .iter()
-        .filter(|o| o.id != overwrite_id)
-        .cloned()
-        .collect();
-
-    let old_sessions = permission_service::filter_sessions_for_channel_with_ctx(
-        state,
-        &current.guild_id,
-        channel_id,
-        perm_ctx.as_ref(),
-    )
-    .await;
-
-    sqlx::query("DELETE FROM channel_permission_overwrites WHERE channel_id = ? AND target_id = ?")
-        .bind(channel_id)
-        .bind(overwrite_id)
-        .execute(&mut *tx)
-        .await?;
-
-    let synced_children = if current.kind == ChannelType::GuildCategory as u32 {
-        propagate_category_overwrites(
-            &mut tx,
-            &current.guild_id,
-            channel_id,
-            &old_overwrites,
-            &new_overwrites,
-        )
-        .await?
-    } else {
-        Vec::new()
-    };
-
-    tx.commit().await?;
-
-    let guild_id = current.guild_id.clone();
-    let updated = ChannelResponse::from_row(current, new_overwrites);
-    dispatch_channel_update_with_visibility(state, &guild_id, channel_id, old_sessions, &updated)
-        .await;
-
-    for child in synced_children {
-        permission_service::dispatch_channel_with_ctx(
-            state,
-            &guild_id,
-            &child.base.id,
-            None,
-            events::CHANNEL_UPDATE,
-            &child,
-        )
-        .await;
-    }
-
-    crate::gateway::handlers::lazy_request::refresh_guild_member_lists(state, &guild_id).await;
-
-    Ok(())
-}
-
-pub async fn modify_guild_channel_positions(
-    state: &AppState,
-    guild_id: &str,
-    user_id: &str,
-    payload: Vec<ChannelPositionUpdate>,
-) -> Result<(), AppError> {
-    let perms = permission_service::compute_guild_permissions(state, guild_id, user_id).await?;
-    if !perms.contains(PermissionFlags::MANAGE_CHANNELS) {
-        return Err(AppError::missing_permissions());
-    }
-
-    if payload.is_empty() {
-        return Ok(());
-    }
-
-    let mut tx = state.db.begin().await?;
-
-    let rows = sqlx::query_as::<_, ChannelRow>(&format!(
-        "SELECT {} FROM channels WHERE guild_id = ? ORDER BY position ASC, CAST(id AS UNSIGNED) ASC FOR UPDATE",
-        ChannelRow::SELECT_COLS
-    ))
-    .bind(guild_id)
-    .fetch_all(&mut *tx)
-    .await?;
-
-    let mut by_id: HashMap<String, ChannelRow> =
-        rows.into_iter().map(|r| (r.id.clone(), r)).collect();
-
-    for entry in &payload {
-        let Some(ch) = by_id.get(&entry.id) else {
-            return Err(AppError::validation(
-                "id",
-                ValidationCode::ChannelNotFound,
-                "Channel does not exist in this community.",
-            ));
-        };
-        if let Some(Some(ref pid)) = entry.parent_id {
-            if ch.kind == ChannelType::GuildCategory as u32 {
-                return Err(AppError::validation(
-                    "parent_id",
-                    ValidationCode::CategoriesCannotHaveParents,
-                    "Categories cannot have a parent category.",
-                ));
-            }
-            let Some(parent) = by_id.get(pid) else {
-                return Err(AppError::validation(
-                    "parent_id",
-                    ValidationCode::InvalidParentChannel,
-                    "Parent channel does not exist in this community.",
-                ));
-            };
-            if parent.kind != ChannelType::GuildCategory as u32 {
-                return Err(AppError::validation(
-                    "parent_id",
-                    ValidationCode::ParentMustBeCategory,
-                    "Parent channel must be a category.",
-                ));
-            }
-        }
-        if let Some(Some(ref sib_id)) = entry.preceding_sibling_id {
-            if sib_id == &entry.id {
-                return Err(AppError::validation(
-                    "preceding_sibling_id",
-                    ValidationCode::CannotPositionChannelRelativeToItself,
-                    "Cannot position a channel relative to itself.",
-                ));
-            }
-            if !by_id.contains_key(sib_id) {
-                return Err(AppError::validation(
-                    "preceding_sibling_id",
-                    ValidationCode::ChannelNotFound,
-                    "Preceding channel does not exist in this community.",
-                ));
-            }
-        }
-    }
-
-    let original_state: HashMap<String, (Option<String>, u32)> = by_id
-        .iter()
-        .map(|(id, ch)| (id.clone(), (ch.parent_id.clone(), ch.position)))
-        .collect();
-
-    let mut lock_copies: Vec<(String, String)> = Vec::new();
-    let mut dirty_ids: HashSet<String> = HashSet::new();
-
-    for entry in payload {
-        let Some(current_ch) = by_id.get(&entry.id).cloned() else {
-            continue;
-        };
-        let old_parent = current_ch.parent_id.clone();
-        let new_parent = match entry.parent_id {
-            Some(opt) => opt
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
-            None => old_parent.clone(),
-        };
-
-        if let Some(Some(ref sib_id)) = entry.preceding_sibling_id
-            && by_id
-                .get(sib_id)
-                .is_none_or(|sib| sib.parent_id != new_parent)
-        {
-            return Err(AppError::validation(
-                "preceding_sibling_id",
-                ValidationCode::PrecedingChannelMustShareParent,
-                "Preceding sibling must share the destination parent.",
-            ));
-        }
-
-        if new_parent != old_parent
-            && let Some(ref pid) = new_parent
-        {
-            let count = by_id
-                .values()
-                .filter(|c| c.id != entry.id && c.parent_id.as_deref() == Some(pid.as_str()))
-                .count() as u64;
-            if count >= MAX_CHANNELS_PER_CATEGORY {
-                return Err(AppError::max_category_channels());
-            }
-            if entry.lock_permissions == Some(true) {
-                lock_copies.push((entry.id.clone(), pid.clone()));
-            }
-        }
-
-        if let Some(ch) = by_id.get_mut(&entry.id) {
-            ch.parent_id = new_parent.clone();
-        }
-
-        let mut siblings: Vec<String> = by_id
-            .values()
-            .filter(|c| c.id != entry.id && c.parent_id == new_parent)
-            .map(|c| (c.position, c.id.clone()))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|(_, id)| id)
-            .collect();
-        siblings.sort_by_key(|id| by_id.get(id).map_or(0, |c| c.position));
-
-        let insert_idx = if let Some(sib_opt) = entry.preceding_sibling_id {
-            match sib_opt {
-                None => 0,
-                Some(sib_id) => siblings
-                    .iter()
-                    .position(|id| id == &sib_id)
-                    .map_or(siblings.len(), |idx| idx + 1),
-            }
-        } else if let Some(pos) = entry.position {
-            (pos as usize).min(siblings.len())
-        } else if current_ch.kind == ChannelType::GuildVoice as u32 {
-            siblings.len()
-        } else {
-            siblings
-                .iter()
-                .position(|id| {
-                    by_id
-                        .get(id)
-                        .is_some_and(|c| c.kind == ChannelType::GuildVoice as u32)
-                })
-                .unwrap_or(siblings.len())
-        };
-
-        siblings.insert(insert_idx, entry.id.clone());
-        for (idx, sib_id) in siblings.into_iter().enumerate() {
-            if let Some(ch) = by_id.get_mut(&sib_id) {
-                ch.position = idx as u32;
-            }
-        }
-    }
-
-    for (cid, (orig_parent, orig_pos)) in &original_state {
-        if let Some(ch) = by_id.get(cid)
-            && (&ch.parent_id != orig_parent || ch.position != *orig_pos)
-        {
-            sqlx::query("UPDATE channels SET parent_id = ?, position = ? WHERE id = ?")
-                .bind(&ch.parent_id)
-                .bind(ch.position)
-                .bind(cid)
-                .execute(&mut *tx)
-                .await?;
-            dirty_ids.insert(cid.clone());
-        }
-    }
-
-    if !lock_copies.is_empty() {
-        let owner_id: String = sqlx::query_scalar("SELECT owner_id FROM guilds WHERE id = ?")
-            .bind(guild_id)
-            .fetch_one(&mut *tx)
-            .await?;
-        for (cid, pid) in lock_copies {
-            let ch_perms =
-                permission_service::compute_user_channel_permissions(state, guild_id, &cid, user_id)
-                    .await?;
-            if !ch_perms.contains(PermissionFlags::MANAGE_ROLES) {
-                return Err(AppError::missing_permissions());
-            }
-            let parent_ows = fetch_channel_overwrites(&mut *tx, &pid).await?;
-            let old_ows = fetch_channel_overwrites(&mut *tx, &cid).await?;
-            let is_owner_or_admin =
-                user_id == owner_id || ch_perms.contains(PermissionFlags::ADMINISTRATOR);
-            if !is_owner_or_admin {
-                check_overwrite_delta_permissions(ch_perms, &old_ows, &parent_ows)?;
-            }
-            replace_channel_overwrites(&mut tx, &cid, &parent_ows).await?;
-            dirty_ids.insert(cid);
-        }
-    }
-
-    let mut updated_channels = Vec::with_capacity(dirty_ids.len());
-    for cid in dirty_ids {
-        if let Some(row) = by_id.remove(&cid) {
-            let ows = fetch_channel_overwrites(&mut *tx, &cid).await?;
-            updated_channels.push(ChannelResponse::from_row(row, ows));
-        }
-    }
-
-    tx.commit().await?;
-
-    for ch in updated_channels {
-        permission_service::dispatch_channel_with_ctx(
-            state,
-            guild_id,
-            &ch.base.id,
-            None,
-            events::CHANNEL_UPDATE,
-            &ch,
-        )
-        .await;
-    }
-
-    Ok(())
-}
-
-async fn fetch_channel_overwrites<'e, E>(
-    executor: E,
-    channel_id: &str,
-) -> Result<Vec<PermissionOverwrite>, AppError>
-where
-    E: sqlx::Executor<'e, Database = MySql>,
-{
-    let rows = sqlx::query_as::<_, ChannelOverwriteRow>(
-        "SELECT channel_id, type, target_id, allow, deny FROM channel_permission_overwrites WHERE channel_id = ?",
-    )
-    .bind(channel_id)
-    .fetch_all(executor)
-    .await?;
-
-    Ok(rows.into_iter().map(PermissionOverwrite::from).collect())
-}
-
-async fn replace_channel_overwrites(
-    tx: &mut sqlx::Transaction<'_, MySql>,
-    channel_id: &str,
-    overwrites: &[PermissionOverwrite],
-) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM channel_permission_overwrites WHERE channel_id = ?")
-        .bind(channel_id)
-        .execute(&mut **tx)
-        .await?;
-
-    for ow in overwrites {
-        sqlx::query(
-            "INSERT INTO channel_permission_overwrites (type, channel_id, target_id, allow, deny) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(ow.kind)
-        .bind(channel_id)
-        .bind(&ow.id)
-        .bind(ow.allow)
-        .bind(ow.deny)
-        .execute(&mut **tx)
-        .await?;
-    }
-
-    Ok(())
-}
-
-async fn validate_and_normalize_overwrites(
-    tx: &mut sqlx::Transaction<'_, MySql>,
-    guild_id: &str,
-    inputs: &[PermissionOverwriteInput],
-    actor_perms: PermissionFlags,
-    is_owner_or_admin: bool,
-    old_overwrites: Option<&[PermissionOverwrite]>,
-) -> Result<Vec<PermissionOverwrite>, AppError> {
-    if inputs.len() > MAX_CHANNEL_OVERWRITES {
-        return Err(AppError::validation(
-            "permission_overwrites",
-            ValidationCode::InvalidFormat,
-            "Too many permission overwrites.",
-        ));
-    }
-
-    let mut deduped: Vec<PermissionOverwrite> = Vec::with_capacity(inputs.len());
-    let mut index_by_id: HashMap<String, usize> = HashMap::with_capacity(inputs.len());
-
-    for input in inputs {
-        if input.kind != OverwriteType::Role as u32 && input.kind != OverwriteType::Member as u32 {
-            return Err(AppError::validation(
-                "permission_overwrites",
-                ValidationCode::InvalidFormat,
-                "Invalid permission overwrite type.",
-            ));
-        }
-        validate_snowflake("permission_overwrites", &input.id)?;
-
-        let exists: Option<(i32,)> = if input.kind == OverwriteType::Role as u32 {
-            sqlx::query_as("SELECT 1 FROM roles WHERE id = ? AND guild_id = ? LIMIT 1")
-                .bind(&input.id)
-                .bind(guild_id)
-                .fetch_optional(&mut **tx)
-                .await?
-        } else {
-            sqlx::query_as("SELECT 1 FROM guild_members WHERE user_id = ? AND guild_id = ? LIMIT 1")
-                .bind(&input.id)
-                .bind(guild_id)
-                .fetch_optional(&mut **tx)
-                .await?
-        };
-
-        if exists.is_none() {
-            return Err(AppError::validation(
-                "permission_overwrites",
-                ValidationCode::InvalidFormat,
-                "Overwrite target does not belong to this community.",
-            ));
-        }
-
-        let allow = PermissionFlags::from_bits_truncate(input.allow.unwrap_or(0)).bits();
-        let deny = PermissionFlags::from_bits_truncate(input.deny.unwrap_or(0)).bits();
-        let ow = PermissionOverwrite {
-            id: input.id.clone(),
-            kind: input.kind,
-            allow,
-            deny,
-        };
-
-        if let Some(&idx) = index_by_id.get(&input.id) {
-            deduped[idx] = ow;
-        } else {
-            index_by_id.insert(input.id.clone(), deduped.len());
-            deduped.push(ow);
-        }
-    }
-
-    if !is_owner_or_admin {
-        let empty = Vec::new();
-        check_overwrite_delta_permissions(actor_perms, old_overwrites.unwrap_or(&empty), &deduped)?;
-    }
-
-    Ok(deduped)
-}
-
-fn check_overwrite_delta_permissions(
-    actor_perms: PermissionFlags,
-    old_overwrites: &[PermissionOverwrite],
-    new_overwrites: &[PermissionOverwrite],
-) -> Result<(), AppError> {
-    let old_by_id: HashMap<&str, &PermissionOverwrite> =
-        old_overwrites.iter().map(|o| (o.id.as_str(), o)).collect();
-    let new_by_id: HashMap<&str, &PermissionOverwrite> =
-        new_overwrites.iter().map(|o| (o.id.as_str(), o)).collect();
-
-    for ow in new_overwrites {
-        if (ow.allow & !actor_perms.bits()) != 0 {
-            return Err(AppError::missing_permissions());
-        }
-        if let Some(prev) = old_by_id.get(ow.id.as_str()) {
-            let cleared_denies = prev.deny & !ow.deny;
-            if (cleared_denies & !actor_perms.bits()) != 0 {
-                return Err(AppError::missing_permissions());
-            }
-        }
-    }
-
-    for prev in old_overwrites {
-        if !new_by_id.contains_key(prev.id.as_str()) && (prev.deny & !actor_perms.bits()) != 0 {
-            return Err(AppError::missing_permissions());
-        }
-    }
-
-    Ok(())
-}
-
-fn sorted_overwrite_key(ows: &[PermissionOverwrite]) -> Vec<(u32, String, u64, u64)> {
-    let mut keys: Vec<(u32, String, u64, u64)> = ows
-        .iter()
-        .map(|o| (o.kind, o.id.clone(), o.allow, o.deny))
-        .collect();
-    keys.sort();
-    keys
-}
-
-async fn propagate_category_overwrites(
-    tx: &mut sqlx::Transaction<'_, MySql>,
-    guild_id: &str,
-    category_id: &str,
-    old_category_overwrites: &[PermissionOverwrite],
-    new_category_overwrites: &[PermissionOverwrite],
-) -> Result<Vec<ChannelResponse>, AppError> {
-    let old_key = sorted_overwrite_key(old_category_overwrites);
-    let children = sqlx::query_as::<_, ChannelRow>(&format!(
-        "SELECT {} FROM channels WHERE guild_id = ? AND parent_id = ?",
-        ChannelRow::SELECT_COLS
-    ))
-    .bind(guild_id)
-    .bind(category_id)
-    .fetch_all(&mut **tx)
-    .await?;
-
-    let mut synced = Vec::new();
-    for child in children {
-        let child_ows = fetch_channel_overwrites(&mut **tx, &child.id).await?;
-        if sorted_overwrite_key(&child_ows) == old_key {
-            replace_channel_overwrites(tx, &child.id, new_category_overwrites).await?;
-            synced.push(ChannelResponse::from_row(
-                child,
-                new_category_overwrites.to_vec(),
-            ));
-        }
-    }
-    Ok(synced)
-}
-
-async fn dispatch_channel_update_with_visibility(
-    state: &AppState,
-    guild_id: &str,
-    channel_id: &str,
-    old_sessions: Vec<Arc<GatewaySession>>,
-    updated: &ChannelResponse,
-) {
-    let new_sessions =
-        permission_service::filter_sessions_for_channel_with_ctx(state, guild_id, channel_id, None)
+    if let Some(base) = updated_guild_base {
+        let updated_guild = Guild::from(base);
+        state
+            .dispatch_guild(events::GUILD_UPDATE, &updated_guild, &guild_id)
             .await;
+    }
 
-    let old_ids: HashSet<String> = old_sessions.iter().map(|s| s.id.clone()).collect();
-    let new_ids: HashSet<String> = new_sessions.iter().map(|s| s.id.clone()).collect();
-
-    let update_targets: Vec<Arc<GatewaySession>> = new_sessions
-        .iter()
-        .filter(|s| old_ids.contains(&s.id))
-        .cloned()
-        .collect();
-    let create_targets: Vec<Arc<GatewaySession>> = new_sessions
-        .into_iter()
-        .filter(|s| !old_ids.contains(&s.id))
-        .collect();
-    let delete_targets: Vec<Arc<GatewaySession>> = old_sessions
-        .into_iter()
-        .filter(|s| !new_ids.contains(&s.id))
-        .collect();
-
-    state.dispatch_to_sessions(&update_targets, events::CHANNEL_UPDATE, updated);
-    state.dispatch_to_sessions(&create_targets, events::CHANNEL_CREATE, updated);
-    state.dispatch_to_sessions(&delete_targets, events::CHANNEL_DELETE, updated);
+    Ok(())
 }
 
 fn is_supported_guild_channel_type(kind: u32) -> bool {
@@ -1479,43 +877,9 @@ fn is_supported_guild_channel_type(kind: u32) -> bool {
 }
 
 fn normalize_channel_name(raw: &str, kind: u32) -> Result<String, AppError> {
-    let mut collapsed = String::with_capacity(raw.len());
-    let mut prev_space = true;
-    for c in raw.chars() {
-        if c.is_control() {
-            continue;
-        }
-        if c.is_whitespace() {
-            if !prev_space {
-                collapsed.push(' ');
-                prev_space = true;
-            }
-        } else {
-            collapsed.push(c);
-            prev_space = false;
-        }
-    }
+    let collapsed = collapse_channel_whitespace(raw);
     let trimmed = collapsed.trim();
-
-    let normalized = if kind == ChannelType::GuildText as u32
-        || kind == ChannelType::GuildAnnouncement as u32
-    {
-        trimmed
-            .to_lowercase()
-            .chars()
-            .filter_map(|c| {
-                if c == ' ' {
-                    Some('-')
-                } else if !c.is_ascii_punctuation() || c == '-' || c == '.' || c == '_' {
-                    Some(c)
-                } else {
-                    None
-                }
-            })
-            .collect::<String>()
-    } else {
-        trimmed.to_string()
-    };
+    let normalized = slugify_channel_name(trimmed, kind);
 
     if normalized.is_empty() {
         return Err(AppError::validation(

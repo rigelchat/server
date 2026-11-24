@@ -7,17 +7,17 @@ use crate::AppState;
 use crate::constants::flags::PermissionFlags;
 use crate::constants::gateway::events;
 use crate::constants::limits::{
-    DEFAULT_MEMBERS_PAGE_LIMIT, MAX_GUILD_ROLES, MAX_GUILDS_PER_USER,
-    MAX_MEMBERS_PAGE_LIMIT, MAX_NICK_LENGTH,
+    DEFAULT_MEMBERS_PAGE_LIMIT, MAX_GUILD_ROLES, MAX_GUILDS_PER_USER, MAX_MEMBERS_PAGE_LIMIT,
+    MAX_NICK_LENGTH,
 };
 use crate::error::{AppError, ValidationCode};
 use crate::models::gateway::events::{
     GuildDeleteEvent, GuildMemberAddEvent, GuildMemberRemoveEvent, GuildMemberRemoveUser,
     GuildMemberUpdateEvent,
 };
-use crate::models::guild_member::{GuildMemberResponse, GuildMemberRole, GuildMemberUserRow};
+use crate::models::guild_member::{GuildMemberResponse, GuildMemberUserRow};
 use crate::models::rest::guilds::{UpdateCurrentMemberRequest, UpdateGuildMemberRequest};
-use crate::services::{guild_service, permission_service, role_service};
+use crate::services::{guild, permission_service, queries, role};
 
 pub async fn is_member(state: &AppState, guild_id: &str, user_id: &str) -> Result<bool, AppError> {
     let exists: Option<(i32,)> =
@@ -36,6 +36,14 @@ pub async fn require_member(
     user_id: &str,
 ) -> Result<(), AppError> {
     if !is_member(state, guild_id, user_id).await? {
+        let guild_exists: Option<(i32,)> =
+            sqlx::query_as("SELECT 1 FROM guilds WHERE id = ? LIMIT 1")
+                .bind(guild_id)
+                .fetch_optional(&state.db)
+                .await?;
+        if guild_exists.is_none() {
+            return Err(AppError::unknown_guild());
+        }
         return Err(AppError::missing_permissions());
     }
     Ok(())
@@ -120,7 +128,7 @@ pub async fn on_member_joined(
     state.add_user_guild(user_id, guild_id).await;
     crate::gateway::handlers::lazy_request::refresh_guild_member_lists(state, guild_id).await;
 
-    let gateway_guild = guild_service::build_full_gateway_guild(state, guild_id, user_id).await?;
+    let gateway_guild = guild::build_full_gateway_guild(state, guild_id, user_id).await?;
     state
         .dispatch_user(events::GUILD_CREATE, &gateway_guild, user_id)
         .await;
@@ -244,18 +252,7 @@ pub async fn get_guild_members(
         .fetch_all(&state.db)
         .await?;
 
-    let role_rows = sqlx::query_as::<_, GuildMemberRole>(
-        "SELECT user_id, role_id FROM guild_member_roles WHERE guild_id = ? AND role_id != ?",
-    )
-    .bind(guild_id)
-    .bind(guild_id)
-    .fetch_all(&state.db)
-    .await?;
-
-    let mut roles_by_user: HashMap<String, Vec<String>> = HashMap::new();
-    for r in role_rows {
-        roles_by_user.entry(r.user_id).or_default().push(r.role_id);
-    }
+    let mut roles_by_user = queries::fetch_guild_member_roles_map(&state.db, guild_id).await?;
 
     Ok(rows
         .into_iter()
@@ -305,13 +302,12 @@ pub async fn add_member_role(
         .await?
         .ok_or_else(AppError::unknown_guild)?;
 
-    let target_exists: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ? FOR UPDATE",
-    )
-    .bind(guild_id)
-    .bind(target_user_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let target_exists: Option<(i32,)> =
+        sqlx::query_as("SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ? FOR UPDATE")
+            .bind(guild_id)
+            .bind(target_user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
     if target_exists.is_none() {
         return Err(AppError::unknown_member());
     }
@@ -327,8 +323,7 @@ pub async fn add_member_role(
     };
 
     if actor_id != owner_id {
-        let highest_pos =
-            role_service::highest_member_role_position(&mut *tx, guild_id, actor_id).await?;
+        let highest_pos = role::highest_member_role_position(&mut *tx, guild_id, actor_id).await?;
         if highest_pos <= role_pos {
             return Err(AppError::missing_permissions());
         }
@@ -388,13 +383,12 @@ pub async fn remove_member_role(
         .await?
         .ok_or_else(AppError::unknown_guild)?;
 
-    let target_exists: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ? FOR UPDATE",
-    )
-    .bind(guild_id)
-    .bind(target_user_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let target_exists: Option<(i32,)> =
+        sqlx::query_as("SELECT 1 FROM guild_members WHERE guild_id = ? AND user_id = ? FOR UPDATE")
+            .bind(guild_id)
+            .bind(target_user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
     if target_exists.is_none() {
         return Err(AppError::unknown_member());
     }
@@ -410,8 +404,7 @@ pub async fn remove_member_role(
     };
 
     if actor_id != owner_id {
-        let highest_pos =
-            role_service::highest_member_role_position(&mut *tx, guild_id, actor_id).await?;
+        let highest_pos = role::highest_member_role_position(&mut *tx, guild_id, actor_id).await?;
         if highest_pos <= role_pos {
             return Err(AppError::missing_permissions());
         }
@@ -453,27 +446,23 @@ pub async fn update_current_member(
     let mut changed = false;
     if let Some(nick_opt) = payload.nick {
         let next_nick = normalize_nick_opt(nick_opt.as_deref())?;
-        if perms.contains(PermissionFlags::CHANGE_NICKNAME) {
-            let current_nick = sqlx::query_scalar::<_, Option<String>>(
-                "SELECT nick FROM guild_members WHERE guild_id = ? AND user_id = ?",
-            )
-            .bind(guild_id)
-            .bind(user_id)
-            .fetch_optional(&state.db)
-            .await?
-            .flatten();
+        let current_nick = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT nick FROM guild_members WHERE guild_id = ? AND user_id = ?",
+        )
+        .bind(guild_id)
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await?
+        .flatten();
 
-            if current_nick != next_nick {
-                sqlx::query(
-                    "UPDATE guild_members SET nick = ? WHERE guild_id = ? AND user_id = ?",
-                )
+        if current_nick != next_nick && perms.contains(PermissionFlags::CHANGE_NICKNAME) {
+            sqlx::query("UPDATE guild_members SET nick = ? WHERE guild_id = ? AND user_id = ?")
                 .bind(&next_nick)
                 .bind(guild_id)
                 .bind(user_id)
                 .execute(&state.db)
                 .await?;
-                changed = true;
-            }
+            changed = true;
         }
     }
 
@@ -521,18 +510,16 @@ pub async fn update_member(
     if let Some(nick_opt) = payload.nick {
         let next_nick = normalize_nick_opt(nick_opt.as_deref())?;
         if target_user_id == actor_id {
-            if (actor_perms.contains(PermissionFlags::CHANGE_NICKNAME)
-                || actor_perms.contains(PermissionFlags::MANAGE_NICKNAMES))
-                && current_nick != next_nick
+            if current_nick != next_nick
+                && (actor_perms.contains(PermissionFlags::CHANGE_NICKNAME)
+                    || actor_perms.contains(PermissionFlags::MANAGE_NICKNAMES))
             {
-                sqlx::query(
-                    "UPDATE guild_members SET nick = ? WHERE guild_id = ? AND user_id = ?",
-                )
-                .bind(&next_nick)
-                .bind(guild_id)
-                .bind(target_user_id)
-                .execute(&mut *tx)
-                .await?;
+                sqlx::query("UPDATE guild_members SET nick = ? WHERE guild_id = ? AND user_id = ?")
+                    .bind(&next_nick)
+                    .bind(guild_id)
+                    .bind(target_user_id)
+                    .execute(&mut *tx)
+                    .await?;
                 changed = true;
             }
         } else {
@@ -544,12 +531,10 @@ pub async fn update_member(
                     return Err(AppError::missing_permissions());
                 }
                 let actor_highest =
-                    role_service::highest_member_role_position(&mut *tx, guild_id, actor_id)
-                        .await?;
+                    role::highest_member_role_position(&mut *tx, guild_id, actor_id).await?;
                 cached_actor_highest = Some(actor_highest);
                 let target_highest =
-                    role_service::highest_member_role_position(&mut *tx, guild_id, target_user_id)
-                        .await?;
+                    role::highest_member_role_position(&mut *tx, guild_id, target_user_id).await?;
                 if actor_highest <= target_highest {
                     return Err(AppError::missing_permissions());
                 }
@@ -617,8 +602,7 @@ pub async fn update_member(
                 let actor_highest = match cached_actor_highest {
                     Some(pos) => pos,
                     None => {
-                        role_service::highest_member_role_position(&mut *tx, guild_id, actor_id)
-                            .await?
+                        role::highest_member_role_position(&mut *tx, guild_id, actor_id).await?
                     }
                 };
                 for rid in seen.symmetric_difference(&current_set) {
@@ -683,6 +667,7 @@ fn normalize_nick_opt(raw: Option<&str>) -> Result<Option<String>, AppError> {
             "Nickname must be between 1 and 32 characters.",
         ));
     }
+    crate::utils::validation::reject_control_chars("nick", trimmed)?;
     Ok(Some(trimmed.to_string()))
 }
 
@@ -716,14 +701,7 @@ async fn fetch_member_response_tx(
     .await?
     .ok_or_else(AppError::unknown_member)?;
 
-    let roles: Vec<String> = sqlx::query_scalar(
-        "SELECT role_id FROM guild_member_roles WHERE guild_id = ? AND user_id = ? AND role_id != ?",
-    )
-    .bind(guild_id)
-    .bind(user_id)
-    .bind(guild_id)
-    .fetch_all(&mut *conn)
-    .await?;
+    let roles = queries::fetch_member_roles(&mut *conn, guild_id, user_id).await?;
 
     Ok(row.into_member_response(roles))
 }

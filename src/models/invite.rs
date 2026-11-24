@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::models::serde_helpers::serialize_millis_iso;
 use crate::models::user::PartialUser;
@@ -17,13 +17,6 @@ impl From<InviteType> for u8 {
     fn from(kind: InviteType) -> u8 {
         kind as u8
     }
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub struct CreateInviteRequest {
-    pub max_uses: Option<u32>,
-    pub max_age: Option<u32>,
-    pub temporary: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]

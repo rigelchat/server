@@ -2,19 +2,22 @@ use std::sync::LazyLock;
 
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use chrono::Utc;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::config::{LoginMode, RegistrationMode, TagStyle};
 use crate::constants::flags::UserFlags;
 use crate::constants::limits::{
-    MAX_EMAIL_LENGTH, MAX_GLOBAL_NAME_LENGTH, MAX_PASSWORD_LENGTH, MAX_USERNAME_LENGTH,
-    MAX_USERNAME_SUGGESTION_SEED_LENGTH,
+    MAX_GLOBAL_NAME_LENGTH, MAX_PASSWORD_LENGTH, MAX_USERNAME_LENGTH,
+    MAX_USERNAME_SUGGESTION_SEED_LENGTH, MIN_PASSWORD_LENGTH, SESSION_TOUCH_INTERVAL_MS,
+    SESSION_TTL_MS,
 };
 use crate::constants::user::{DEFAULT_DISCRIMINATOR, DEFAULT_THEME, VALID_THEMES};
 use crate::error::{AppError, ValidationCode};
 use crate::models::rest::auth::{LoginRequest, LoginResponse, RegisterRequest};
 use crate::models::user::{PartialUser, UserRow};
+use crate::utils::validation::{is_valid_email, reject_control_chars};
 use crate::utils::{snowflake::DISCORD_SNOWFLAKE, token};
 
 static DUMMY_PASSWORD_HASH: LazyLock<String> = LazyLock::new(|| {
@@ -22,6 +25,13 @@ static DUMMY_PASSWORD_HASH: LazyLock<String> = LazyLock::new(|| {
         .hash_password(b"rigel-dummy-timing-check")
         .map(|h| h.to_string())
         .unwrap_or_default()
+});
+
+static ARGON2_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| {
+    let permits = std::thread::available_parallelism()
+        .map(|n| n.get().clamp(2, 16))
+        .unwrap_or(4);
+    Semaphore::new(permits)
 });
 
 fn normalize_login_identifier(raw: &str, login_mode: LoginMode) -> String {
@@ -41,7 +51,21 @@ fn normalize_login_identifier(raw: &str, login_mode: LoginMode) -> String {
     trimmed.to_string()
 }
 
-fn validate_username(username: &str) -> Result<(), AppError> {
+pub fn validate_password(password: &str) -> Result<(), AppError> {
+    let len = password.chars().count();
+    if !(MIN_PASSWORD_LENGTH..=MAX_PASSWORD_LENGTH).contains(&len) {
+        return Err(AppError::validation(
+            "password",
+            ValidationCode::PasswordLengthInvalid,
+            format!(
+                "Password must be between {MIN_PASSWORD_LENGTH} and {MAX_PASSWORD_LENGTH} characters."
+            ),
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_username(username: &str) -> Result<(), AppError> {
     if username.is_empty() || username.len() > MAX_USERNAME_LENGTH {
         return Err(AppError::validation(
             "username",
@@ -115,14 +139,42 @@ pub async fn is_session_active(
     session_id: &str,
     user_id: &str,
 ) -> Result<bool, AppError> {
-    let exists: Option<(i32,)> =
-        sqlx::query_as("SELECT 1 FROM user_sessions WHERE id = ? AND user_id = ? LIMIT 1")
+    let row: Option<(u64, Option<u64>)> = sqlx::query_as(
+        "SELECT created_at, last_used_at FROM user_sessions WHERE id = ? AND user_id = ? LIMIT 1",
+    )
+    .bind(session_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let Some((created_at, last_used_at)) = row else {
+        return Ok(false);
+    };
+
+    let last_active_ms = last_used_at.unwrap_or(created_at);
+    let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+    let elapsed = now_ms.saturating_sub(last_active_ms);
+
+    if elapsed > SESSION_TTL_MS {
+        let _ = sqlx::query("DELETE FROM user_sessions WHERE id = ? AND user_id = ?")
             .bind(session_id)
             .bind(user_id)
-            .fetch_optional(&state.db)
-            .await?;
+            .execute(&state.db)
+            .await;
+        return Ok(false);
+    }
 
-    Ok(exists.is_some())
+    if elapsed > SESSION_TOUCH_INTERVAL_MS {
+        let _ =
+            sqlx::query("UPDATE user_sessions SET last_used_at = ? WHERE id = ? AND user_id = ?")
+                .bind(now_ms)
+                .bind(session_id)
+                .bind(user_id)
+                .execute(&state.db)
+                .await;
+    }
+
+    Ok(true)
 }
 
 pub async fn is_username_available(state: &AppState, username: &str) -> Result<bool, AppError> {
@@ -130,7 +182,7 @@ pub async fn is_username_available(state: &AppState, username: &str) -> Result<b
     validate_username(trimmed)?;
 
     let existing: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1")
+        sqlx::query_as("SELECT id FROM users WHERE username = ? LIMIT 1")
             .bind(trimmed)
             .fetch_optional(&state.db)
             .await?;
@@ -168,9 +220,10 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
 
     let user = match state.config.auth.login_mode {
         LoginMode::Email => {
-            sqlx::query_as::<_, UserRow>(
-                "SELECT * FROM users WHERE (email IS NOT NULL AND LOWER(email) = LOWER(?)) OR LOWER(username) = LOWER(?) ORDER BY (email IS NOT NULL AND LOWER(email) = LOWER(?)) DESC LIMIT 1",
-            )
+            sqlx::query_as::<_, UserRow>(&format!(
+                "SELECT {} FROM users WHERE email = ? OR username = ? ORDER BY (email = ?) DESC LIMIT 1",
+                UserRow::SELECT_COLS
+            ))
             .bind(raw_identifier)
             .bind(&normalized)
             .bind(raw_identifier)
@@ -178,9 +231,10 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
             .await?
         }
         LoginMode::Username => {
-            sqlx::query_as::<_, UserRow>(
-                "SELECT * FROM users WHERE LOWER(username) = LOWER(?) OR LOWER(username) = LOWER(?) LIMIT 1",
-            )
+            sqlx::query_as::<_, UserRow>(&format!(
+                "SELECT {} FROM users WHERE username = ? OR username = ? LIMIT 1",
+                UserRow::SELECT_COLS
+            ))
             .bind(raw_identifier)
             .bind(&normalized)
             .fetch_optional(&state.db)
@@ -192,6 +246,10 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
         Some(pair) => pair,
         None => {
             let password_owned = payload.password;
+            let _permit = ARGON2_SEMAPHORE
+                .acquire()
+                .await
+                .map_err(|e| AppError::internal(format!("Argon2 semaphore closed: {e}")))?;
             let _ = tokio::task::spawn_blocking(move || {
                 if let Ok(parsed) = PasswordHash::new(&DUMMY_PASSWORD_HASH) {
                     let _ = Argon2::default().verify_password(password_owned.as_bytes(), &parsed);
@@ -207,17 +265,23 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
     };
 
     let password_owned = payload.password;
-    let valid = tokio::task::spawn_blocking(move || {
-        PasswordHash::new(&hash_owned)
-            .map(|parsed| {
-                Argon2::default()
-                    .verify_password(password_owned.as_bytes(), &parsed)
-                    .is_ok()
-            })
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
+    let valid = {
+        let _permit = ARGON2_SEMAPHORE
+            .acquire()
+            .await
+            .map_err(|e| AppError::internal(format!("Argon2 semaphore closed: {e}")))?;
+        tokio::task::spawn_blocking(move || {
+            PasswordHash::new(&hash_owned)
+                .map(|parsed| {
+                    Argon2::default()
+                        .verify_password(password_owned.as_bytes(), &parsed)
+                        .is_ok()
+                })
+                .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false)
+    };
 
     if !valid {
         return Err(AppError::validation(
@@ -239,7 +303,7 @@ pub async fn login(state: &AppState, payload: LoginRequest) -> Result<LoginRespo
         .execute(&mut *tx)
         .await?;
 
-    let signed = token::sign(&user.id, &state.config.auth.secret);
+    let signed = token::sign(&user.id, &state.config.auth.secret).map_err(AppError::internal)?;
 
     sqlx::query("INSERT INTO user_sessions (id, user_id, created_at) VALUES (?, ?, ?)")
         .bind(&signed.session_id)
@@ -287,7 +351,7 @@ pub async fn register(
                     "Email is required.",
                 ));
             }
-            if !raw.contains('@') || raw.len() > MAX_EMAIL_LENGTH {
+            if !is_valid_email(raw) {
                 return Err(AppError::validation(
                     "email",
                     ValidationCode::InvalidEmailFormat,
@@ -296,7 +360,7 @@ pub async fn register(
             }
             let lower = raw.to_ascii_lowercase();
             let exists: Option<(String,)> =
-                sqlx::query_as("SELECT id FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1")
+                sqlx::query_as("SELECT id FROM users WHERE email = ? LIMIT 1")
                     .bind(&lower)
                     .fetch_optional(&state.db)
                     .await?;
@@ -317,14 +381,15 @@ pub async fn register(
         .map(|g| g.trim().to_string())
         .filter(|g| !g.is_empty());
 
-    if let Some(ref g) = global_name
-        && g.len() > MAX_GLOBAL_NAME_LENGTH
-    {
-        return Err(AppError::validation(
-            "global_name",
-            ValidationCode::GlobalNameLengthInvalid,
-            "Display name must be at most 32 characters.",
-        ));
+    if let Some(ref g) = global_name {
+        if g.chars().count() > MAX_GLOBAL_NAME_LENGTH {
+            return Err(AppError::validation(
+                "global_name",
+                ValidationCode::GlobalNameLengthInvalid,
+                "Display name must be at most 32 characters.",
+            ));
+        }
+        reject_control_chars("global_name", g)?;
     }
 
     let explicit_username = payload
@@ -333,6 +398,7 @@ pub async fn register(
         .map(|u| u.trim().to_string())
         .filter(|u| !u.is_empty());
 
+    let has_explicit_username = explicit_username.is_some();
     let mut username = match explicit_username {
         Some(u) => {
             validate_username(&u)?;
@@ -352,13 +418,7 @@ pub async fn register(
     };
 
     let password = payload.password.as_deref().unwrap_or("");
-    if password.is_empty() || password.len() > MAX_PASSWORD_LENGTH {
-        return Err(AppError::validation(
-            "password",
-            ValidationCode::PasswordLengthInvalid,
-            "Password must be between 1 and 256 characters.",
-        ));
-    }
+    validate_password(password)?;
 
     let theme = payload
         .theme
@@ -367,48 +427,84 @@ pub async fn register(
         .unwrap_or(DEFAULT_THEME);
 
     let password_owned = password.to_string();
-    let password_hash = tokio::task::spawn_blocking(move || {
-        Argon2::default()
-            .hash_password(password_owned.as_bytes())
-            .map(|h| h.to_string())
-            .map_err(|err| format!("Password hashing failed: {err}"))
-    })
-    .await
-    .map_err(|err| AppError::internal(format!("Password hashing task failed: {err}")))?
-    .map_err(AppError::internal)?;
+    let password_hash = {
+        let _permit = ARGON2_SEMAPHORE
+            .acquire()
+            .await
+            .map_err(|e| AppError::internal(format!("Argon2 semaphore closed: {e}")))?;
+        tokio::task::spawn_blocking(move || {
+            Argon2::default()
+                .hash_password(password_owned.as_bytes())
+                .map(|h| h.to_string())
+                .map_err(|err| format!("Password hashing failed: {err}"))
+        })
+        .await
+        .map_err(|err| AppError::internal(format!("Password hashing task failed: {err}")))?
+        .map_err(AppError::internal)?
+    };
 
     let mut tx = state.db.begin().await?;
 
     let existing: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1")
+        sqlx::query_as("SELECT id FROM users WHERE username = ? LIMIT 1")
             .bind(&username)
             .fetch_optional(&mut *tx)
             .await?;
 
     if existing.is_some() {
-        if payload
-            .username
-            .as_deref()
-            .is_some_and(|u| !u.trim().is_empty())
-        {
+        if has_explicit_username {
             return Err(AppError::validation(
                 "username",
                 ValidationCode::UsernameAlreadyTaken,
                 "This username is already taken.",
             ));
         }
-        let suffix = &Uuid::new_v4().simple().to_string()[..4];
         let base: String = username.chars().take(27).collect();
-        username = format!("{base}_{suffix}");
+        for _ in 0..5 {
+            let suffix = &Uuid::new_v4().simple().to_string()[..4];
+            let candidate = format!("{base}_{suffix}");
+            let taken: Option<(String,)> =
+                sqlx::query_as("SELECT id FROM users WHERE username = ? LIMIT 1")
+                    .bind(&candidate)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            username = candidate;
+            if taken.is_none() {
+                break;
+            }
+        }
     }
 
-    // First non-bot account becomes instance staff so it can bootstrap guilds.
-    let (user_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE bot = FALSE")
-        .fetch_one(&mut *tx)
+    let any_human: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM users WHERE bot = FALSE LIMIT 1")
+        .fetch_optional(&mut *tx)
         .await?;
 
-    let public_flags = if user_count == 0 {
-        UserFlags::STAFF.bits()
+    let public_flags = if any_human.is_none() {
+        let lock_row: Option<(String,)> = sqlx::query_as(
+            "SELECT name FROM instance_locks WHERE name = 'bootstrap_staff' FOR UPDATE",
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        if lock_row.is_none() {
+            sqlx::query("INSERT IGNORE INTO instance_locks (name) VALUES ('bootstrap_staff')")
+                .execute(&mut *tx)
+                .await?;
+            let _: Option<(String,)> = sqlx::query_as(
+                "SELECT name FROM instance_locks WHERE name = 'bootstrap_staff' FOR UPDATE",
+            )
+            .fetch_optional(&mut *tx)
+            .await?;
+        }
+
+        let recheck: Option<(i32,)> =
+            sqlx::query_as("SELECT 1 FROM users WHERE bot = FALSE LIMIT 1 FOR UPDATE")
+                .fetch_optional(&mut *tx)
+                .await?;
+        if recheck.is_none() {
+            UserFlags::STAFF.bits()
+        } else {
+            0
+        }
     } else {
         0
     };
@@ -429,43 +525,55 @@ pub async fn register(
         }
     };
 
-    let insert_res = sqlx::query(
-        r#"
-        INSERT INTO users
-            (id, created_at, bot, public_flags, username, email, verified, password_hash, global_name, discriminator)
-        VALUES (?, ?, FALSE, ?, ?, ?, TRUE, ?, ?, ?)
-        "#,
-    )
-    .bind(&user_id)
-    .bind(created_at)
-    .bind(public_flags)
-    .bind(&username)
-    .bind(&email_to_store)
-    .bind(&password_hash)
-    .bind(&global_name)
-    .bind(&discriminator)
-    .execute(&mut *tx)
-    .await;
+    let max_insert_attempts = if has_explicit_username { 1 } else { 4 };
+    let base_for_retry: String = username.chars().take(27).collect();
+    for attempt in 0..max_insert_attempts {
+        let insert_res = sqlx::query(
+            r#"
+            INSERT INTO users
+                (id, created_at, bot, public_flags, username, email, verified, password_hash, global_name, discriminator)
+            VALUES (?, ?, FALSE, ?, ?, ?, TRUE, ?, ?, ?)
+            "#,
+        )
+        .bind(&user_id)
+        .bind(created_at)
+        .bind(public_flags)
+        .bind(&username)
+        .bind(&email_to_store)
+        .bind(&password_hash)
+        .bind(&global_name)
+        .bind(&discriminator)
+        .execute(&mut *tx)
+        .await;
 
-    if let Err(err) = insert_res {
-        if let sqlx::Error::Database(db_err) = &err
-            && db_err.is_unique_violation()
-        {
-                let msg = db_err.message();
-                if msg.contains("'email'") || msg.contains(".email'") {
+        match insert_res {
+            Ok(_) => break,
+            Err(err) => {
+                if let sqlx::Error::Database(db_err) = &err
+                    && db_err.is_unique_violation()
+                {
+                    let msg = db_err.message();
+                    if msg.contains("'email'") || msg.contains(".email'") {
+                        return Err(AppError::validation(
+                            "email",
+                            ValidationCode::EmailAlreadyInUse,
+                            "Email is already in use.",
+                        ));
+                    }
+                    if !has_explicit_username && attempt + 1 < max_insert_attempts {
+                        let suffix = &Uuid::new_v4().simple().to_string()[..4];
+                        username = format!("{base_for_retry}_{suffix}");
+                        continue;
+                    }
                     return Err(AppError::validation(
-                        "email",
-                        ValidationCode::EmailAlreadyInUse,
-                        "Email is already in use.",
+                        "username",
+                        ValidationCode::UsernameAlreadyTaken,
+                        "This username is already taken.",
                     ));
                 }
-                return Err(AppError::validation(
-                    "username",
-                    ValidationCode::UsernameAlreadyTaken,
-                    "This username is already taken.",
-                ));
+                return Err(err.into());
+            }
         }
-        return Err(err.into());
     }
 
     sqlx::query("INSERT INTO user_settings (id, theme) VALUES (?, ?)")
@@ -479,7 +587,7 @@ pub async fn register(
         .execute(&mut *tx)
         .await?;
 
-    let signed = token::sign(&user_id, &state.config.auth.secret);
+    let signed = token::sign(&user_id, &state.config.auth.secret).map_err(AppError::internal)?;
 
     sqlx::query("INSERT INTO user_sessions (id, user_id, created_at) VALUES (?, ?, ?)")
         .bind(&signed.session_id)
@@ -528,6 +636,15 @@ mod tests {
         assert!(validate_username("everyone").is_err());
         assert!(validate_username("HERE").is_err());
         assert!(validate_username("my_fluxer_bot").is_err());
+        assert!(validate_username("system message").is_err());
+    }
+
+    #[test]
+    fn validate_password_rules() {
+        assert!(validate_password("12345678").is_ok());
+        assert!(validate_password("").is_err());
+        assert!(validate_password("1234567").is_err());
+        assert!(validate_password(&"a".repeat(MAX_PASSWORD_LENGTH + 1)).is_err());
     }
 
     #[test]

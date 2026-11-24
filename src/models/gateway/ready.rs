@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
+use crate::models::gateway::presence::GatewayPresence;
 use crate::models::guild::GatewayGuild;
 use crate::models::user::{CurrentUser, PartialUser, UserSettings};
 
@@ -30,7 +31,7 @@ pub struct ReadyData {
     pub private_channels: Vec<serde_json::Value>,
     pub pinned_dms: Vec<String>,
     pub relationships: Vec<serde_json::Value>,
-    pub presences: Vec<serde_json::Value>,
+    pub presences: Vec<GatewayPresence>,
     pub read_states: Vec<serde_json::Value>,
     pub notes: HashMap<String, String>,
     pub favorite_memes: Vec<serde_json::Value>,

@@ -52,3 +52,22 @@ pub struct IdentifyPayload {
     pub properties: serde_json::Value,
     pub presence: Option<IdentifyPresence>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opcode_and_payload_serde_roundtrip() {
+        assert_eq!(Opcode::try_from(10).unwrap(), Opcode::Hello);
+        assert_eq!(Opcode::try_from(14).unwrap(), Opcode::LazyRequest);
+        assert!(Opcode::try_from(255).is_err());
+
+        let hb = serde_json::to_string(&GatewayPayload::<serde_json::Value>::new(
+            Opcode::HeartbeatAck,
+            None,
+        ))
+        .unwrap();
+        assert_eq!(hb, r#"{"op":11}"#);
+    }
+}

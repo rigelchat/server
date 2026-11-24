@@ -18,7 +18,7 @@ bitflags! {
 }
 
 bitflags! {
-    /// See: https://docs.discord.com/developers/resources/message#message-object-message-types
+    /// See: https://docs.discord.com/developers/topics/permissions#permissions-bitwise-permission-flags
     /// See: https://docs.fluxer.app/http-api/permissions
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]

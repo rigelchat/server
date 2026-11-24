@@ -1,4 +1,5 @@
 pub mod api;
+pub mod well_known_fluxer;
 pub mod well_known_spacebar;
 
 use axum::{Router, response::Html, routing::get};
@@ -11,6 +12,7 @@ pub fn router() -> Router<AppState> {
         .route("/", get(index))
         .nest("/api", api::router())
         .nest(&format!("/api/v{}", API_VERSION), api::router())
+        .nest("/.well-known/fluxer", well_known_fluxer::router())
         .nest(
             "/.well-known/spacebar/client",
             well_known_spacebar::router(),

@@ -7,7 +7,6 @@ mod guilds;
 mod invites;
 mod ping;
 mod users;
-mod well_known_fluxer;
 
 use axum::Router;
 
@@ -24,5 +23,4 @@ pub fn router() -> Router<AppState> {
         .nest("/ping", ping::router())
         .nest("/users", users::router())
         .nest("/invites", invites::router())
-        .nest("/.well-known/fluxer", well_known_fluxer::router())
 }

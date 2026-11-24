@@ -17,27 +17,26 @@ pub struct TokenClaims {
     pub session_id: String,
 }
 
-pub fn sign(user_id: &str, secret: &str) -> TokenData {
+pub fn sign(user_id: &str, secret: &str) -> Result<TokenData, &'static str> {
     let payload64 = URL_SAFE_NO_PAD.encode(user_id);
     let session_id = URL_SAFE_NO_PAD.encode(Uuid::new_v4().as_bytes());
 
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("System clock is before UNIX_EPOCH")
-        .as_millis() as u64;
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
 
     let msg = format!("{payload64}.{session_id}");
 
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any size");
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| "Invalid HMAC key")?;
     mac.update(msg.as_bytes());
     let signature64 = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
 
-    TokenData {
+    Ok(TokenData {
         token: format!("{msg}.{signature64}"),
         session_id,
         created_at,
-    }
+    })
 }
 
 pub fn strip_auth_prefix(raw: &str) -> &str {
@@ -50,19 +49,19 @@ pub fn strip_auth_prefix(raw: &str) -> &str {
 }
 
 pub fn verify(token: &str, secret: &str) -> Result<TokenClaims, String> {
-    let parts: Vec<&str> = token.trim().split('.').collect();
-    if parts.len() != 3 {
+    let mut parts = token.trim().split('.');
+    let (Some(payload64), Some(session_id), Some(signature64), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
         return Err("Malformed token".to_string());
-    }
-
-    let [payload64, session_id, signature64] = [parts[0], parts[1], parts[2]];
+    };
 
     if session_id.is_empty() || session_id.len() > 36 {
         return Err("Invalid session segment".to_string());
     }
 
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any size");
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .map_err(|_| "Invalid HMAC key".to_string())?;
     mac.update(format!("{payload64}.{session_id}").as_bytes());
 
     let sig_bytes = URL_SAFE_NO_PAD
@@ -91,18 +90,25 @@ mod tests {
     #[test]
     fn sign_and_verify_roundtrip() {
         let secret = "super_secret_test_key";
-        let data = sign("1234567890", secret);
+        let data = sign("1234567890", secret).expect("signing should succeed");
         let claims = verify(&data.token, secret).expect("token should verify");
         assert_eq!(claims.user_id, "1234567890");
         assert_eq!(claims.session_id, data.session_id);
     }
 
     #[test]
-    fn reject_tampered_or_wrong_secret() {
-        let data = sign("42", "secret_a");
+    fn reject_tampered_malformed_or_wrong_secret() {
+        let data = sign("42", "secret_a").expect("signing should succeed");
         assert!(verify(&data.token, "secret_b").is_err());
         assert!(verify(&format!("{}x", data.token), "secret_a").is_err());
         assert!(verify("not.enough", "secret_a").is_err());
+        assert!(verify("a.b.c.d", "secret_a").is_err());
+
+        let empty_sess = format!("{}.{}.sig", URL_SAFE_NO_PAD.encode("42"), "");
+        assert!(verify(&empty_sess, "secret_a").is_err());
+
+        let long_sess = format!("{}.{}.sig", URL_SAFE_NO_PAD.encode("42"), "s".repeat(37));
+        assert!(verify(&long_sess, "secret_a").is_err());
     }
 
     #[test]

@@ -15,13 +15,16 @@ use rigel_server::{
     state::AppState,
 };
 
-fn test_config(registration_mode: RegistrationMode) -> AppConfig {
+fn test_config(
+    registration_mode: RegistrationMode,
+    cors_allowed_origins: Vec<String>,
+) -> AppConfig {
     AppConfig {
         host: "127.0.0.1".to_string(),
         port: 0,
         public_http_url: "http://127.0.0.1:3000".to_string(),
         public_ws_url: "ws://127.0.0.1:3000".to_string(),
-        cors_allowed_origins: vec!["*".to_string()],
+        cors_allowed_origins,
         database_url: "mysql://rigel:rigel@127.0.0.1:3306/rigel".to_string(),
         db_max_connections: 1,
         auth: AuthConfig {
@@ -47,13 +50,15 @@ fn test_config(registration_mode: RegistrationMode) -> AppConfig {
         features: FeatureConfig {
             guild_creation_policy: GuildCreationPolicy::Staff,
             enable_attachments: false,
-            enable_auto_emoji_sync: false,
         },
     }
 }
 
-async fn spawn_test_server(registration_mode: RegistrationMode) -> String {
-    let cfg = test_config(registration_mode);
+async fn spawn_test_server(
+    registration_mode: RegistrationMode,
+    cors_allowed_origins: Vec<String>,
+) -> String {
+    let cfg = test_config(registration_mode, cors_allowed_origins);
     let db = MySqlPoolOptions::new()
         .connect_lazy(&cfg.database_url)
         .expect("valid lazy mysql url");
@@ -78,7 +83,7 @@ async fn spawn_test_server(registration_mode: RegistrationMode) -> String {
 
 #[tokio::test]
 async fn discovery_and_well_known_endpoints_respond_with_expected_schema() {
-    let base = spawn_test_server(RegistrationMode::Open).await;
+    let base = spawn_test_server(RegistrationMode::Open, vec!["*".to_string()]).await;
     let client = reqwest::Client::new();
 
     let ping_res = client.get(format!("{base}/api/ping")).send().await.unwrap();
@@ -95,7 +100,7 @@ async fn discovery_and_well_known_endpoints_respond_with_expected_schema() {
     assert_eq!(ping_v9.status(), StatusCode::OK);
 
     let fluxer_res = client
-        .get(format!("{base}/api/.well-known/fluxer"))
+        .get(format!("{base}/.well-known/fluxer"))
         .send()
         .await
         .unwrap();
@@ -136,17 +141,25 @@ async fn discovery_and_well_known_endpoints_respond_with_expected_schema() {
 
 #[tokio::test]
 async fn auth_rejection_validation_and_closed_registration_work_deterministically() {
-    let base = spawn_test_server(RegistrationMode::Closed).await;
+    let base = spawn_test_server(RegistrationMode::Closed, vec!["*".to_string()]).await;
     let client = reqwest::Client::new();
 
-    let missing_auth = client
-        .get(format!("{base}/api/users/@me"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(missing_auth.status(), StatusCode::UNAUTHORIZED);
-    let body: Value = serde_json::from_slice(&missing_auth.bytes().await.unwrap()).unwrap();
-    assert_eq!(body["code"], "MISSING_AUTHORIZATION");
+    for (method, path) in [
+        (reqwest::Method::GET, "/api/users/@me"),
+        (reqwest::Method::GET, "/api/users/@me/guilds"),
+        (reqwest::Method::PATCH, "/api/users/@me/settings"),
+        (reqwest::Method::POST, "/api/guilds"),
+        (reqwest::Method::GET, "/api/channels/123456/messages"),
+    ] {
+        let res = client
+            .request(method, format!("{base}{path}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        let body: Value = serde_json::from_slice(&res.bytes().await.unwrap()).unwrap();
+        assert_eq!(body["code"], "MISSING_AUTHORIZATION");
+    }
 
     let bad_token = client
         .get(format!("{base}/api/users/@me"))
@@ -190,4 +203,66 @@ async fn auth_rejection_validation_and_closed_registration_work_deterministicall
     assert_eq!(suggest.status(), StatusCode::OK);
     let body: Value = serde_json::from_slice(&suggest.bytes().await.unwrap()).unwrap();
     assert_eq!(body["suggestions"][0], "jean_dupont");
+}
+
+#[tokio::test]
+async fn cors_allows_only_configured_origins_and_auth_rate_limit_triggers_429() {
+    let base = spawn_test_server(
+        RegistrationMode::Open,
+        vec!["https://app.example.com".to_string()],
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let allowed = client
+        .get(format!("{base}/api/ping"))
+        .header("origin", "https://app.example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        allowed
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok()),
+        Some("https://app.example.com")
+    );
+
+    let disallowed = client
+        .get(format!("{base}/api/ping"))
+        .header("origin", "https://evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        disallowed
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none()
+    );
+
+    for _ in 0..15 {
+        let res = client
+            .post(format!("{base}/api/auth/login"))
+            .header("content-type", "application/json")
+            .body("{bad")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    let throttled = client
+        .post(format!("{base}/api/auth/login"))
+        .header("content-type", "application/json")
+        .body("{bad")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(throttled.headers().contains_key("retry-after"));
+    let body: Value = serde_json::from_slice(&throttled.bytes().await.unwrap()).unwrap();
+    assert_eq!(body["code"], "RATE_LIMITED");
+    assert_eq!(body["global"], false);
+    assert!(body["retry_after"].as_f64().is_some_and(|v| v > 0.0));
 }

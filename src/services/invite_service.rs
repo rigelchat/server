@@ -5,15 +5,17 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::constants::flags::PermissionFlags;
 use crate::constants::limits::{
-    INVITE_CODE_LENGTH, MAX_INVITE_AGE_SECONDS, MAX_INVITE_USES, MAX_INVITES_PER_GUILD,
+    INVITE_CODE_LENGTH, MAX_INVITE_AGE_SECONDS, MAX_INVITE_CODE_LENGTH, MAX_INVITE_USES,
+    MAX_INVITES_PER_GUILD,
 };
 use crate::error::AppError;
 use crate::models::channel::ChannelType;
 use crate::models::invite::{
-    CreateInviteRequest, CreatedInvite, InviteChannel, InviteGuild, InviteResponse, InviteType,
+    CreatedInvite, InviteChannel, InviteGuild, InviteResponse, InviteType,
 };
+use crate::models::rest::invites::CreateInviteRequest;
 use crate::models::serde_helpers::millis_to_iso;
-use crate::services::{member_service, permission_service, user_service};
+use crate::services::{member_service, permission_service, user};
 
 #[derive(FromRow)]
 struct InviteDetailsRow {
@@ -38,6 +40,16 @@ struct InviteDeleteRow {
     channel_id: String,
     inviter_id: String,
     owner_id: String,
+}
+
+fn validate_invite_code(code: &str) -> Result<(), AppError> {
+    if code.is_empty()
+        || code.len() > MAX_INVITE_CODE_LENGTH
+        || !code.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return Err(AppError::unknown_invite());
+    }
+    Ok(())
 }
 
 async fn fetch_invite_details(
@@ -75,9 +87,7 @@ async fn fetch_invite_details(
             .await?;
 
     let online_count = state.count_guild_online(&row.guild_id).await as usize;
-    let inviter = user_service::get_partial_user(state, &row.inviter_id)
-        .await
-        .ok();
+    let inviter = user::get_partial_user(state, &row.inviter_id).await.ok();
 
     let invite = InviteResponse {
         code: row.code.clone(),
@@ -108,7 +118,6 @@ async fn fetch_invite_details(
         inviter,
         member_count: Some(member_count),
         presence_count: Some(online_count),
-
         expires_at: row.expires_at.map(millis_to_iso),
         temporary: false,
     };
@@ -129,7 +138,9 @@ pub async fn create_channel_invite(
             .await?
             .ok_or_else(AppError::unknown_channel)?;
 
-    if channel_type == ChannelType::GuildCategory as u32 {
+    if channel_type == ChannelType::GuildCategory as u32
+        || channel_type == ChannelType::GuildLink as u32
+    {
         return Err(AppError::invalid_channel_type());
     }
 
@@ -142,9 +153,16 @@ pub async fn create_channel_invite(
     )
     .await?;
 
+    let mut tx = state.db.begin().await?;
+
+    let _: Option<(String,)> = sqlx::query_as("SELECT id FROM guilds WHERE id = ? FOR UPDATE")
+        .bind(&guild_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
     let invite_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invites WHERE guild_id = ?")
         .bind(&guild_id)
-        .fetch_one(&state.db)
+        .fetch_one(&mut *tx)
         .await?;
     if invite_count as u64 >= MAX_INVITES_PER_GUILD {
         return Err(AppError::max_invites());
@@ -166,8 +184,10 @@ pub async fn create_channel_invite(
     .bind(max_uses)
     .bind(created_at)
     .bind(expires_at)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     let (_, mut invite) = fetch_invite_details(state, &code).await?;
     invite.temporary = payload.temporary.unwrap_or(false);
@@ -182,6 +202,7 @@ pub async fn create_channel_invite(
 }
 
 pub async fn get_invite(state: &AppState, code: &str) -> Result<InviteResponse, AppError> {
+    validate_invite_code(code)?;
     let (_, invite) = fetch_invite_details(state, code).await?;
     Ok(invite)
 }
@@ -191,6 +212,7 @@ pub async fn accept_invite(
     code: &str,
     user_id: &str,
 ) -> Result<InviteResponse, AppError> {
+    validate_invite_code(code)?;
     let (row, mut invite) = fetch_invite_details(state, code).await?;
 
     let mut tx = state.db.begin().await?;
@@ -230,6 +252,7 @@ pub async fn accept_invite(
 }
 
 pub async fn delete_invite(state: &AppState, code: &str, user_id: &str) -> Result<(), AppError> {
+    validate_invite_code(code)?;
     let row = sqlx::query_as::<_, InviteDeleteRow>(
         r#"
         SELECT i.guild_id, i.channel_id, i.inviter_id, g.owner_id
@@ -268,4 +291,17 @@ pub async fn delete_invite(state: &AppState, code: &str, user_id: &str) -> Resul
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_invite_code_format() {
+        assert!(validate_invite_code("a1b2c3d4").is_ok());
+        assert!(validate_invite_code("").is_err());
+        assert!(validate_invite_code("bad-code!").is_err());
+        assert!(validate_invite_code(&"x".repeat(MAX_INVITE_CODE_LENGTH + 1)).is_err());
+    }
 }

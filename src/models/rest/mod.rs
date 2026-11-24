@@ -4,6 +4,7 @@ pub mod discoverable_guilds;
 pub mod discovery;
 pub mod gateway;
 pub mod guilds;
+pub mod invites;
 pub mod messages;
 pub mod ping;
 pub mod roles;

@@ -1,9 +1,8 @@
 use serde::Deserialize;
 
 use crate::models::serde_helpers::{
-    deserialize_double_option, deserialize_opt_string_or_int,
-    deserialize_opt_u64_string_or_int, deserialize_string_or_int,
-    deserialize_template_overwrite_type,
+    deserialize_double_option, deserialize_opt_string_or_int, deserialize_opt_u64_string_or_int,
+    deserialize_string_or_int, deserialize_template_overwrite_type,
 };
 
 #[derive(Debug, Deserialize)]
@@ -65,7 +64,11 @@ pub struct GuildTemplateChannel {
 pub struct GuildTemplateOverwrite {
     #[serde(deserialize_with = "deserialize_string_or_int")]
     pub id: String,
-    #[serde(rename = "type", default, deserialize_with = "deserialize_template_overwrite_type")]
+    #[serde(
+        rename = "type",
+        default,
+        deserialize_with = "deserialize_template_overwrite_type"
+    )]
     pub kind: Option<u32>,
     #[serde(default, deserialize_with = "deserialize_opt_u64_string_or_int")]
     pub allow: Option<u64>,

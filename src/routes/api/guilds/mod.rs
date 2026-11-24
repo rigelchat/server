@@ -7,7 +7,7 @@ use crate::error::AppError;
 use crate::extractors::{AppJson, AuthUser};
 use crate::models::guild::Guild;
 use crate::models::rest::guilds::{CreateGuildRequest, UpdateGuildRequest};
-use crate::services::guild_service;
+use crate::services::guild;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -33,7 +33,7 @@ async fn create_guild(
     auth: AuthUser,
     AppJson(payload): AppJson<CreateGuildRequest>,
 ) -> Result<Json<Guild>, AppError> {
-    let guild = guild_service::create_guild(&state, payload, &auth.user_id).await?;
+    let guild = guild::create_guild(&state, payload, &auth.user_id).await?;
     Ok(Json(guild))
 }
 
@@ -42,7 +42,7 @@ async fn get_guild(
     auth: AuthUser,
     Path(guild_id): Path<String>,
 ) -> Result<Json<Guild>, AppError> {
-    let guild = guild_service::get_guild(&state, &guild_id, &auth.user_id).await?;
+    let guild = guild::get_guild(&state, &guild_id, &auth.user_id).await?;
     Ok(Json(guild))
 }
 
@@ -52,7 +52,7 @@ async fn update_guild(
     Path(guild_id): Path<String>,
     AppJson(payload): AppJson<UpdateGuildRequest>,
 ) -> Result<Json<Guild>, AppError> {
-    let guild = guild_service::update_guild(&state, &guild_id, &auth.user_id, payload).await?;
+    let guild = guild::update_guild(&state, &guild_id, &auth.user_id, payload).await?;
     Ok(Json(guild))
 }
 
@@ -61,7 +61,6 @@ async fn delete_guild(
     auth: AuthUser,
     Path(guild_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    guild_service::delete_guild(&state, &guild_id, &auth.user_id).await?;
+    guild::delete_guild(&state, &guild_id, &auth.user_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
-

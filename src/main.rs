@@ -20,9 +20,7 @@ async fn main() {
 
     let config = Arc::new(AppConfig::from_env());
 
-    if config.features.enable_auto_emoji_sync {
-        utils::assets::spawn_emoji_sync();
-    }
+    utils::assets::spawn_emoji_sync();
 
     let db = db::init(&config.database_url, config.db_max_connections)
         .await
@@ -37,10 +35,13 @@ async fn main() {
 
     let listener = TcpListener::bind(&addr).await.unwrap();
     info!("API listening at http://{}", listener.local_addr().unwrap());
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .unwrap();
 }
 
 async fn shutdown_signal() {

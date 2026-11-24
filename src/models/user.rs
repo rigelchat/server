@@ -4,8 +4,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
 use crate::constants::flags::UserFlags;
+use crate::constants::limits::{MAX_CUSTOM_STATUS_TEXT_LENGTH, MAX_EMOJI_NAME_LENGTH};
 use crate::constants::user::{DEFAULT_AFK_TIMEOUT, DEFAULT_LOCALE, DEFAULT_STATUS, DEFAULT_THEME};
-use crate::models::serde_helpers::millis_to_iso;
+use crate::error::{AppError, ValidationCode};
+use crate::models::serde_helpers::{TimestampInput, millis_to_iso};
+use crate::utils::snowflake::validate_snowflake;
 
 #[derive(Debug, Clone, FromRow)]
 pub struct UserRow {
@@ -21,6 +24,10 @@ pub struct UserRow {
     pub discriminator: String,
     pub avatar: Option<String>,
     pub banner: Option<String>,
+}
+
+impl UserRow {
+    pub const SELECT_COLS: &'static str = "id, created_at, bot, public_flags, username, email, verified, password_hash, global_name, discriminator, avatar, banner";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,6 +261,70 @@ pub struct CustomStatus {
     pub emoji_id: Option<String>,
     pub emoji_name: Option<String>,
     pub emoji_animated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CustomStatusInput {
+    pub text: Option<String>,
+    pub expires_at: Option<TimestampInput>,
+    pub emoji_id: Option<String>,
+    pub emoji_name: Option<String>,
+}
+
+impl CustomStatusInput {
+    pub fn try_into_custom_status(self) -> Result<CustomStatus, AppError> {
+        let text = self
+            .text
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(ref t) = text {
+            if t.chars().count() > MAX_CUSTOM_STATUS_TEXT_LENGTH {
+                return Err(AppError::validation(
+                    "custom_status.text",
+                    ValidationCode::ContentExceedsMaxLength,
+                    "Custom status text must not exceed 128 characters.",
+                ));
+            }
+            crate::utils::validation::reject_control_chars("custom_status.text", t)?;
+        }
+
+        let emoji_name = self
+            .emoji_name
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(ref name) = emoji_name {
+            if name.chars().count() > MAX_EMOJI_NAME_LENGTH {
+                return Err(AppError::validation(
+                    "custom_status.emoji_name",
+                    ValidationCode::StringLengthInvalid,
+                    "Emoji name must not exceed 32 characters.",
+                ));
+            }
+            crate::utils::validation::reject_control_chars("custom_status.emoji_name", name)?;
+        }
+
+        let emoji_id = self
+            .emoji_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(ref id) = emoji_id {
+            validate_snowflake("custom_status.emoji_id", id)?;
+        }
+
+        let expires_at = self
+            .expires_at
+            .map(|v| v.into_opt_iso("custom_status.expires_at"))
+            .transpose()?
+            .flatten();
+
+        Ok(CustomStatus {
+            text,
+            expires_at,
+            emoji_id,
+            emoji_name,
+            emoji_animated: false,
+        })
+    }
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -628,7 +699,10 @@ pub struct GuildFolder {
     pub color: u32,
     #[serde(default, deserialize_with = "deserialize_u32_or_default")]
     pub flags: u32,
-    #[serde(default = "default_folder_icon", deserialize_with = "deserialize_folder_icon")]
+    #[serde(
+        default = "default_folder_icon",
+        deserialize_with = "deserialize_folder_icon"
+    )]
     pub icon: String,
     #[serde(default)]
     pub guild_ids: Vec<String>,
@@ -691,5 +765,33 @@ mod tests {
         assert_eq!(f.flags, 0);
         assert_eq!(f.icon, "folder");
         assert_eq!(f.guild_ids, vec!["123".to_string()]);
+    }
+
+    #[test]
+    fn custom_status_validation_checks_text_emoji_and_expiry() {
+        let ok: CustomStatusInput = serde_json::from_str(
+            r#"{"text":"  Coding  ","expires_at":"2026-12-31T23:59:59Z","emoji_id":"123456789012345678","emoji_name":"rocket"}"#,
+        )
+        .unwrap();
+        let status = ok.try_into_custom_status().unwrap();
+        assert_eq!(status.text.as_deref(), Some("Coding"));
+
+        let too_long = CustomStatusInput {
+            text: Some("x".repeat(MAX_CUSTOM_STATUS_TEXT_LENGTH + 1)),
+            expires_at: None,
+            emoji_id: None,
+            emoji_name: None,
+        }
+        .try_into_custom_status();
+        assert!(too_long.is_err());
+
+        let bad_id = CustomStatusInput {
+            text: None,
+            expires_at: None,
+            emoji_id: Some("not-a-snowflake".to_string()),
+            emoji_name: None,
+        }
+        .try_into_custom_status();
+        assert!(bad_id.is_err());
     }
 }

@@ -8,15 +8,14 @@ use crate::AppState;
 use crate::constants::flags::PermissionFlags;
 use crate::constants::gateway::{MEMBER_LIST_RANGE_MAX_SPAN, events};
 use crate::constants::limits::MAX_LAZY_SUBSCRIBED_MEMBERS;
-use crate::models::channel::{ChannelOverwriteRow, PermissionOverwrite};
 use crate::models::gateway::lazy_request::{
     GuildMemberListUpdate, LazyListAction, LazyRequestPayload, MemberListGroup, MemberListItem,
     MemberListMember, MemberListPresence, MemberListSyncOp,
 };
-use crate::models::guild_member::{GuildMemberFields, GuildMemberRole, GuildMemberUserRow};
+use crate::models::guild_member::{GuildMemberFields, GuildMemberUserRow};
 use crate::models::role::RolePerm;
 use crate::models::user::{CustomStatus, PartialUser};
-use crate::services::permission_service;
+use crate::services::{permission_service, queries};
 use crate::utils::snowflake::Snowflake;
 
 use super::presence;
@@ -167,13 +166,19 @@ async fn fetch_snapshot(
         .ok()
         .flatten()?;
 
-    let role_rows: Vec<SnapshotRoleRow> = sqlx::query_as(
+    let role_rows: Vec<SnapshotRoleRow> = match sqlx::query_as(
         "SELECT id, position, hoist, hoist_position, permissions FROM roles WHERE guild_id = ?",
     )
     .bind(guild_id)
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            error!(error = %err, guild_id = %guild_id, "Failed to fetch roles for lazy request");
+            return None;
+        }
+    };
 
     let guild_roles: Vec<RolePerm> = role_rows
         .iter()
@@ -197,16 +202,17 @@ async fn fetch_snapshot(
     let mut hoisted_buckets: Vec<Vec<SnapshotMember>> =
         (0..hoisted_roles.len()).map(|_| Vec::new()).collect();
 
-    let overwrites: Vec<PermissionOverwrite> = sqlx::query_as::<_, ChannelOverwriteRow>(
-        "SELECT channel_id, type, target_id, allow, deny FROM channel_permission_overwrites WHERE channel_id = ?",
-    )
-    .bind(channel_id)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(PermissionOverwrite::from)
-    .collect();
+    let overwrites = match queries::fetch_channel_overwrites(&state.db, channel_id).await {
+        Ok(ows) => ows,
+        Err(err) => {
+            error!(
+                error = %err,
+                channel_id = %channel_id,
+                "Failed to fetch overwrites for lazy request"
+            );
+            return None;
+        }
+    };
 
     let mut live_presences = state.hub.guild_live_presences(guild_id);
 
@@ -232,19 +238,17 @@ async fn fetch_snapshot(
         }
     };
 
-    let member_role_rows = sqlx::query_as::<_, GuildMemberRole>(
-        "SELECT user_id, role_id FROM guild_member_roles WHERE guild_id = ? AND role_id != ?",
-    )
-    .bind(guild_id)
-    .bind(guild_id)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
-
-    let mut roles_by_user: HashMap<String, Vec<String>> = HashMap::new();
-    for r in member_role_rows {
-        roles_by_user.entry(r.user_id).or_default().push(r.role_id);
-    }
+    let mut roles_by_user = match queries::fetch_guild_member_roles_map(&state.db, guild_id).await {
+        Ok(map) => map,
+        Err(err) => {
+            error!(
+                error = %err,
+                guild_id = %guild_id,
+                "Failed to fetch member roles for lazy request"
+            );
+            return None;
+        }
+    };
 
     let mut online_unhoisted = Vec::new();
     let mut offline_members = Vec::new();
@@ -330,7 +334,7 @@ async fn fetch_snapshot(
             members: online_unhoisted,
         });
     }
-    if !offline_members.is_empty() {
+    if !offline_members.is_empty() && offline_members.len() <= 1000 {
         buckets.push(MemberListBucket {
             id: "offline".to_string(),
             members: offline_members,
@@ -560,9 +564,18 @@ mod tests {
 
         let sliced = snapshot.build_update("g1", "c1", [1, 3]);
         assert_eq!(sliced.ops[0].items.len(), 3);
-        assert!(matches!(sliced.ops[0].items[0], MemberListItem::Member { .. }));
-        assert!(matches!(sliced.ops[0].items[1], MemberListItem::Group { .. }));
-        assert!(matches!(sliced.ops[0].items[2], MemberListItem::Member { .. }));
+        assert!(matches!(
+            sliced.ops[0].items[0],
+            MemberListItem::Member { .. }
+        ));
+        assert!(matches!(
+            sliced.ops[0].items[1],
+            MemberListItem::Group { .. }
+        ));
+        assert!(matches!(
+            sliced.ops[0].items[2],
+            MemberListItem::Member { .. }
+        ));
     }
 
     #[test]
@@ -603,7 +616,7 @@ mod tests {
             permissions: 0,
         };
 
-        let mut list = vec![membre, dev, hokage, roi, new_top];
+        let mut list = [membre, dev, hokage, roi, new_top];
         list.sort_by(compare_hoisted_roles);
         let ids: Vec<&str> = list.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["5", "1", "3", "2", "4"]);

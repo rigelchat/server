@@ -1,5 +1,10 @@
+use std::fmt;
+
 use chrono::{DateTime, SecondsFormat};
-use serde::{Deserialize, Deserializer, Serializer};
+use serde::{
+    Deserialize, Deserializer, Serializer,
+    de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor},
+};
 
 pub fn millis_to_iso(ms: u64) -> String {
     DateTime::from_timestamp_millis(ms as i64)
@@ -31,6 +36,7 @@ where
 {
     Option::<T>::deserialize(deserializer).map(Some)
 }
+
 pub fn deserialize_string_or_int<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,
@@ -50,9 +56,7 @@ where
     }
 }
 
-pub fn deserialize_template_overwrite_type<'de, D>(
-    deserializer: D,
-) -> Result<Option<u32>, D::Error>
+pub fn deserialize_template_overwrite_type<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -121,49 +125,100 @@ where
     }
 }
 
-pub fn parse_timestamp_iso(
-    field: &str,
-    value: serde_json::Value,
-) -> Result<Option<String>, crate::error::AppError> {
-    match value {
-        serde_json::Value::Null => Ok(None),
-        serde_json::Value::String(raw) => {
-            let s = raw.trim().to_string();
-            if s.is_empty() {
-                Ok(None)
-            } else {
-                if s.len() > crate::constants::limits::MAX_EXPIRES_AT_LENGTH
-                    || chrono::DateTime::parse_from_rfc3339(&s).is_err()
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimestampInput {
+    Empty,
+    Iso(String),
+    Invalid,
+}
+
+impl TimestampInput {
+    pub fn into_opt_iso(self, field: &str) -> Result<Option<String>, crate::error::AppError> {
+        match self {
+            Self::Empty => Ok(None),
+            Self::Iso(s) => Ok(Some(s)),
+            Self::Invalid => Err(crate::error::AppError::validation(
+                field,
+                crate::error::ValidationCode::InvalidIsoTimestamp,
+                format!("Invalid {field} timestamp."),
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TimestampInput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct TimestampVisitor;
+
+        impl<'de> Visitor<'de> for TimestampVisitor {
+            type Value = TimestampInput;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an RFC3339 timestamp string, millisecond integer, or null")
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(TimestampInput::Empty)
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(TimestampInput::Empty)
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                let trimmed = v.trim();
+                if trimmed.is_empty() {
+                    Ok(TimestampInput::Empty)
+                } else if trimmed.len() <= crate::constants::limits::MAX_EXPIRES_AT_LENGTH
+                    && DateTime::parse_from_rfc3339(trimmed).is_ok()
                 {
-                    return Err(crate::error::AppError::validation(
-                        field,
-                        crate::error::ValidationCode::InvalidFormat,
-                        format!("Invalid {field} timestamp."),
-                    ));
+                    Ok(TimestampInput::Iso(trimmed.to_string()))
+                } else {
+                    Ok(TimestampInput::Invalid)
                 }
-                Ok(Some(s))
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                Ok(match DateTime::from_timestamp_millis(v) {
+                    Some(ts) => {
+                        TimestampInput::Iso(ts.to_rfc3339_opts(SecondsFormat::Millis, true))
+                    }
+                    None => TimestampInput::Invalid,
+                })
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                Ok(i64::try_from(v)
+                    .ok()
+                    .and_then(DateTime::from_timestamp_millis)
+                    .map_or(TimestampInput::Invalid, |ts| {
+                        TimestampInput::Iso(ts.to_rfc3339_opts(SecondsFormat::Millis, true))
+                    }))
+            }
+
+            fn visit_f64<E: de::Error>(self, _v: f64) -> Result<Self::Value, E> {
+                Ok(TimestampInput::Invalid)
+            }
+
+            fn visit_bool<E: de::Error>(self, _v: bool) -> Result<Self::Value, E> {
+                Ok(TimestampInput::Invalid)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(TimestampInput::Invalid)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(TimestampInput::Invalid)
             }
         }
-        serde_json::Value::Number(n) => {
-            let ts = n
-                .as_i64()
-                .and_then(chrono::DateTime::from_timestamp_millis)
-                .ok_or_else(|| {
-                    crate::error::AppError::validation(
-                        field,
-                        crate::error::ValidationCode::InvalidFormat,
-                        format!("Invalid {field} timestamp."),
-                    )
-                })?;
-            Ok(Some(
-                ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            ))
-        }
-        _ => Err(crate::error::AppError::validation(
-            field,
-            crate::error::ValidationCode::InvalidFormat,
-            format!("Invalid {field} timestamp."),
-        )),
+
+        deserializer.deserialize_any(TimestampVisitor)
     }
 }
 
@@ -224,32 +279,71 @@ mod tests {
 
     #[test]
     fn u64_string_or_int_parses_all_variants() {
-        assert_eq!(serde_json::from_str::<PermBox>(r#"{"allow":"1024"}"#).unwrap().allow, Some(1024));
-        assert_eq!(serde_json::from_str::<PermBox>(r#"{"allow":2048}"#).unwrap().allow, Some(2048));
-        assert_eq!(serde_json::from_str::<PermBox>(r#"{"allow":null}"#).unwrap().allow, None);
+        assert_eq!(
+            serde_json::from_str::<PermBox>(r#"{"allow":"1024"}"#)
+                .unwrap()
+                .allow,
+            Some(1024)
+        );
+        assert_eq!(
+            serde_json::from_str::<PermBox>(r#"{"allow":2048}"#)
+                .unwrap()
+                .allow,
+            Some(2048)
+        );
+        assert_eq!(
+            serde_json::from_str::<PermBox>(r#"{"allow":null}"#)
+                .unwrap()
+                .allow,
+            None
+        );
         assert!(serde_json::from_str::<PermBox>(r#"{"allow":"-5"}"#).is_err());
     }
 
     #[test]
-    fn parse_timestamp_iso_validates_inputs() {
+    fn timestamp_input_validates_all_json_variants() {
         assert_eq!(
-            parse_timestamp_iso("exp", serde_json::Value::Null).unwrap(),
+            serde_json::from_str::<Option<TimestampInput>>("null").unwrap(),
             None
         );
         assert_eq!(
-            parse_timestamp_iso("exp", serde_json::json!("  ")).unwrap(),
+            serde_json::from_str::<TimestampInput>(r#""  ""#)
+                .unwrap()
+                .into_opt_iso("exp")
+                .unwrap(),
             None
         );
         assert_eq!(
-            parse_timestamp_iso("exp", serde_json::json!("2026-01-01T00:00:00Z")).unwrap(),
+            serde_json::from_str::<TimestampInput>(r#""2026-01-01T00:00:00Z""#)
+                .unwrap()
+                .into_opt_iso("exp")
+                .unwrap(),
             Some("2026-01-01T00:00:00Z".to_string())
         );
         assert!(
-            parse_timestamp_iso("exp", serde_json::json!(1_700_000_000_000i64))
+            serde_json::from_str::<TimestampInput>("1700000000000")
+                .unwrap()
+                .into_opt_iso("exp")
                 .unwrap()
                 .is_some()
         );
-        assert!(parse_timestamp_iso("exp", serde_json::json!("not-a-date")).is_err());
-        assert!(parse_timestamp_iso("exp", serde_json::json!(true)).is_err());
+        assert!(
+            serde_json::from_str::<TimestampInput>(r#""not-a-date""#)
+                .unwrap()
+                .into_opt_iso("exp")
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<TimestampInput>("true")
+                .unwrap()
+                .into_opt_iso("exp")
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<TimestampInput>("[1,2]")
+                .unwrap()
+                .into_opt_iso("exp")
+                .is_err()
+        );
     }
 }
