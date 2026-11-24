@@ -188,11 +188,24 @@ jobs:
           GH_NOTES: ${{ steps.notes.outputs.gh_notes }}
           COMMITS: ${{ steps.notes.outputs.commits }}
           COMPARE_URL: ${{ steps.notes.outputs.compare_url }}
+          IS_PRERELEASE: ${{ needs.prepare.outputs.is_prerelease }}
         run: |
           BASE_URL="${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ env.BIN_NAME }}"
-          cat << 'EOF' > release_body.md
-          Rigel Server **TAG_NAME** is now available, with COMMIT_COUNT changes from CONTRIB_COUNT contributors.
 
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            cat << 'EOF' > release_body.md
+          > [!WARNING]
+          > **Pre-release:** Rigel Server **TAG_NAME** is a preview build intended for testing. It may be unstable or contain breaking changes.
+
+          EOF
+          else
+            cat << 'EOF' > release_body.md
+          Rigel Server **TAG_NAME** is now available. Pre-built binaries and SHA-256 checksums are listed below, followed by all changes in this release.
+
+          EOF
+          fi
+
+          cat << 'EOF' >> release_body.md
           ## Downloads
 
           | OS | Architecture | Package | Checksum |
