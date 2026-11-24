@@ -28,7 +28,7 @@ jobs:
       is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Validate Cargo version and tag metadata
         id: meta
@@ -53,12 +53,19 @@ jobs:
           fi
 
       - name: Create Draft GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ env.BIN_NAME }} ${{ github.ref_name }}
-          draft: true
-          prerelease: ${{ steps.meta.outputs.is_prerelease == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PRERELEASE_FLAG=""
+          if [ "${{ steps.meta.outputs.is_prerelease }}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ env.BIN_NAME }} ${{ github.ref_name }}" \
+            --notes "" \
+            --draft \
+            $PRERELEASE_FLAG
 
   # --------------------------------------------------------------------------
   # 2. Build and upload binaries to the Draft Release
@@ -93,7 +100,7 @@ jobs:
 
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Configure Android NDK
         if: matrix.target == 'aarch64-linux-android'
@@ -131,7 +138,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository history
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -172,16 +179,16 @@ jobs:
 
           | OS | Architecture | Package | Checksum |
           | :--- | :--- | :---: | :---: |
-          | 🪟 **Windows** | `x86_64` (64-bit) | [📦 .zip](BASE_URL-x86_64-pc-windows-msvc.zip) | [🔒 sha256](BASE_URL-x86_64-pc-windows-msvc.zip.sha256) |
-          | | `i686` (32-bit) | [📦 .zip](BASE_URL-i686-pc-windows-msvc.zip) | [🔒 sha256](BASE_URL-i686-pc-windows-msvc.zip.sha256) |
-          | 🍎 **macOS** | Apple Silicon (`aarch64`) | [📦 .tar.gz](BASE_URL-aarch64-apple-darwin.tar.gz) | [🔒 sha256](BASE_URL-aarch64-apple-darwin.tar.gz.sha256) |
-          | | Intel (`x86_64`) | [📦 .tar.gz](BASE_URL-x86_64-apple-darwin.tar.gz) | [🔒 sha256](BASE_URL-x86_64-apple-darwin.tar.gz.sha256) |
-          | 🐧 **Linux** | `x86_64` (glibc) | [📦 .tar.gz](BASE_URL-x86_64-unknown-linux-gnu.tar.gz) | [🔒 sha256](BASE_URL-x86_64-unknown-linux-gnu.tar.gz.sha256) |
-          | | `x86_64` (musl static) | [📦 .tar.gz](BASE_URL-x86_64-unknown-linux-musl.tar.gz) | [🔒 sha256](BASE_URL-x86_64-unknown-linux-musl.tar.gz.sha256) |
-          | | `ARM64` (AArch64) | [📦 .tar.gz](BASE_URL-aarch64-unknown-linux-gnu.tar.gz) | [🔒 sha256](BASE_URL-aarch64-unknown-linux-gnu.tar.gz.sha256) |
-          | | `ARMv7` (32-bit HF) | [📦 .tar.gz](BASE_URL-armv7-unknown-linux-gnueabihf.tar.gz) | [🔒 sha256](BASE_URL-armv7-unknown-linux-gnueabihf.tar.gz.sha256) |
-          | | `ARMv6` (32-bit musl) | [📦 .tar.gz](BASE_URL-arm-unknown-linux-musleabihf.tar.gz) | [🔒 sha256](BASE_URL-arm-unknown-linux-musleabihf.tar.gz.sha256) |
-          | 🤖 **Android** | `ARM64` (AArch64) | [📦 .tar.gz](BASE_URL-aarch64-linux-android.tar.gz) | [🔒 sha256](BASE_URL-aarch64-linux-android.tar.gz.sha256) |
+          | 🪟 **Windows** | `x86_64` (64-bit) | [📦 .zip](BASE_URL-x86_64-pc-windows-msvc.zip) | [🔒 sha256](BASE_URL-x86_64-pc-windows-msvc.sha256) |
+          | | `i686` (32-bit) | [📦 .zip](BASE_URL-i686-pc-windows-msvc.zip) | [🔒 sha256](BASE_URL-i686-pc-windows-msvc.sha256) |
+          | 🍎 **macOS** | Apple Silicon (`aarch64`) | [📦 .tar.gz](BASE_URL-aarch64-apple-darwin.tar.gz) | [🔒 sha256](BASE_URL-aarch64-apple-darwin.sha256) |
+          | | Intel (`x86_64`) | [📦 .tar.gz](BASE_URL-x86_64-apple-darwin.tar.gz) | [🔒 sha256](BASE_URL-x86_64-apple-darwin.sha256) |
+          | 🐧 **Linux** | `x86_64` (glibc) | [📦 .tar.gz](BASE_URL-x86_64-unknown-linux-gnu.tar.gz) | [🔒 sha256](BASE_URL-x86_64-unknown-linux-gnu.sha256) |
+          | | `x86_64` (musl static) | [📦 .tar.gz](BASE_URL-x86_64-unknown-linux-musl.tar.gz) | [🔒 sha256](BASE_URL-x86_64-unknown-linux-musl.sha256) |
+          | | `ARM64` (AArch64) | [📦 .tar.gz](BASE_URL-aarch64-unknown-linux-gnu.tar.gz) | [🔒 sha256](BASE_URL-aarch64-unknown-linux-gnu.sha256) |
+          | | `ARMv7` (32-bit HF) | [📦 .tar.gz](BASE_URL-armv7-unknown-linux-gnueabihf.tar.gz) | [🔒 sha256](BASE_URL-armv7-unknown-linux-gnueabihf.sha256) |
+          | | `ARMv6` (32-bit musl) | [📦 .tar.gz](BASE_URL-arm-unknown-linux-musleabihf.tar.gz) | [🔒 sha256](BASE_URL-arm-unknown-linux-musleabihf.sha256) |
+          | 🤖 **Android** | `ARM64` (AArch64) | [📦 .tar.gz](BASE_URL-aarch64-linux-android.tar.gz) | [🔒 sha256](BASE_URL-aarch64-linux-android.sha256) |
 
           ---
           EOF
@@ -193,11 +200,14 @@ jobs:
 
           printf '\n<details>\n<summary>📝 Commits in this release</summary>\n\n%s\n\n</details>\n' "$COMMITS" >> release_body.md
 
+          cat release_body.md
+
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ env.BIN_NAME }} ${{ github.ref_name }}
-          body_path: release_body.md
-          draft: false
-          prerelease: ${{ needs.prepare.outputs.is_prerelease == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ github.ref_name }}" \
+            --title "${{ env.BIN_NAME }} ${{ github.ref_name }}" \
+            --notes-file release_body.md \
+            --draft=false \
+            --prerelease="${{ needs.prepare.outputs.is_prerelease }}"
