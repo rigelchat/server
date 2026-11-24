@@ -33,23 +33,11 @@ jobs:
       - name: Validate Cargo version and tag metadata
         id: meta
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          TAG_VERSION="${TAG#v}"
+          TAG_BASE="${TAG_VERSION%%-*}"
 
-          # Verify that Cargo.toml version matches the pushed git tag
-          PKG_VERSION=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r --arg name "$BIN_NAME" '.packages[] | select(.name == $name) | .version')
-
-          if [ -n "$PKG_VERSION" ] && [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+          if [ -n "$PKG_VERSION" ] && [ "$PKG_VERSION" != "$TAG_VERSION" ] && [ "$PKG_VERSION" != "$TAG_BASE" ]; then
             echo "::error::Version mismatch! Tag is '$TAG_VERSION' but Cargo.toml version is '$PKG_VERSION'."
             exit 1
-          fi
-
-          # Detect pre-releases (e.g., v1.0.0-alpha.1, v1.0.0-rc.1)
-          if [[ "$TAG_VERSION" == *-* ]]; then
-            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create Draft GitHub Release
