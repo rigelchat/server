@@ -103,7 +103,7 @@ jobs:
           tar: unix
           zip: windows
           checksum: sha256
-          include: README.md,LICENSE*
+          include: README.md,LICENSE
           token: ${{ secrets.GITHUB_TOKEN }}
 
   # --------------------------------------------------------------------------
