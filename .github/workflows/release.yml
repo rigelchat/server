@@ -180,7 +180,7 @@ jobs:
         run: |
           BASE_URL="${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ env.BIN_NAME }}"
 
-          if [ "$IS_PRERELEASE" = "true" ]; then
+          if [[ "${GITHUB_REF_NAME#v}" == *-* ]]; then
             cat << 'EOF' > release_body.md
           > [!WARNING]
           > **Pre-release:** Rigel Server **TAG_NAME** is a preview build intended for testing. It may be unstable or contain breaking changes.
@@ -233,8 +233,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          if [[ "${GITHUB_REF_NAME#v}" == *-* ]]; then
+            IS_PRERELEASE="true"
+          else
+            IS_PRERELEASE="false"
+          fi
+
           gh release edit "${{ github.ref_name }}" \
             --title "${{ github.ref_name }}" \
             --notes-file release_body.md \
             --draft=false \
-            --prerelease="${{ needs.prepare.outputs.is_prerelease }}"
+            --prerelease="$IS_PRERELEASE"
