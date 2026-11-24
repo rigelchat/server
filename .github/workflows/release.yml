@@ -149,20 +149,24 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PREV_TAG=$(git describe --tags --abbrev=0 --match "v[0-9]*" HEAD^ 2>/dev/null || echo "")
-          RANGE="${PREV_TAG:+${PREV_TAG}..}HEAD"
 
-          # Native GitHub release notes (categorized PRs, @mentions, Full Changelog link)
-          GH_NOTES=$(gh api "repos/${{ github.repository }}/releases/generate-notes" \
-            -f tag_name="${{ github.ref_name }}" \
-            ${PREV_TAG:+-f previous_tag_name="$PREV_TAG"} \
-            --jq '.body' || echo "")
-
-          COMMITS=$(git log "$RANGE" --pretty=format:"- %s ([%h](${{ github.server_url }}/${{ github.repository }}/commit/%H))" --no-merges)
-          CONTRIBUTORS=$(git log "$RANGE" --pretty=format:"- %an" | sort -u)
-
-          COMPARE_URL=""
+          GH_NOTES=""
           if [ -n "$PREV_TAG" ]; then
+            GH_NOTES=$(gh api "repos/${{ github.repository }}/releases/generate-notes" \
+              -f tag_name="${{ github.ref_name }}" \
+              -f previous_tag_name="$PREV_TAG" \
+              --jq '.body' || echo "")
+          fi
+
+          # Fetch commits with GitHub @username so GitHub renders the Contributors avatar bar
+          if [ -n "$PREV_TAG" ]; then
+            COMMITS=$(gh api "repos/${{ github.repository }}/compare/${PREV_TAG}...${{ github.ref_name }}" \
+              --jq '.commits[] | select((.parents | length) <= 1) | "- \(.commit.message | split("\n")[0]) ([\(.sha[0:7])](\(.html_url))) by \(if .author.login then "@" + .author.login else .commit.author.name end)"' || echo "")
             COMPARE_URL="${{ github.server_url }}/${{ github.repository }}/compare/${PREV_TAG}...${{ github.ref_name }}"
+          else
+            COMMITS=$(gh api "repos/${{ github.repository }}/commits?sha=${{ github.ref_name }}&per_page=100" \
+              --jq 'reverse | .[] | select((.parents | length) <= 1) | "- \(.commit.message | split("\n")[0]) ([\(.sha[0:7])](\(.html_url))) by \(if .author.login then "@" + .author.login else .commit.author.name end)"' || echo "")
+            COMPARE_URL=""
           fi
 
           DELIM="GH_EOF_$(date +%s%N)"
@@ -173,9 +177,6 @@ jobs:
             echo "commits<<${DELIM}"
             echo "$COMMITS"
             echo "${DELIM}"
-            echo "contributors<<${DELIM}"
-            echo "$CONTRIBUTORS"
-            echo "${DELIM}"
             echo "compare_url=${COMPARE_URL}"
           } >> "$GITHUB_OUTPUT"
 
@@ -183,11 +184,12 @@ jobs:
         env:
           GH_NOTES: ${{ steps.notes.outputs.gh_notes }}
           COMMITS: ${{ steps.notes.outputs.commits }}
-          CONTRIBUTORS: ${{ steps.notes.outputs.contributors }}
           COMPARE_URL: ${{ steps.notes.outputs.compare_url }}
         run: |
           BASE_URL="${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ env.BIN_NAME }}"
           cat << 'EOF' > release_body.md
+          `rigel-server` TAG_NAME is ready.
+
           ## Downloads
 
           | OS | Architecture | Package | Checksum |
@@ -204,23 +206,21 @@ jobs:
           | | `RISC-V 64` (`riscv64gc`) | [.tar.gz](BASE_URL-riscv64gc-unknown-linux-gnu.tar.gz) | [sha256](BASE_URL-riscv64gc-unknown-linux-gnu.sha256) |
           | 🤖 **Android** | `ARM64` (AArch64) | [.tar.gz](BASE_URL-aarch64-linux-android.tar.gz) | [sha256](BASE_URL-aarch64-linux-android.sha256) |
 
+          <sub>For Linux, prefer <code>musl static</code> on Docker, Alpine, or older distributions.</sub>
+
           EOF
           sed -i "s|BASE_URL|${BASE_URL}|g" release_body.md
+          sed -i "s|TAG_NAME|${{ github.ref_name }}|g" release_body.md
 
           if echo "$GH_NOTES" | grep -q "## What's Changed"; then
-            printf '%s\n\n' "$GH_NOTES" >> release_body.md
-          fi
-
-          if [ -n "$COMMITS" ]; then
-            printf '## Commits\n\n%s\n\n' "$COMMITS" >> release_body.md
-          fi
-
-          if [ -n "$CONTRIBUTORS" ]; then
-            printf '## Contributors\n\n%s\n\n' "$CONTRIBUTORS" >> release_body.md
-          fi
-
-          if [ -n "$COMPARE_URL" ] && ! echo "$GH_NOTES" | grep -q "## What's Changed"; then
-            printf '**Full Changelog**: %s\n' "$COMPARE_URL" >> release_body.md
+            printf '%s\n' "$GH_NOTES" >> release_body.md
+          else
+            if [ -n "$COMMITS" ]; then
+              printf "## What's Changed\n\n%s\n\n" "$COMMITS" >> release_body.md
+            fi
+            if [ -n "$COMPARE_URL" ]; then
+              printf '**Full Changelog**: %s\n' "$COMPARE_URL" >> release_body.md
+            fi
           fi
 
           cat release_body.md
@@ -230,7 +230,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release edit "${{ github.ref_name }}" \
-            --title "${{ env.BIN_NAME }} ${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
             --notes-file release_body.md \
             --draft=false \
             --prerelease="${{ needs.prepare.outputs.is_prerelease }}"
