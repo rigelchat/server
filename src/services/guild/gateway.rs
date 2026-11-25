@@ -5,7 +5,7 @@ use sqlx::{FromRow, MySql, QueryBuilder};
 use crate::AppState;
 use crate::error::AppError;
 use crate::models::channel::{
-    ChannelOverwriteRow, ChannelResponse, ChannelRow, PermissionOverwrite,
+    ChannelOverwriteRow, ChannelResponse, ChannelRow, ForumTag, ForumTagRow, PermissionOverwrite,
 };
 use crate::models::gateway::presence::{GatewayPresence, PresenceUser};
 use crate::models::guild::{BaseGuild, GatewayGuild, Guild};
@@ -110,7 +110,7 @@ async fn load_guilds_base_data(
     for g in &guilds {
         sep.push_bind(&g.id);
     }
-    cqb.push(") ORDER BY position ASC");
+    cqb.push(") AND type NOT IN (10, 11, 12) ORDER BY position ASC");
     let channel_rows = cqb
         .build_query_as::<ChannelRow>()
         .fetch_all(&state.db)
@@ -139,14 +139,37 @@ async fn load_guilds_base_data(
         }
     }
 
+    let mut tags_by_channel: HashMap<String, Vec<ForumTag>> = HashMap::new();
+    if !channel_rows.is_empty() {
+        let mut tqb = QueryBuilder::<MySql>::new(
+            "SELECT t.id, t.channel_id, t.name, t.moderated, t.emoji_id, t.emoji_name FROM forum_tags t INNER JOIN channels c ON c.id = t.channel_id WHERE c.guild_id IN (",
+        );
+        let mut sep = tqb.separated(", ");
+        for g in &guilds {
+            sep.push_bind(&g.id);
+        }
+        tqb.push(") ORDER BY t.position ASC, CAST(t.id AS UNSIGNED) ASC");
+        let tag_rows = tqb
+            .build_query_as::<ForumTagRow>()
+            .fetch_all(&state.db)
+            .await?;
+        for t in tag_rows {
+            tags_by_channel
+                .entry(t.channel_id.clone())
+                .or_default()
+                .push(ForumTag::from(t));
+        }
+    }
+
     let mut channels_by_guild: HashMap<String, Vec<ChannelResponse>> = HashMap::new();
     for ch in channel_rows {
         let gid = ch.guild_id.clone();
         let ows = overwrites_by_channel.remove(&ch.id).unwrap_or_default();
+        let tags = tags_by_channel.remove(&ch.id).unwrap_or_default();
         channels_by_guild
             .entry(gid)
             .or_default()
-            .push(ChannelResponse::from_row(ch, ows));
+            .push(ChannelResponse::from_row(ch, ows, tags));
     }
 
     let mut rqb = QueryBuilder::<MySql>::new(

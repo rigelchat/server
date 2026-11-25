@@ -1,6 +1,8 @@
-use crate::constants::limits::{MAX_ASSET_HASH_LENGTH, MAX_COLOR_VALUE, MAX_EMAIL_LENGTH};
+use crate::constants::channel::ChannelType;
+use crate::constants::limits::{
+    MAX_ASSET_HASH_LENGTH, MAX_COLOR_VALUE, MAX_EMAIL_LENGTH, MAX_FORUM_TAG_EMOJI_NAME_LENGTH,
+};
 use crate::error::{AppError, ValidationCode};
-use crate::models::channel::ChannelType;
 
 pub fn validate_asset_opt(field: &str, value: Option<&str>) -> Result<Option<String>, AppError> {
     let Some(trimmed) = value.map(str::trim).filter(|s| !s.is_empty()) else {
@@ -121,6 +123,109 @@ pub fn slugify_channel_name(trimmed: &str, kind: u32) -> String {
     }
 }
 
+fn is_emoji_base_char(c: char) -> bool {
+    let cp = c as u32;
+    matches!(
+        cp,
+        0x203C
+            | 0x2049
+            | 0x2122
+            | 0x2139
+            | 0x2194..=0x2199
+            | 0x21A9..=0x21AA
+            | 0x231A..=0x231B
+            | 0x2328
+            | 0x23CF
+            | 0x23E9..=0x23F3
+            | 0x23F8..=0x23FA
+            | 0x24C2
+            | 0x25AA..=0x25AB
+            | 0x25B6
+            | 0x25C0
+            | 0x25FB..=0x25FE
+            | 0x2600..=0x27BF
+            | 0x2934..=0x2935
+            | 0x2B05..=0x2B07
+            | 0x2B1B..=0x2B1C
+            | 0x2B50
+            | 0x2B55
+            | 0x3030
+            | 0x303D
+            | 0x3297
+            | 0x3299
+            | 0x1F000..=0x1FAFF
+    )
+}
+
+fn is_regional_indicator(c: char) -> bool {
+    ('\u{1F1E6}'..='\u{1F1FF}').contains(&c)
+}
+
+fn is_skin_tone(c: char) -> bool {
+    ('\u{1F3FB}'..='\u{1F3FF}').contains(&c)
+}
+
+pub fn validate_unicode_emoji(field: &str, raw: &str) -> Result<String, AppError> {
+    let trimmed = raw.trim();
+    let invalid = || {
+        AppError::validation(
+            field,
+            ValidationCode::NotAValidUnicodeEmoji,
+            "Value must be a single Unicode emoji.",
+        )
+    };
+
+    if trimmed.is_empty()
+        || trimmed.chars().count() > MAX_FORUM_TAG_EMOJI_NAME_LENGTH
+        || trimmed.chars().any(|c| c.is_control() || c.is_whitespace())
+    {
+        return Err(invalid());
+    }
+
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() == 2 && is_regional_indicator(chars[0]) && is_regional_indicator(chars[1]) {
+        return Ok(trimmed.to_string());
+    }
+    if (chars.len() == 2 || (chars.len() == 3 && chars[1] == '\u{FE0F}'))
+        && (chars[0].is_ascii_digit() || chars[0] == '#' || chars[0] == '*')
+        && *chars.last().unwrap_or(&'\0') == '\u{20E3}'
+    {
+        return Ok(trimmed.to_string());
+    }
+
+    let mut idx = 0usize;
+    loop {
+        let Some(&base) = chars.get(idx) else {
+            return Err(invalid());
+        };
+        if !is_emoji_base_char(base) || is_skin_tone(base) || is_regional_indicator(base) {
+            return Err(invalid());
+        }
+        idx += 1;
+
+        while let Some(&c) = chars.get(idx) {
+            if c == '\u{FE0F}'
+                || c == '\u{FE0E}'
+                || is_skin_tone(c)
+                || ('\u{E0020}'..='\u{E007F}').contains(&c)
+            {
+                idx += 1;
+            } else {
+                break;
+            }
+        }
+
+        if idx == chars.len() {
+            return Ok(trimmed.to_string());
+        }
+        if chars[idx] == '\u{200D}' {
+            idx += 1;
+            continue;
+        }
+        return Err(invalid());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +273,15 @@ mod tests {
             Some("ééé".to_string())
         );
         assert!(normalize_optional_text("bio", Some("éééé"), 3).is_err());
+    }
+
+    #[test]
+    fn validates_single_unicode_emojis() {
+        for ok in ["👍", "👍🏽", "🛡️", "❤️", "🇫🇷", "👨‍👩‍👧", "1️⃣", "🏳️‍🌈", "🏴󠁧󠁢󠁥󠁮󠁧󠁿"] {
+            assert!(validate_unicode_emoji("emoji_name", ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "not_emoji", "123", "a", "😀😁", "🇫🇷🇺🇸", "👍 hello", "👨\u{200D}"] {
+            assert!(validate_unicode_emoji("emoji_name", bad).is_err(), "{bad}");
+        }
     }
 }

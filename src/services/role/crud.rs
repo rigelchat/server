@@ -1,6 +1,7 @@
 use sqlx::{MySql, QueryBuilder};
 
 use crate::AppState;
+use crate::constants::channel::OverwriteType;
 use crate::constants::flags::PermissionFlags;
 use crate::constants::gateway::events;
 use crate::constants::limits::{
@@ -8,7 +9,6 @@ use crate::constants::limits::{
 };
 use crate::error::{AppError, ValidationCode};
 use crate::models::gateway::events::{GuildRoleBulkEvent, GuildRoleDeleteEvent, GuildRoleEvent};
-use crate::models::permission::OverwriteType;
 use crate::models::rest::roles::{CreateRoleRequest, UpdateRoleRequest};
 use crate::models::role::{Role, RoleRow};
 use crate::services::{member_service, permission_service};
@@ -31,9 +31,17 @@ pub async fn get_guild_roles(
     state: &AppState,
     guild_id: &str,
     user_id: &str,
+    can_see_thread_perms: bool,
 ) -> Result<Vec<Role>, AppError> {
     member_service::require_member(state, guild_id, user_id).await?;
-    fetch_guild_roles(state, guild_id).await
+    let mut roles = fetch_guild_roles(state, guild_id).await?;
+    if !can_see_thread_perms {
+        let mask = !PermissionFlags::THREAD_GATED_BITS.bits();
+        for r in &mut roles {
+            r.permissions &= mask;
+        }
+    }
+    Ok(roles)
 }
 
 pub async fn highest_member_role_position<'e, E>(
@@ -65,6 +73,7 @@ pub async fn create_role(
     state: &AppState,
     guild_id: &str,
     user_id: &str,
+    can_write_thread_perms: bool,
     payload: CreateRoleRequest,
 ) -> Result<Role, AppError> {
     let actor_perms =
@@ -156,7 +165,10 @@ pub async fn create_role(
 
     let permissions = match payload.permissions {
         Some(raw) => {
-            let truncated = PermissionFlags::from_bits_truncate(raw).bits();
+            let mut truncated = PermissionFlags::from_bits_truncate(raw).bits();
+            if !can_write_thread_perms {
+                truncated &= !PermissionFlags::THREAD_GATED_BITS.bits();
+            }
             if user_id != owner_id && (truncated & !actor_perms.bits()) != 0 {
                 return Err(AppError::missing_permissions());
             }
@@ -242,7 +254,7 @@ pub async fn create_role(
             .await;
     }
 
-    let role = Role::from(created_row);
+    let mut role = Role::from(created_row);
     state
         .dispatch_guild(
             events::GUILD_ROLE_CREATE,
@@ -254,6 +266,9 @@ pub async fn create_role(
         )
         .await;
 
+    if !can_write_thread_perms {
+        role.permissions &= !PermissionFlags::THREAD_GATED_BITS.bits();
+    }
     Ok(role)
 }
 
@@ -262,6 +277,7 @@ pub async fn update_role(
     guild_id: &str,
     role_id: &str,
     user_id: &str,
+    can_write_thread_perms: bool,
     payload: UpdateRoleRequest,
 ) -> Result<Role, AppError> {
     let actor_perms =
@@ -361,7 +377,13 @@ pub async fn update_role(
     }
 
     if let Some(raw_perms) = payload.permissions {
-        let new_perms = PermissionFlags::from_bits_truncate(raw_perms).bits();
+        let truncated = PermissionFlags::from_bits_truncate(raw_perms).bits();
+        let new_perms = if can_write_thread_perms {
+            truncated
+        } else {
+            let preserved = current.permissions & PermissionFlags::THREAD_GATED_BITS.bits();
+            (truncated & !PermissionFlags::THREAD_GATED_BITS.bits()) | preserved
+        };
         let added = new_perms & !current.permissions;
         if user_id != owner_id && (added & !actor_perms.bits()) != 0 {
             return Err(AppError::missing_permissions());
@@ -447,7 +469,7 @@ pub async fn update_role(
 
     tx.commit().await?;
 
-    let updated = Role::from(updated_row);
+    let mut updated = Role::from(updated_row);
     state
         .dispatch_guild(
             events::GUILD_ROLE_UPDATE,
@@ -463,6 +485,9 @@ pub async fn update_role(
         crate::gateway::handlers::lazy_request::refresh_guild_member_lists(state, guild_id).await;
     }
 
+    if !can_write_thread_perms {
+        updated.permissions &= !PermissionFlags::THREAD_GATED_BITS.bits();
+    }
     Ok(updated)
 }
 

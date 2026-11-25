@@ -2,6 +2,7 @@ pub mod auth;
 pub mod channels;
 pub mod discoverable_guilds;
 pub mod discovery;
+pub mod forums;
 pub mod gateway;
 pub mod guilds;
 pub mod invites;

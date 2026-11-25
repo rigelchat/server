@@ -34,6 +34,7 @@ where
 pub struct AuthUser {
     pub user_id: String,
     pub session_id: String,
+    pub is_bot: bool,
 }
 
 impl<S> FromRequestParts<S> for AuthUser
@@ -59,15 +60,57 @@ where
             session_id,
         } = token::verify(token, &state.config.auth.secret).map_err(AppError::invalid_token)?;
 
-        if !crate::services::auth_service::is_session_active(&state, &session_id, &user_id).await? {
+        let Some(is_bot) =
+            crate::services::auth_service::is_session_active(&state, &session_id, &user_id).await?
+        else {
             return Err(AppError::invalid_token(
                 "Invalid or expired authorization token",
             ));
-        }
+        };
 
         Ok(Self {
             user_id,
             session_id,
+            is_bot,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FluxerFeatures {
+    pub channel_threads: bool,
+    pub view_channel_members_permission: bool,
+}
+
+impl FluxerFeatures {
+    pub const fn has_channel_threads(self, is_bot: bool) -> bool {
+        is_bot || self.channel_threads
+    }
+}
+
+impl<S> FromRequestParts<S> for FluxerFeatures
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let mut features = Self::default();
+        if let Some(raw) = parts
+            .headers
+            .get("x-fluxer-features")
+            .and_then(|v| v.to_str().ok())
+        {
+            for token in raw.split(',').map(str::trim) {
+                match token {
+                    "channel_threads" => features.channel_threads = true,
+                    "view_channel_members_permission" => {
+                        features.view_channel_members_permission = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(features)
     }
 }

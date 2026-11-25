@@ -5,6 +5,7 @@ use sqlx::{MySql, QueryBuilder};
 
 use crate::AppState;
 use crate::config::GuildCreationPolicy;
+use crate::constants::channel::{ChannelType, OverwriteType};
 use crate::constants::flags::{PermissionFlags, UserFlags};
 use crate::constants::gateway::events;
 use crate::constants::guild::{SYSTEM_CHANNEL_FLAGS_MASK, VerificationLevel};
@@ -14,10 +15,8 @@ use crate::constants::limits::{
     MAX_GUILDS_PAGE_LIMIT, MAX_GUILDS_PER_USER, MAX_VERIFICATION_LEVEL, MIN_AFK_TIMEOUT,
 };
 use crate::error::{AppError, ValidationCode};
-use crate::models::channel::ChannelType;
 use crate::models::gateway::events::GuildDeleteEvent;
 use crate::models::guild::{BaseGuild, Guild};
-use crate::models::permission::OverwriteType;
 use crate::models::rest::guilds::{CreateGuildRequest, ListGuildsQuery, UpdateGuildRequest};
 use crate::models::role::RolePerm;
 use crate::services::{channel, member_service, permission_service, queries, role};
@@ -267,7 +266,12 @@ pub async fn create_guild(
     Ok(props)
 }
 
-pub async fn get_guild(state: &AppState, guild_id: &str, user_id: &str) -> Result<Guild, AppError> {
+pub async fn get_guild(
+    state: &AppState,
+    guild_id: &str,
+    user_id: &str,
+    can_use_threads: bool,
+) -> Result<Guild, AppError> {
     let base = sqlx::query_as::<_, BaseGuild>("SELECT * FROM guilds WHERE id = ?")
         .bind(guild_id)
         .fetch_optional(&state.db)
@@ -276,7 +280,7 @@ pub async fn get_guild(state: &AppState, guild_id: &str, user_id: &str) -> Resul
 
     member_service::require_member(state, guild_id, user_id).await?;
 
-    let roles = role::fetch_guild_roles(state, guild_id).await?;
+    let mut roles = role::fetch_guild_roles(state, guild_id).await?;
     let all_channels = channel::fetch_guild_channels(state, guild_id).await?;
     let role_perms: Vec<RolePerm> = roles
         .iter()
@@ -285,12 +289,18 @@ pub async fn get_guild(state: &AppState, guild_id: &str, user_id: &str) -> Resul
             permissions: r.permissions,
         })
         .collect();
+    if !can_use_threads {
+        let mask = !PermissionFlags::THREAD_GATED_BITS.bits();
+        for r in &mut roles {
+            r.permissions &= mask;
+        }
+    }
     let member_roles = if base.owner_id == user_id {
         Vec::new()
     } else {
         queries::fetch_member_roles(&state.db, guild_id, user_id).await?
     };
-    let channels = permission_service::filter_visible_channels_with_context(
+    let mut channels = permission_service::filter_visible_channels_with_context(
         &base.owner_id,
         guild_id,
         user_id,
@@ -298,6 +308,12 @@ pub async fn get_guild(state: &AppState, guild_id: &str, user_id: &str) -> Resul
         &member_roles,
         all_channels,
     );
+    if !can_use_threads {
+        channels.retain(|c| !ChannelType::is_forum_like(c.base.kind));
+        for c in &mut channels {
+            c.strip_thread_fields();
+        }
+    }
 
     let member_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM guild_members WHERE guild_id = ?")
@@ -659,6 +675,7 @@ pub async fn delete_guild(state: &AppState, guild_id: &str, user_id: &str) -> Re
 pub async fn get_user_guilds(
     state: &AppState,
     user_id: &str,
+    can_use_threads: bool,
     query: ListGuildsQuery,
 ) -> Result<Vec<Guild>, AppError> {
     crate::utils::snowflake::validate_snowflake_opt("before", query.before.as_deref())?;
@@ -756,7 +773,7 @@ pub async fn get_user_guilds(
         let mut guild = Guild::from(row);
 
         if include_permissions {
-            let perms = if is_owner {
+            let mut perms = if is_owner {
                 PermissionFlags::all().bits()
             } else {
                 let raw = perms_by_guild.get(&gid).copied().unwrap_or(0);
@@ -767,6 +784,9 @@ pub async fn get_user_guilds(
                     raw
                 }
             };
+            if !can_use_threads {
+                perms &= !PermissionFlags::THREAD_GATED_BITS.bits();
+            }
             guild.permissions = Some(perms.to_string());
         }
 

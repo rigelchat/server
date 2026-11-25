@@ -7,7 +7,7 @@ use axum::{
 
 use crate::AppState;
 use crate::error::AppError;
-use crate::extractors::{AppJson, AuthUser};
+use crate::extractors::{AppJson, AuthUser, FluxerFeatures};
 use crate::models::guild::Guild;
 use crate::models::guild_member::GuildMemberResponse;
 use crate::models::rest::guilds::ListGuildsQuery;
@@ -98,8 +98,15 @@ async fn no_content() -> StatusCode {
 async fn get_guilds(
     State(state): State<AppState>,
     auth: AuthUser,
+    features: FluxerFeatures,
     Query(query): Query<ListGuildsQuery>,
 ) -> Result<Json<Vec<Guild>>, AppError> {
-    let guilds = guild::get_user_guilds(&state, &auth.user_id, query).await?;
+    let guilds = guild::get_user_guilds(
+        &state,
+        &auth.user_id,
+        features.has_channel_threads(auth.is_bot),
+        query,
+    )
+    .await?;
     Ok(Json(guilds))
 }

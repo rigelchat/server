@@ -85,4 +85,70 @@ impl PermissionFlags {
             | Self::USE_EXTERNAL_STICKERS.bits()
             | Self::VIEW_CHANNEL_MEMBERS.bits(),
     );
+
+    pub const THREAD_GATED_BITS: Self = Self::from_bits_truncate(
+        Self::MANAGE_THREADS.bits()
+            | Self::CREATE_PUBLIC_THREADS.bits()
+            | Self::CREATE_PRIVATE_THREADS.bits()
+            | Self::SEND_MESSAGES_IN_THREADS.bits(),
+    );
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ChannelFlags: u32 {
+        const PINNED = 1 << 1;
+        const REQUIRE_TAG = 1 << 4;
+        const HIDE_MEDIA_DOWNLOAD_OPTIONS = 1 << 15;
+    }
+}
+
+impl ChannelFlags {
+    pub const FORUM_ALLOWED: Self = Self::REQUIRE_TAG;
+    pub const MEDIA_ALLOWED: Self =
+        Self::from_bits_truncate(Self::REQUIRE_TAG.bits() | Self::HIDE_MEDIA_DOWNLOAD_OPTIONS.bits());
+    pub const THREAD_ALLOWED: Self = Self::PINNED;
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ThreadMemberFlags: u32 {
+        const HAS_INTERACTED = 1 << 0;
+        const ALL_MESSAGES = 1 << 1;
+        const ONLY_MENTIONS = 1 << 2;
+        const NO_MESSAGES = 1 << 3;
+    }
+}
+
+impl ThreadMemberFlags {
+    pub const NOTIFICATION_MASK: Self = Self::from_bits_truncate(
+        Self::ALL_MESSAGES.bits() | Self::ONLY_MENTIONS.bits() | Self::NO_MESSAGES.bits(),
+    );
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct MessageFlags: u32 {
+        const CROSSPOSTED = 1 << 0;
+        const IS_CROSSPOST = 1 << 1;
+        const SUPPRESS_EMBEDS = 1 << 2;
+        const SOURCE_MESSAGE_DELETED = 1 << 3;
+        const HAS_THREAD = 1 << 5;
+        const FAILED_TO_MENTION_SOME_ROLES_IN_THREAD = 1 << 8;
+        const SUPPRESS_NOTIFICATIONS = 1 << 12;
+        const VOICE_MESSAGE = 1 << 13;
+    }
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct SessionFlags: u32 {
+        const DEBOUNCE_MESSAGE_REACTIONS = 1 << 1;
+        const CHANNEL_THREADS = 1 << 2;
+        const GUILD_VISITS = 1 << 3;
+    }
 }

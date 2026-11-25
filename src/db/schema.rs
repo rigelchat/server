@@ -1,5 +1,20 @@
 use sqlx::mysql::MySqlPool;
 
+async fn column_exists(
+    pool: &MySqlPool,
+    table: &str,
+    column: &str,
+) -> Result<bool, sqlx::Error> {
+    let exists: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1",
+    )
+    .bind(table)
+    .bind(column)
+    .fetch_optional(pool)
+    .await?;
+    Ok(exists.is_some())
+}
+
 pub(super) async fn apply(pool: &MySqlPool) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
@@ -148,19 +163,138 @@ pub(super) async fn apply(pool: &MySqlPool) -> Result<(), sqlx::Error> {
             parent_id VARCHAR(20) DEFAULT NULL,
             name TEXT NOT NULL,
             last_message_id VARCHAR(20) DEFAULT NULL,
-            topic VARCHAR(1024) DEFAULT NULL,
+            last_pin_timestamp BIGINT UNSIGNED DEFAULT NULL,
+            topic TEXT DEFAULT NULL,
             url VARCHAR(2048) DEFAULT NULL,
             nsfw BOOLEAN NOT NULL DEFAULT FALSE,
             nsfw_override BOOLEAN DEFAULT NULL,
             content_warning_level TINYINT UNSIGNED NOT NULL DEFAULT 0,
             content_warning_text VARCHAR(200) DEFAULT NULL,
             rate_limit_per_user INT UNSIGNED NOT NULL DEFAULT 0,
+            flags INT UNSIGNED NOT NULL DEFAULT 0,
+            default_auto_archive_duration INT UNSIGNED DEFAULT NULL,
+            default_thread_rate_limit_per_user INT UNSIGNED NOT NULL DEFAULT 0,
+            default_reaction_emoji_id VARCHAR(20) DEFAULT NULL,
+            default_reaction_emoji_name VARCHAR(64) DEFAULT NULL,
+            default_sort_order TINYINT UNSIGNED DEFAULT NULL,
+            default_forum_layout TINYINT UNSIGNED NOT NULL DEFAULT 0,
+            default_tag_setting VARCHAR(16) NOT NULL DEFAULT 'match_some',
             bitrate INT UNSIGNED DEFAULT NULL,
             user_limit INT UNSIGNED DEFAULT NULL,
             voice_connection_limit INT UNSIGNED DEFAULT NULL,
             INDEX idx_channels_guild_pos (guild_id, position),
             FOREIGN KEY (guild_id) REFERENCES guilds(id) ON DELETE CASCADE,
             FOREIGN KEY (parent_id) REFERENCES channels(id) ON DELETE SET NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    let topic_max_len: Option<u64> = sqlx::query_scalar::<_, Option<u64>>(
+        "SELECT CAST(CHARACTER_MAXIMUM_LENGTH AS UNSIGNED) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'channels' AND COLUMN_NAME = 'topic'",
+    )
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    if topic_max_len.is_some_and(|len| len < 4096) {
+        sqlx::query("ALTER TABLE channels MODIFY COLUMN topic TEXT DEFAULT NULL")
+            .execute(pool)
+            .await?;
+    }
+
+    for (col, def) in [
+        ("last_pin_timestamp", "BIGINT UNSIGNED DEFAULT NULL"),
+        ("flags", "INT UNSIGNED NOT NULL DEFAULT 0"),
+        ("default_auto_archive_duration", "INT UNSIGNED DEFAULT NULL"),
+        ("default_thread_rate_limit_per_user", "INT UNSIGNED NOT NULL DEFAULT 0"),
+        ("default_reaction_emoji_id", "VARCHAR(20) DEFAULT NULL"),
+        ("default_reaction_emoji_name", "VARCHAR(64) DEFAULT NULL"),
+        ("default_sort_order", "TINYINT UNSIGNED DEFAULT NULL"),
+        ("default_forum_layout", "TINYINT UNSIGNED NOT NULL DEFAULT 0"),
+        ("default_tag_setting", "VARCHAR(16) NOT NULL DEFAULT 'match_some'"),
+    ] {
+        if !column_exists(pool, "channels", col).await? {
+            let sql = format!("ALTER TABLE channels ADD COLUMN {col} {def}");
+            sqlx::query(&sql).execute(pool).await?;
+        }
+    }
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS forum_tags (
+            id VARCHAR(20) NOT NULL PRIMARY KEY,
+            channel_id VARCHAR(20) NOT NULL,
+            position INT UNSIGNED NOT NULL DEFAULT 0,
+            name VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+            moderated BOOLEAN NOT NULL DEFAULT FALSE,
+            emoji_id VARCHAR(20) DEFAULT NULL,
+            emoji_name VARCHAR(64) DEFAULT NULL,
+            UNIQUE KEY uq_forum_tags_channel_name (channel_id, name),
+            INDEX idx_forum_tags_channel_pos (channel_id, position),
+            FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS channel_threads (
+            channel_id VARCHAR(20) NOT NULL PRIMARY KEY,
+            guild_id VARCHAR(20) NOT NULL,
+            parent_id VARCHAR(20) NOT NULL,
+            owner_id VARCHAR(20) NOT NULL,
+            started_from_message BOOLEAN NOT NULL DEFAULT FALSE,
+            archived BOOLEAN NOT NULL DEFAULT FALSE,
+            auto_archive_duration INT UNSIGNED NOT NULL DEFAULT 4320,
+            archive_timestamp BIGINT UNSIGNED NOT NULL,
+            locked BOOLEAN NOT NULL DEFAULT FALSE,
+            invitable BOOLEAN DEFAULT NULL,
+            create_timestamp BIGINT UNSIGNED NOT NULL,
+            message_count INT UNSIGNED NOT NULL DEFAULT 0,
+            total_message_sent INT UNSIGNED NOT NULL DEFAULT 0,
+            member_count INT UNSIGNED NOT NULL DEFAULT 0,
+            INDEX idx_channel_threads_guild_archived (guild_id, archived),
+            INDEX idx_channel_threads_parent_archived (parent_id, archived, archive_timestamp),
+            FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
+            FOREIGN KEY (guild_id) REFERENCES guilds(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS thread_applied_tags (
+            thread_id VARCHAR(20) NOT NULL,
+            tag_id VARCHAR(20) NOT NULL,
+            position INT UNSIGNED NOT NULL DEFAULT 0,
+            PRIMARY KEY (thread_id, tag_id),
+            FOREIGN KEY (thread_id) REFERENCES channels(id) ON DELETE CASCADE,
+            FOREIGN KEY (tag_id) REFERENCES forum_tags(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS thread_members (
+            thread_id VARCHAR(20) NOT NULL,
+            user_id VARCHAR(20) NOT NULL,
+            join_timestamp BIGINT UNSIGNED NOT NULL,
+            flags INT UNSIGNED NOT NULL DEFAULT 0,
+            muted BOOLEAN NOT NULL DEFAULT FALSE,
+            mute_config TEXT DEFAULT NULL,
+            PRIMARY KEY (thread_id, user_id),
+            INDEX idx_thread_members_user (user_id),
+            INDEX idx_thread_members_thread_join (thread_id, join_timestamp),
+            FOREIGN KEY (thread_id) REFERENCES channels(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
         "#,
     )

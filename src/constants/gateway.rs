@@ -150,6 +150,14 @@ pub mod events {
     pub const CHANNEL_CREATE: &str = "CHANNEL_CREATE";
     pub const CHANNEL_UPDATE: &str = "CHANNEL_UPDATE";
     pub const CHANNEL_DELETE: &str = "CHANNEL_DELETE";
+    pub const THREAD_CREATE: &str = "THREAD_CREATE";
+    pub const THREAD_UPDATE: &str = "THREAD_UPDATE";
+    pub const THREAD_DELETE: &str = "THREAD_DELETE";
+    pub const THREAD_LIST_SYNC: &str = "THREAD_LIST_SYNC";
+    pub const THREAD_MEMBER_UPDATE: &str = "THREAD_MEMBER_UPDATE";
+    pub const THREAD_MEMBERS_UPDATE: &str = "THREAD_MEMBERS_UPDATE";
+    pub const THREAD_MEMBER_LIST_UPDATE: &str = "THREAD_MEMBER_LIST_UPDATE";
+    pub const FORUM_UNREADS: &str = "FORUM_UNREADS";
     pub const GUILD_ROLE_CREATE: &str = "GUILD_ROLE_CREATE";
     pub const GUILD_ROLE_UPDATE: &str = "GUILD_ROLE_UPDATE";
     pub const GUILD_ROLE_UPDATE_BULK: &str = "GUILD_ROLE_UPDATE_BULK";

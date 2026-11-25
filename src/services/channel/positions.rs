@@ -1,14 +1,16 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::AppState;
+use crate::constants::channel::ChannelType;
 use crate::constants::flags::PermissionFlags;
 use crate::constants::gateway::events;
 use crate::constants::limits::{MAX_CHANNELS_PER_CATEGORY, MAX_CHANNELS_PER_GUILD};
 use crate::error::{AppError, ValidationCode};
-use crate::models::channel::{ChannelResponse, ChannelRow, ChannelType};
+use crate::models::channel::{ChannelResponse, ChannelRow};
 use crate::models::rest::channels::ChannelPositionUpdate;
 use crate::services::{permission_service, queries};
 
+use super::forum::fetch_guild_forum_tags;
 use super::overwrites::{check_overwrite_delta_permissions, replace_channel_overwrites};
 
 pub async fn modify_guild_channel_positions(
@@ -36,7 +38,7 @@ pub async fn modify_guild_channel_positions(
     let mut tx = state.db.begin().await?;
 
     let rows = sqlx::query_as::<_, ChannelRow>(&format!(
-        "SELECT {} FROM channels WHERE guild_id = ? ORDER BY position ASC, CAST(id AS UNSIGNED) ASC FOR UPDATE",
+        "SELECT {} FROM channels WHERE guild_id = ? AND type NOT IN (10, 11, 12) ORDER BY position ASC, CAST(id AS UNSIGNED) ASC FOR UPDATE",
         ChannelRow::SELECT_COLS
     ))
     .bind(guild_id)
@@ -221,11 +223,13 @@ pub async fn modify_guild_channel_positions(
         }
     }
 
+    let mut tags_by_ch = fetch_guild_forum_tags(&mut *tx, guild_id).await?;
     let mut updated_channels = Vec::with_capacity(dirty_ids.len());
     for cid in dirty_ids {
         if let Some(row) = by_id.remove(&cid) {
             let ows = queries::fetch_channel_overwrites(&mut *tx, &cid).await?;
-            updated_channels.push(ChannelResponse::from_row(row, ows));
+            let tags = tags_by_ch.remove(&cid).unwrap_or_default();
+            updated_channels.push(ChannelResponse::from_row(row, ows, tags));
         }
     }
 

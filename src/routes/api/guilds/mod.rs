@@ -4,7 +4,7 @@ pub mod roles;
 
 use crate::AppState;
 use crate::error::AppError;
-use crate::extractors::{AppJson, AuthUser};
+use crate::extractors::{AppJson, AuthUser, FluxerFeatures};
 use crate::models::guild::Guild;
 use crate::models::rest::guilds::{CreateGuildRequest, UpdateGuildRequest};
 use crate::services::guild;
@@ -40,9 +40,16 @@ async fn create_guild(
 async fn get_guild(
     State(state): State<AppState>,
     auth: AuthUser,
+    features: FluxerFeatures,
     Path(guild_id): Path<String>,
 ) -> Result<Json<Guild>, AppError> {
-    let guild = guild::get_guild(&state, &guild_id, &auth.user_id).await?;
+    let guild = guild::get_guild(
+        &state,
+        &guild_id,
+        &auth.user_id,
+        features.has_channel_threads(auth.is_bot),
+    )
+    .await?;
     Ok(Json(guild))
 }
 

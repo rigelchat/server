@@ -48,8 +48,8 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
     };
 
     match auth_service::is_session_active(state, &auth_session_id, &user_id).await {
-        Ok(true) => {}
-        Ok(false) => {
+        Ok(Some(_)) => {}
+        Ok(None) => {
             session.close(close_codes::AUTHENTICATION_FAILED);
             return;
         }

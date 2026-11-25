@@ -138,17 +138,23 @@ pub async fn is_session_active(
     state: &AppState,
     session_id: &str,
     user_id: &str,
-) -> Result<bool, AppError> {
-    let row: Option<(u64, Option<u64>)> = sqlx::query_as(
-        "SELECT created_at, last_used_at FROM user_sessions WHERE id = ? AND user_id = ? LIMIT 1",
+) -> Result<Option<bool>, AppError> {
+    let row: Option<(u64, Option<u64>, bool)> = sqlx::query_as(
+        r#"
+        SELECT us.created_at, us.last_used_at, u.bot
+        FROM user_sessions us
+        INNER JOIN users u ON u.id = us.user_id
+        WHERE us.id = ? AND us.user_id = ?
+        LIMIT 1
+        "#,
     )
     .bind(session_id)
     .bind(user_id)
     .fetch_optional(&state.db)
     .await?;
 
-    let Some((created_at, last_used_at)) = row else {
-        return Ok(false);
+    let Some((created_at, last_used_at, is_bot)) = row else {
+        return Ok(None);
     };
 
     let last_active_ms = last_used_at.unwrap_or(created_at);
@@ -161,7 +167,7 @@ pub async fn is_session_active(
             .bind(user_id)
             .execute(&state.db)
             .await;
-        return Ok(false);
+        return Ok(None);
     }
 
     if elapsed > SESSION_TOUCH_INTERVAL_MS {
@@ -174,7 +180,7 @@ pub async fn is_session_active(
                 .await;
     }
 
-    Ok(true)
+    Ok(Some(is_bot))
 }
 
 pub async fn is_username_available(state: &AppState, username: &str) -> Result<bool, AppError> {

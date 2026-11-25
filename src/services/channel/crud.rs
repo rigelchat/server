@@ -1,21 +1,23 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sqlx::{MySql, QueryBuilder};
 
 use crate::AppState;
+use crate::constants::channel::ChannelType;
 use crate::constants::flags::PermissionFlags;
 use crate::constants::gateway::events;
 use crate::constants::guild::{DEFAULT_VOICE_BITRATE, DEFAULT_VOICE_CONNECTION_LIMIT};
 use crate::constants::limits::{
     MAX_CHANNEL_NAME_LENGTH, MAX_CHANNEL_RATE_LIMIT_PER_USER, MAX_CHANNEL_TOPIC_LENGTH,
     MAX_CHANNELS_PER_CATEGORY, MAX_CHANNELS_PER_GUILD, MAX_CONTENT_WARNING_TEXT_LENGTH,
-    MAX_LINK_CHANNEL_URL_LENGTH, MAX_VOICE_BITRATE_CEILING, MAX_VOICE_BITRATE_STANDARD,
+    MAX_FORUM_TOPIC_LENGTH, MAX_LINK_CHANNEL_URL_LENGTH, MAX_VOICE_BITRATE_CEILING,
+    MAX_VOICE_BITRATE_STANDARD,
     MAX_VOICE_CONNECTION_LIMIT, MAX_VOICE_USER_LIMIT, MIN_VOICE_BITRATE,
     MIN_VOICE_CONNECTION_LIMIT,
 };
 use crate::error::{AppError, ValidationCode};
 use crate::models::channel::{
-    ChannelOverwriteRow, ChannelResponse, ChannelRow, ChannelType, PermissionOverwrite,
+    ChannelOverwriteRow, ChannelResponse, ChannelRow, PermissionOverwrite,
 };
 use crate::models::guild::{BaseGuild, Guild};
 use crate::models::rest::channels::{CreateChannelRequest, UpdateChannelRequest};
@@ -23,6 +25,13 @@ use crate::services::{member_service, permission_service, queries};
 use crate::utils::snowflake::{DISCORD_SNOWFLAKE, validate_snowflake};
 use crate::utils::validation::{collapse_channel_whitespace, slugify_channel_name};
 
+use super::forum::{
+    ensure_unmoderated_tag_if_required, fetch_channel_forum_tags, fetch_guild_forum_tags,
+    replace_channel_forum_tags, validate_and_normalize_tags_list,
+    validate_default_auto_archive_duration, validate_default_forum_layout,
+    validate_default_reaction_input, validate_default_sort_order, validate_default_tag_setting,
+    validate_default_thread_rate_limit, validate_forum_flags,
+};
 use super::overwrites::{
     dispatch_channel_update_with_visibility, propagate_category_overwrites,
     replace_channel_overwrites, validate_and_normalize_overwrites,
@@ -32,6 +41,7 @@ pub async fn get_channel(
     state: &AppState,
     channel_id: &str,
     user_id: &str,
+    can_use_threads: bool,
 ) -> Result<ChannelResponse, AppError> {
     let channel = sqlx::query_as::<_, ChannelRow>(&format!(
         "SELECT {} FROM channels WHERE id = ?",
@@ -41,6 +51,12 @@ pub async fn get_channel(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(AppError::unknown_channel)?;
+
+    if !can_use_threads
+        && (ChannelType::is_forum_like(channel.kind) || ChannelType::is_thread(channel.kind))
+    {
+        return Err(AppError::unknown_channel());
+    }
 
     permission_service::require_channel_permission(
         state,
@@ -52,7 +68,16 @@ pub async fn get_channel(
     .await?;
 
     let overwrites = queries::fetch_channel_overwrites(&state.db, channel_id).await?;
-    Ok(ChannelResponse::from_row(channel, overwrites))
+    let tags = if ChannelType::is_forum_like(channel.kind) {
+        fetch_channel_forum_tags(&state.db, channel_id).await?
+    } else {
+        Vec::new()
+    };
+    let mut resp = ChannelResponse::from_row(channel, overwrites, tags);
+    if !can_use_threads {
+        resp.strip_thread_fields();
+    }
+    Ok(resp)
 }
 
 pub async fn fetch_guild_channels(
@@ -60,7 +85,7 @@ pub async fn fetch_guild_channels(
     guild_id: &str,
 ) -> Result<Vec<ChannelResponse>, AppError> {
     let channels = sqlx::query_as::<_, ChannelRow>(&format!(
-        "SELECT {} FROM channels WHERE guild_id = ? ORDER BY position ASC",
+        "SELECT {} FROM channels WHERE guild_id = ? AND type NOT IN (10, 11, 12) ORDER BY position ASC",
         ChannelRow::SELECT_COLS
     ))
     .bind(guild_id)
@@ -91,11 +116,14 @@ pub async fn fetch_guild_channels(
             .push(PermissionOverwrite::from(ow));
     }
 
+    let mut tags_by_channel = fetch_guild_forum_tags(&state.db, guild_id).await?;
+
     Ok(channels
         .into_iter()
         .map(|row| {
             let permission_overwrites = overwrites_by_channel.remove(&row.id).unwrap_or_default();
-            ChannelResponse::from_row(row, permission_overwrites)
+            let tags = tags_by_channel.remove(&row.id).unwrap_or_default();
+            ChannelResponse::from_row(row, permission_overwrites, tags)
         })
         .collect())
 }
@@ -104,19 +132,31 @@ pub async fn get_guild_channels(
     state: &AppState,
     guild_id: &str,
     user_id: &str,
+    can_use_threads: bool,
 ) -> Result<Vec<ChannelResponse>, AppError> {
     member_service::require_member(state, guild_id, user_id).await?;
     let channels = fetch_guild_channels(state, guild_id).await?;
-    permission_service::filter_visible_channels(state, guild_id, user_id, channels).await
+    let mut visible =
+        permission_service::filter_visible_channels(state, guild_id, user_id, channels).await?;
+    if !can_use_threads {
+        visible.retain(|c| !ChannelType::is_forum_like(c.base.kind));
+        for c in &mut visible {
+            c.strip_thread_fields();
+        }
+    }
+    Ok(visible)
 }
 
 pub async fn create_guild_channel(
     state: &AppState,
     guild_id: &str,
     user_id: &str,
+    can_use_threads: bool,
     payload: CreateChannelRequest,
 ) -> Result<ChannelResponse, AppError> {
-    if !is_supported_guild_channel_type(payload.kind) {
+    if !ChannelType::is_supported_guild_channel(payload.kind)
+        || (!can_use_threads && ChannelType::is_forum_like(payload.kind))
+    {
         return Err(AppError::validation(
             "type",
             ValidationCode::InvalidFormat,
@@ -178,7 +218,7 @@ pub async fn create_guild_channel(
     }
 
     let name = normalize_channel_name(&payload.name, payload.kind)?;
-    let topic = validate_topic_opt(payload.topic.flatten().as_deref())?;
+    let topic = validate_topic_opt(payload.topic.flatten().as_deref(), payload.kind)?;
     let url = if payload.kind == ChannelType::GuildLink as u32 {
         validate_link_url(payload.url.flatten().as_deref())?
     } else {
@@ -226,6 +266,57 @@ pub async fn create_guild_channel(
         None
     };
 
+    let is_forum_like = ChannelType::is_forum_like(payload.kind);
+    let is_forum = payload.kind == ChannelType::GuildForum as u32;
+    let flags = if is_forum_like {
+        validate_forum_flags(payload.flags.unwrap_or(0), payload.kind)?
+    } else {
+        0
+    };
+    let prepared_tags = if is_forum_like {
+        let tags = match payload.available_tags {
+            Some(ref inputs) => validate_and_normalize_tags_list(inputs, &HashSet::new())?,
+            None => Vec::new(),
+        };
+        ensure_unmoderated_tag_if_required(flags, &tags)?;
+        tags
+    } else {
+        Vec::new()
+    };
+    let (default_reaction_emoji_id, default_reaction_emoji_name) = if is_forum_like {
+        validate_default_reaction_input(payload.default_reaction_emoji.flatten())?
+    } else {
+        (None, None)
+    };
+    let default_sort_order = if is_forum_like {
+        validate_default_sort_order(payload.default_sort_order.flatten())?
+    } else {
+        None
+    };
+    let default_forum_layout = if is_forum {
+        validate_default_forum_layout(payload.default_forum_layout.flatten())?
+    } else {
+        0
+    };
+    let default_tag_setting = if is_forum_like {
+        validate_default_tag_setting(payload.default_tag_setting.flatten().as_deref())?
+    } else {
+        crate::constants::channel::DEFAULT_FORUM_TAG_SETTING.to_string()
+    };
+    let (default_auto_archive_duration, default_thread_rate_limit_per_user) =
+        if can_use_threads && ChannelType::supports_thread_defaults(payload.kind) {
+            (
+                validate_default_auto_archive_duration(
+                    payload.default_auto_archive_duration.flatten(),
+                )?,
+                validate_default_thread_rate_limit(
+                    payload.default_thread_rate_limit_per_user.flatten(),
+                )?,
+            )
+        } else {
+            (None, 0)
+        };
+
     let mut tx = state.db.begin().await?;
 
     let owner_id: String =
@@ -271,6 +362,7 @@ pub async fn create_guild_channel(
                 &inputs,
                 actor_perms,
                 is_owner_or_admin,
+                can_use_threads,
                 None,
             )
             .await?
@@ -306,8 +398,11 @@ pub async fn create_guild_channel(
         INSERT INTO channels (
             id, type, position, guild_id, parent_id, name, topic, url, nsfw, nsfw_override,
             content_warning_level, content_warning_text, rate_limit_per_user,
+            flags, default_auto_archive_duration, default_thread_rate_limit_per_user,
+            default_reaction_emoji_id, default_reaction_emoji_name, default_sort_order,
+            default_forum_layout, default_tag_setting,
             bitrate, user_limit, voice_connection_limit
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&channel_id)
@@ -323,6 +418,14 @@ pub async fn create_guild_channel(
     .bind(content_warning_level)
     .bind(&content_warning_text)
     .bind(rate_limit_per_user)
+    .bind(flags)
+    .bind(default_auto_archive_duration)
+    .bind(default_thread_rate_limit_per_user)
+    .bind(&default_reaction_emoji_id)
+    .bind(&default_reaction_emoji_name)
+    .bind(default_sort_order)
+    .bind(default_forum_layout)
+    .bind(&default_tag_setting)
     .bind(bitrate)
     .bind(user_limit)
     .bind(voice_connection_limit)
@@ -330,6 +433,10 @@ pub async fn create_guild_channel(
     .await?;
 
     replace_channel_overwrites(&mut tx, &channel_id, &overwrites_to_insert).await?;
+
+    if !prepared_tags.is_empty() {
+        replace_channel_forum_tags(&mut tx, &channel_id, &HashSet::new(), &prepared_tags).await?;
+    }
 
     let created_row = sqlx::query_as::<_, ChannelRow>(&format!(
         "SELECT {} FROM channels WHERE id = ?",
@@ -341,7 +448,7 @@ pub async fn create_guild_channel(
 
     tx.commit().await?;
 
-    let response = ChannelResponse::from_row(created_row, overwrites_to_insert);
+    let mut response = ChannelResponse::from_row(created_row, overwrites_to_insert, prepared_tags);
     permission_service::dispatch_channel_with_ctx(
         state,
         guild_id,
@@ -352,6 +459,10 @@ pub async fn create_guild_channel(
     )
     .await;
 
+    if !can_use_threads {
+        response.strip_thread_fields();
+    }
+
     Ok(response)
 }
 
@@ -359,6 +470,7 @@ pub async fn update_channel(
     state: &AppState,
     channel_id: &str,
     user_id: &str,
+    can_use_threads: bool,
     payload: UpdateChannelRequest,
 ) -> Result<ChannelResponse, AppError> {
     let current = sqlx::query_as::<_, ChannelRow>(&format!(
@@ -369,6 +481,12 @@ pub async fn update_channel(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(AppError::unknown_channel)?;
+
+    if !can_use_threads
+        && (ChannelType::is_forum_like(current.kind) || ChannelType::is_thread(current.kind))
+    {
+        return Err(AppError::unknown_channel());
+    }
 
     let (perm_ctx, _, actor_perms) = permission_service::require_channel_permission_with_ctx(
         state,
@@ -427,6 +545,7 @@ pub async fn update_channel(
             &inputs,
             actor_perms,
             is_owner_or_admin,
+            can_use_threads,
             Some(&old_overwrites),
         )
         .await?
@@ -470,7 +589,7 @@ pub async fn update_channel(
     }
 
     if let Some(topic) = &payload.topic {
-        let val = validate_topic_opt(topic.as_deref())?;
+        let val = validate_topic_opt(topic.as_deref(), new_kind)?;
         sep.push("topic = ");
         sep.push_bind_unseparated(val);
         has_col_updates = true;
@@ -630,6 +749,87 @@ pub async fn update_channel(
         has_col_updates = true;
     }
 
+    let is_forum_like = ChannelType::is_forum_like(new_kind);
+    let is_forum = new_kind == ChannelType::GuildForum as u32;
+
+    let next_flags = if is_forum_like {
+        if let Some(flags_val) = payload.flags {
+            let validated = validate_forum_flags(flags_val, new_kind)?;
+            sep.push("flags = ");
+            sep.push_bind_unseparated(validated);
+            has_col_updates = true;
+            validated
+        } else {
+            current_locked.flags
+        }
+    } else {
+        current_locked.flags
+    };
+
+    let existing_tags = if is_forum_like {
+        fetch_channel_forum_tags(&mut *tx, channel_id).await?
+    } else {
+        Vec::new()
+    };
+    let existing_tag_ids: HashSet<String> = existing_tags.iter().map(|t| t.id.clone()).collect();
+    let tags_changed = is_forum_like && payload.available_tags.is_some();
+    let new_tags = if is_forum_like {
+        let candidate = match &payload.available_tags {
+            Some(inputs) => validate_and_normalize_tags_list(inputs, &existing_tag_ids)?,
+            None => existing_tags,
+        };
+        if payload.flags.is_some() || payload.available_tags.is_some() {
+            ensure_unmoderated_tag_if_required(next_flags, &candidate)?;
+        }
+        candidate
+    } else {
+        Vec::new()
+    };
+
+    if is_forum_like {
+        if let Some(reaction_opt) = payload.default_reaction_emoji {
+            let (eid, ename) = validate_default_reaction_input(reaction_opt)?;
+            sep.push("default_reaction_emoji_id = ");
+            sep.push_bind_unseparated(eid);
+            sep.push("default_reaction_emoji_name = ");
+            sep.push_bind_unseparated(ename);
+            has_col_updates = true;
+        }
+        if let Some(sort_opt) = payload.default_sort_order {
+            let val = validate_default_sort_order(sort_opt)?;
+            sep.push("default_sort_order = ");
+            sep.push_bind_unseparated(val);
+            has_col_updates = true;
+        }
+        if is_forum && let Some(layout_opt) = payload.default_forum_layout {
+            let val = validate_default_forum_layout(layout_opt)?;
+            sep.push("default_forum_layout = ");
+            sep.push_bind_unseparated(val);
+            has_col_updates = true;
+        }
+        if let Some(tag_setting_opt) = &payload.default_tag_setting {
+            let val = validate_default_tag_setting(tag_setting_opt.as_deref())?;
+            sep.push("default_tag_setting = ");
+            sep.push_bind_unseparated(val);
+            has_col_updates = true;
+        }
+    }
+
+    if can_use_threads && ChannelType::supports_thread_defaults(new_kind) {
+        if let Some(auto_opt) = payload.default_auto_archive_duration {
+            let val = validate_default_auto_archive_duration(auto_opt)?;
+            sep.push("default_auto_archive_duration = ");
+            sep.push_bind_unseparated(val);
+            has_col_updates = true;
+        }
+        if let Some(thread_rate_opt) = payload.default_thread_rate_limit_per_user {
+            let val = validate_default_thread_rate_limit(thread_rate_opt)?;
+            sep.push("default_thread_rate_limit_per_user = ");
+            sep.push_bind_unseparated(val);
+            has_col_updates = true;
+        }
+    }
+
     if has_col_updates {
         query.push(" WHERE id = ");
         query.push_bind(channel_id);
@@ -651,6 +851,10 @@ pub async fn update_channel(
         }
     }
 
+    if tags_changed {
+        replace_channel_forum_tags(&mut tx, channel_id, &existing_tag_ids, &new_tags).await?;
+    }
+
     let updated_row = sqlx::query_as::<_, ChannelRow>(&format!(
         "SELECT {} FROM channels WHERE id = ?",
         ChannelRow::SELECT_COLS
@@ -661,7 +865,7 @@ pub async fn update_channel(
 
     tx.commit().await?;
 
-    let updated = ChannelResponse::from_row(updated_row, new_overwrites);
+    let mut updated = ChannelResponse::from_row(updated_row, new_overwrites, new_tags);
 
     if overwrites_changed {
         dispatch_channel_update_with_visibility(
@@ -690,7 +894,7 @@ pub async fn update_channel(
             &current_locked.guild_id,
         )
         .await;
-    } else if has_col_updates {
+    } else if has_col_updates || tags_changed {
         permission_service::dispatch_channel_with_ctx(
             state,
             &current_locked.guild_id,
@@ -702,6 +906,10 @@ pub async fn update_channel(
         .await;
     }
 
+    if !can_use_threads {
+        updated.strip_thread_fields();
+    }
+
     Ok(updated)
 }
 
@@ -709,6 +917,7 @@ pub async fn delete_channel(
     state: &AppState,
     channel_id: &str,
     user_id: &str,
+    can_use_threads: bool,
 ) -> Result<(), AppError> {
     let row = sqlx::query_as::<_, ChannelRow>(&format!(
         "SELECT {} FROM channels WHERE id = ?",
@@ -718,6 +927,12 @@ pub async fn delete_channel(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(AppError::unknown_channel)?;
+
+    if !can_use_threads
+        && (ChannelType::is_forum_like(row.kind) || ChannelType::is_thread(row.kind))
+    {
+        return Err(AppError::unknown_channel());
+    }
 
     let (perm_ctx, _, _) = permission_service::require_channel_permission_with_ctx(
         state,
@@ -729,6 +944,11 @@ pub async fn delete_channel(
     .await?;
 
     let overwrites = queries::fetch_channel_overwrites(&state.db, channel_id).await?;
+    let tags = if ChannelType::is_forum_like(row.kind) {
+        fetch_channel_forum_tags(&state.db, channel_id).await?
+    } else {
+        Vec::new()
+    };
     let viewer_sessions = permission_service::filter_sessions_for_channel_with_ctx(
         state,
         &row.guild_id,
@@ -740,14 +960,26 @@ pub async fn delete_channel(
     let mut tx = state.db.begin().await?;
 
     let child_ids: Vec<String> = if row.kind == ChannelType::GuildCategory as u32 {
-        sqlx::query_scalar("SELECT id FROM channels WHERE guild_id = ? AND parent_id = ?")
-            .bind(&row.guild_id)
-            .bind(channel_id)
-            .fetch_all(&mut *tx)
-            .await?
+        sqlx::query_scalar(
+            "SELECT id FROM channels WHERE guild_id = ? AND parent_id = ? AND type NOT IN (10, 11, 12)",
+        )
+        .bind(&row.guild_id)
+        .bind(channel_id)
+        .fetch_all(&mut *tx)
+        .await?
     } else {
         Vec::new()
     };
+
+    if row.kind != ChannelType::GuildCategory as u32 {
+        sqlx::query(
+            "DELETE FROM channels WHERE guild_id = ? AND parent_id = ? AND type IN (10, 11, 12)",
+        )
+        .bind(&row.guild_id)
+        .bind(channel_id)
+        .execute(&mut *tx)
+        .await?;
+    }
 
     let guild_update_res = sqlx::query(
         r#"
@@ -825,11 +1057,14 @@ pub async fn delete_channel(
                 .push(PermissionOverwrite::from(ow));
         }
 
+        let mut tags_by_ch = fetch_guild_forum_tags(&mut *tx, &row.guild_id).await?;
+
         child_rows
             .into_iter()
             .map(|c| {
                 let ows = ow_by_ch.remove(&c.id).unwrap_or_default();
-                ChannelResponse::from_row(c, ows)
+                let c_tags = tags_by_ch.remove(&c.id).unwrap_or_default();
+                ChannelResponse::from_row(c, ows, c_tags)
             })
             .collect()
     };
@@ -843,7 +1078,7 @@ pub async fn delete_channel(
     }
 
     let guild_id = row.guild_id.clone();
-    let deleted_channel = ChannelResponse::from_row(row, overwrites);
+    let deleted_channel = ChannelResponse::from_row(row, overwrites, tags);
     state.dispatch_to_sessions(&viewer_sessions, events::CHANNEL_DELETE, &deleted_channel);
 
     for child in updated_children {
@@ -866,14 +1101,6 @@ pub async fn delete_channel(
     }
 
     Ok(())
-}
-
-fn is_supported_guild_channel_type(kind: u32) -> bool {
-    kind == ChannelType::GuildText as u32
-        || kind == ChannelType::GuildVoice as u32
-        || kind == ChannelType::GuildCategory as u32
-        || kind == ChannelType::GuildAnnouncement as u32
-        || kind == ChannelType::GuildLink as u32
 }
 
 fn normalize_channel_name(raw: &str, kind: u32) -> Result<String, AppError> {
@@ -899,15 +1126,20 @@ fn normalize_channel_name(raw: &str, kind: u32) -> Result<String, AppError> {
     Ok(normalized)
 }
 
-fn validate_topic_opt(raw: Option<&str>) -> Result<Option<String>, AppError> {
+fn validate_topic_opt(raw: Option<&str>, kind: u32) -> Result<Option<String>, AppError> {
     let Some(trimmed) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
-    if trimmed.chars().count() > MAX_CHANNEL_TOPIC_LENGTH {
+    let max_len = if ChannelType::is_forum_like(kind) {
+        MAX_FORUM_TOPIC_LENGTH
+    } else {
+        MAX_CHANNEL_TOPIC_LENGTH
+    };
+    if trimmed.chars().count() > max_len {
         return Err(AppError::validation(
             "topic",
             ValidationCode::ContentExceedsMaxLength,
-            "Channel topic must not exceed 1024 characters.",
+            format!("Channel topic must not exceed {max_len} characters."),
         ));
     }
     Ok(Some(trimmed.to_string()))
@@ -1026,6 +1258,14 @@ mod tests {
             "Voice Lounge!"
         );
         assert!(normalize_channel_name("!!!", ChannelType::GuildText as u32).is_err());
+    }
+
+    #[test]
+    fn validate_topic_opt_uses_4096_for_forum_and_media() {
+        let long_topic = "a".repeat(2000);
+        assert!(validate_topic_opt(Some(&long_topic), ChannelType::GuildText as u32).is_err());
+        assert!(validate_topic_opt(Some(&long_topic), ChannelType::GuildForum as u32).is_ok());
+        assert!(validate_topic_opt(Some(&long_topic), ChannelType::GuildMedia as u32).is_ok());
     }
 
     #[test]

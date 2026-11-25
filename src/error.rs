@@ -16,6 +16,9 @@ pub enum ApiErrorCode {
     MissingAuthorization,
     InvalidAuthToken,
     MissingPermissions,
+    MissingAccess,
+    CommunicationDisabled,
+    AccessDenied,
     NotFound,
     UnknownUser,
     UnknownGuild,
@@ -23,6 +26,9 @@ pub enum ApiErrorCode {
     UnknownMessage,
     UnknownInvite,
     UnknownMember,
+    UnknownForumTag,
+    UnknownEmoji,
+    UnknownThreadMember,
     InvalidChannelType,
     CannotSendEmptyMessage,
     CannotSendMessagesInNonTextChannel,
@@ -38,6 +44,20 @@ pub enum ApiErrorCode {
     UnknownRole,
     MaxGuildRoles,
     GuildTemplateInvalid,
+    MaxForumTags,
+    ForumTagNamesMustBeUnique,
+    NoTagsAvailableToNonModerators,
+    HideMediaDownloadOptionMediaOnly,
+    ForumTagRequired,
+    MaxPinnedThreadsInForum,
+    MaxActiveThreads,
+    ThreadArchived,
+    ThreadLocked,
+    ThreadAlreadyCreatedForMessage,
+    CannotModifySystemWebhook,
+    MaxThreadMembers,
+    InvalidThreadNotificationSettings,
+    ResourceLocked,
     InternalServerError,
 }
 
@@ -50,6 +70,9 @@ impl ApiErrorCode {
             Self::MissingAuthorization => "MISSING_AUTHORIZATION",
             Self::InvalidAuthToken => "INVALID_AUTH_TOKEN",
             Self::MissingPermissions => "MISSING_PERMISSIONS",
+            Self::MissingAccess => "MISSING_ACCESS",
+            Self::CommunicationDisabled => "COMMUNICATION_DISABLED",
+            Self::AccessDenied => "ACCESS_DENIED",
             Self::NotFound => "NOT_FOUND",
             Self::UnknownUser => "UNKNOWN_USER",
             Self::UnknownGuild => "UNKNOWN_GUILD",
@@ -57,6 +80,9 @@ impl ApiErrorCode {
             Self::UnknownMessage => "UNKNOWN_MESSAGE",
             Self::UnknownInvite => "UNKNOWN_INVITE",
             Self::UnknownMember => "UNKNOWN_MEMBER",
+            Self::UnknownForumTag => "UNKNOWN_FORUM_TAG",
+            Self::UnknownEmoji => "UNKNOWN_EMOJI",
+            Self::UnknownThreadMember => "UNKNOWN_THREAD_MEMBER",
             Self::InvalidChannelType => "INVALID_CHANNEL_TYPE",
             Self::CannotSendEmptyMessage => "CANNOT_SEND_EMPTY_MESSAGE",
             Self::CannotSendMessagesInNonTextChannel => "CANNOT_SEND_MESSAGES_IN_NON_TEXT_CHANNEL",
@@ -72,6 +98,20 @@ impl ApiErrorCode {
             Self::UnknownRole => "UNKNOWN_ROLE",
             Self::MaxGuildRoles => "MAX_GUILD_ROLES",
             Self::GuildTemplateInvalid => "GUILD_TEMPLATE_INVALID",
+            Self::MaxForumTags => "MAX_FORUM_TAGS",
+            Self::ForumTagNamesMustBeUnique => "FORUM_TAG_NAMES_MUST_BE_UNIQUE",
+            Self::NoTagsAvailableToNonModerators => "NO_TAGS_AVAILABLE_TO_NON_MODERATORS",
+            Self::HideMediaDownloadOptionMediaOnly => "HIDE_MEDIA_DOWNLOAD_OPTION_MEDIA_ONLY",
+            Self::ForumTagRequired => "FORUM_TAG_REQUIRED",
+            Self::MaxPinnedThreadsInForum => "MAX_PINNED_THREADS_IN_FORUM",
+            Self::MaxActiveThreads => "MAX_ACTIVE_THREADS",
+            Self::ThreadArchived => "THREAD_ARCHIVED",
+            Self::ThreadLocked => "THREAD_LOCKED",
+            Self::ThreadAlreadyCreatedForMessage => "THREAD_ALREADY_CREATED_FOR_MESSAGE",
+            Self::CannotModifySystemWebhook => "CANNOT_MODIFY_SYSTEM_WEBHOOK",
+            Self::MaxThreadMembers => "MAX_THREAD_MEMBERS",
+            Self::InvalidThreadNotificationSettings => "INVALID_THREAD_NOTIFICATION_SETTINGS",
+            Self::ResourceLocked => "RESOURCE_LOCKED",
             Self::InternalServerError => "INTERNAL_SERVER_ERROR",
         }
     }
@@ -118,6 +158,7 @@ pub enum ValidationCode {
     RoleIconAndEmojiExclusive,
     RoleIconSourceAndIconExclusive,
     CannotSetIconOnEveryoneRole,
+    NotAValidUnicodeEmoji,
 }
 
 impl ValidationCode {
@@ -165,6 +206,7 @@ impl ValidationCode {
             Self::RoleIconAndEmojiExclusive => "ROLE_ICON_AND_EMOJI_EXCLUSIVE",
             Self::RoleIconSourceAndIconExclusive => "ROLE_ICON_SOURCE_AND_ICON_EXCLUSIVE",
             Self::CannotSetIconOnEveryoneRole => "CANNOT_SET_ICON_ON_EVERYONE_ROLE",
+            Self::NotAValidUnicodeEmoji => "NOT_A_VALID_UNICODE_EMOJI",
         }
     }
 }
@@ -433,6 +475,82 @@ impl AppError {
             ApiErrorCode::MaxInvites,
             "Maximum number of invites reached for this community.",
         )
+    }
+
+    pub fn not_found() -> Self {
+        Self::coded(StatusCode::NOT_FOUND, ApiErrorCode::NotFound, "Not found")
+    }
+
+    pub fn missing_access() -> Self {
+        Self::coded(StatusCode::FORBIDDEN, ApiErrorCode::MissingAccess, "Missing access")
+    }
+
+    pub fn access_denied() -> Self {
+        Self::coded(StatusCode::FORBIDDEN, ApiErrorCode::AccessDenied, "Access denied")
+    }
+
+    pub fn unknown_forum_tag() -> Self {
+        Self::coded(StatusCode::NOT_FOUND, ApiErrorCode::UnknownForumTag, "Unknown forum tag")
+    }
+
+    pub fn unknown_emoji() -> Self {
+        Self::coded(StatusCode::NOT_FOUND, ApiErrorCode::UnknownEmoji, "Unknown emoji")
+    }
+
+    pub fn unknown_thread_member() -> Self {
+        Self::coded(StatusCode::NOT_FOUND, ApiErrorCode::UnknownThreadMember, "Unknown thread member")
+    }
+
+    pub fn max_forum_tags() -> Self {
+        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::MaxForumTags, "Maximum number of forum tags reached for this channel.")
+    }
+
+    pub fn forum_tag_names_must_be_unique() -> Self {
+        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::ForumTagNamesMustBeUnique, "Forum tag names must be unique.")
+    }
+
+    pub fn no_tags_available_to_non_moderators() -> Self {
+        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::NoTagsAvailableToNonModerators, "No unmoderated tags would remain available.")
+    }
+
+    pub fn hide_media_download_option_media_only() -> Self {
+        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::HideMediaDownloadOptionMediaOnly, "HIDE_MEDIA_DOWNLOAD_OPTIONS can only be set on media channels.")
+    }
+
+    pub fn forum_tag_required() -> Self {
+        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::ForumTagRequired, "A tag is required to post in this channel.")
+    }
+
+    pub fn max_pinned_threads_in_forum() -> Self {
+        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::MaxPinnedThreadsInForum, "Maximum number of pinned posts reached for this channel.")
+    }
+
+    pub fn max_active_threads() -> Self {
+        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::MaxActiveThreads, "Maximum number of active threads reached for this community.")
+    }
+
+    pub fn thread_archived() -> Self {
+        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::ThreadArchived, "This thread is archived.")
+    }
+
+    pub fn thread_locked() -> Self {
+        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::ThreadLocked, "This thread is locked.")
+    }
+
+    pub fn thread_already_created_for_message() -> Self {
+        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::ThreadAlreadyCreatedForMessage, "A thread has already been created for this message.")
+    }
+
+    pub fn max_thread_members() -> Self {
+        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::MaxThreadMembers, "Maximum number of members reached for this thread.")
+    }
+
+    pub fn invalid_thread_notification_settings() -> Self {
+        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::InvalidThreadNotificationSettings, "Invalid thread notification settings.")
+    }
+
+    pub fn resource_locked() -> Self {
+        Self::coded(StatusCode::TOO_MANY_REQUESTS, ApiErrorCode::ResourceLocked, "Another tag change is currently running.")
     }
 
     pub fn internal(message: impl Into<String>) -> Self {

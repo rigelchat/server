@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::constants::channel::{ChannelType, OverwriteType};
 use crate::constants::flags::PermissionFlags;
 use crate::constants::guild::{
     DEFAULT_GUILD_AFK_TIMEOUT, DEFAULT_VOICE_BITRATE, DEFAULT_VOICE_CONNECTION_LIMIT,
@@ -14,8 +15,6 @@ use crate::constants::limits::{
     MIN_VOICE_BITRATE, MIN_VOICE_CONNECTION_LIMIT,
 };
 use crate::error::AppError;
-use crate::models::channel::ChannelType;
-use crate::models::permission::OverwriteType;
 use crate::models::rest::guilds::GuildCreationTemplate;
 use crate::utils::snowflake::DISCORD_SNOWFLAKE;
 use crate::utils::validation::{collapse_channel_whitespace, slugify_channel_name};

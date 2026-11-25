@@ -6,14 +6,14 @@ use sqlx::{MySql, MySqlConnection, QueryBuilder};
 use tracing::error;
 
 use crate::AppState;
+use crate::constants::channel::{ChannelType, OverwriteType};
 use crate::constants::flags::PermissionFlags;
 use crate::error::AppError;
 use crate::gateway::session::GatewaySession;
 use crate::models::channel::{
-    ChannelOverwriteRow, ChannelResponse, ChannelType, PermissionOverwrite,
+    ChannelOverwriteRow, ChannelResponse, PermissionOverwrite,
 };
 use crate::models::guild_member::GuildMemberRole;
-use crate::models::permission::OverwriteType;
 use crate::models::role::RolePerm;
 
 #[derive(Debug, Clone)]

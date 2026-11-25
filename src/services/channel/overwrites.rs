@@ -4,22 +4,25 @@ use std::sync::Arc;
 use sqlx::MySql;
 
 use crate::AppState;
+use crate::constants::channel::{ChannelType, OverwriteType};
 use crate::constants::flags::PermissionFlags;
 use crate::constants::gateway::events;
 use crate::constants::limits::MAX_CHANNEL_OVERWRITES;
 use crate::error::{AppError, ValidationCode};
 use crate::gateway::session::GatewaySession;
-use crate::models::channel::{ChannelResponse, ChannelRow, ChannelType, PermissionOverwrite};
-use crate::models::permission::OverwriteType;
+use crate::models::channel::{ChannelResponse, ChannelRow, PermissionOverwrite};
 use crate::models::rest::channels::{PermissionOverwriteInput, SetPermissionOverwriteRequest};
 use crate::services::{permission_service, queries};
 use crate::utils::snowflake::validate_snowflake;
+
+use super::forum::{fetch_channel_forum_tags, fetch_guild_forum_tags};
 
 pub async fn set_permission_overwrite(
     state: &AppState,
     channel_id: &str,
     overwrite_id: &str,
     user_id: &str,
+    can_write_thread_perms: bool,
     payload: SetPermissionOverwriteRequest,
 ) -> Result<(), AppError> {
     let current = sqlx::query_as::<_, ChannelRow>(&format!(
@@ -30,6 +33,16 @@ pub async fn set_permission_overwrite(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(AppError::unknown_channel)?;
+
+    if !can_write_thread_perms
+        && (ChannelType::is_forum_like(current.kind) || ChannelType::is_thread(current.kind))
+    {
+        return Err(AppError::unknown_channel());
+    }
+
+    if ChannelType::is_thread(current.kind) {
+        return Err(AppError::invalid_channel_type());
+    }
 
     let (perm_ctx, _, actor_perms) = permission_service::require_channel_permission_with_ctx(
         state,
@@ -77,6 +90,7 @@ pub async fn set_permission_overwrite(
         &next_inputs,
         actor_perms,
         is_owner_or_admin,
+        can_write_thread_perms,
         Some(&old_overwrites),
     )
     .await?;
@@ -104,10 +118,16 @@ pub async fn set_permission_overwrite(
         Vec::new()
     };
 
+    let tags = if ChannelType::is_forum_like(current.kind) {
+        fetch_channel_forum_tags(&mut *tx, channel_id).await?
+    } else {
+        Vec::new()
+    };
+
     tx.commit().await?;
 
     let guild_id = current.guild_id.clone();
-    let updated = ChannelResponse::from_row(current, new_overwrites);
+    let updated = ChannelResponse::from_row(current, new_overwrites, tags);
     dispatch_channel_update_with_visibility(state, &guild_id, channel_id, old_sessions, &updated)
         .await;
 
@@ -133,6 +153,7 @@ pub async fn delete_permission_overwrite(
     channel_id: &str,
     overwrite_id: &str,
     user_id: &str,
+    can_write_thread_perms: bool,
 ) -> Result<(), AppError> {
     let current = sqlx::query_as::<_, ChannelRow>(&format!(
         "SELECT {} FROM channels WHERE id = ?",
@@ -142,6 +163,16 @@ pub async fn delete_permission_overwrite(
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(AppError::unknown_channel)?;
+
+    if !can_write_thread_perms
+        && (ChannelType::is_forum_like(current.kind) || ChannelType::is_thread(current.kind))
+    {
+        return Err(AppError::unknown_channel());
+    }
+
+    if ChannelType::is_thread(current.kind) {
+        return Err(AppError::invalid_channel_type());
+    }
 
     let (perm_ctx, _, actor_perms) = permission_service::require_channel_permission_with_ctx(
         state,
@@ -169,14 +200,39 @@ pub async fn delete_permission_overwrite(
         return Ok(());
     };
 
-    if !is_owner_or_admin && (target_ow.deny & !actor_perms.bits()) != 0 {
+    let thread_mask = PermissionFlags::THREAD_GATED_BITS.bits();
+    let cleared_deny = if can_write_thread_perms {
+        target_ow.deny
+    } else {
+        target_ow.deny & !thread_mask
+    };
+
+    if !is_owner_or_admin && (cleared_deny & !actor_perms.bits()) != 0 {
         return Err(AppError::missing_permissions());
     }
 
+    let retained_ow = if !can_write_thread_perms
+        && ((target_ow.allow & thread_mask) != 0 || (target_ow.deny & thread_mask) != 0)
+    {
+        Some(PermissionOverwrite {
+            id: target_ow.id.clone(),
+            kind: target_ow.kind,
+            allow: target_ow.allow & thread_mask,
+            deny: target_ow.deny & thread_mask,
+        })
+    } else {
+        None
+    };
+
     let new_overwrites: Vec<PermissionOverwrite> = old_overwrites
         .iter()
-        .filter(|o| o.id != overwrite_id)
-        .cloned()
+        .filter_map(|o| {
+            if o.id == overwrite_id {
+                retained_ow.clone()
+            } else {
+                Some(o.clone())
+            }
+        })
         .collect();
 
     let old_sessions = permission_service::filter_sessions_for_channel_with_ctx(
@@ -187,11 +243,25 @@ pub async fn delete_permission_overwrite(
     )
     .await;
 
-    sqlx::query("DELETE FROM channel_permission_overwrites WHERE channel_id = ? AND target_id = ?")
+    if let Some(ref kept) = retained_ow {
+        sqlx::query(
+            "UPDATE channel_permission_overwrites SET allow = ?, deny = ? WHERE channel_id = ? AND target_id = ?",
+        )
+        .bind(kept.allow)
+        .bind(kept.deny)
         .bind(channel_id)
         .bind(overwrite_id)
         .execute(&mut *tx)
         .await?;
+    } else {
+        sqlx::query(
+            "DELETE FROM channel_permission_overwrites WHERE channel_id = ? AND target_id = ?",
+        )
+        .bind(channel_id)
+        .bind(overwrite_id)
+        .execute(&mut *tx)
+        .await?;
+    }
 
     let synced_children = if current.kind == ChannelType::GuildCategory as u32 {
         propagate_category_overwrites(
@@ -206,10 +276,16 @@ pub async fn delete_permission_overwrite(
         Vec::new()
     };
 
+    let tags = if ChannelType::is_forum_like(current.kind) {
+        fetch_channel_forum_tags(&mut *tx, channel_id).await?
+    } else {
+        Vec::new()
+    };
+
     tx.commit().await?;
 
     let guild_id = current.guild_id.clone();
-    let updated = ChannelResponse::from_row(current, new_overwrites);
+    let updated = ChannelResponse::from_row(current, new_overwrites, tags);
     dispatch_channel_update_with_visibility(state, &guild_id, channel_id, old_sessions, &updated)
         .await;
 
@@ -262,6 +338,7 @@ pub(super) async fn validate_and_normalize_overwrites(
     inputs: &[PermissionOverwriteInput],
     actor_perms: PermissionFlags,
     is_owner_or_admin: bool,
+    can_write_thread_perms: bool,
     old_overwrites: Option<&[PermissionOverwrite]>,
 ) -> Result<Vec<PermissionOverwrite>, AppError> {
     if inputs.len() > MAX_CHANNEL_OVERWRITES {
@@ -271,6 +348,11 @@ pub(super) async fn validate_and_normalize_overwrites(
             "Too many permission overwrites.",
         ));
     }
+
+    let old_by_id: HashMap<&str, &PermissionOverwrite> = old_overwrites
+        .map(|ows| ows.iter().map(|o| (o.id.as_str(), o)).collect())
+        .unwrap_or_default();
+    let thread_mask = PermissionFlags::THREAD_GATED_BITS.bits();
 
     let mut deduped: Vec<PermissionOverwrite> = Vec::with_capacity(inputs.len());
     let mut index_by_id: HashMap<String, usize> = HashMap::with_capacity(inputs.len());
@@ -307,8 +389,19 @@ pub(super) async fn validate_and_normalize_overwrites(
             ));
         }
 
-        let allow = PermissionFlags::from_bits_truncate(input.allow.unwrap_or(0)).bits();
-        let deny = PermissionFlags::from_bits_truncate(input.deny.unwrap_or(0)).bits();
+        let req_allow = PermissionFlags::from_bits_truncate(input.allow.unwrap_or(0)).bits();
+        let req_deny = PermissionFlags::from_bits_truncate(input.deny.unwrap_or(0)).bits();
+        let (allow, deny) = if can_write_thread_perms {
+            (req_allow, req_deny)
+        } else {
+            let prev = old_by_id.get(input.id.as_str()).copied();
+            let kept_allow = prev.map_or(0, |p| p.allow & thread_mask);
+            let kept_deny = prev.map_or(0, |p| p.deny & thread_mask);
+            (
+                (req_allow & !thread_mask) | kept_allow,
+                (req_deny & !thread_mask) | kept_deny,
+            )
+        };
         let ow = PermissionOverwrite {
             id: input.id.clone(),
             kind: input.kind,
@@ -391,14 +484,17 @@ pub(super) async fn propagate_category_overwrites(
     .fetch_all(&mut **tx)
     .await?;
 
+    let mut tags_by_ch = fetch_guild_forum_tags(&mut **tx, guild_id).await?;
     let mut synced = Vec::new();
     for child in children {
         let child_ows = queries::fetch_channel_overwrites(&mut **tx, &child.id).await?;
         if sorted_overwrite_key(&child_ows) == old_key {
             replace_channel_overwrites(tx, &child.id, new_category_overwrites).await?;
+            let child_tags = tags_by_ch.remove(&child.id).unwrap_or_default();
             synced.push(ChannelResponse::from_row(
                 child,
                 new_category_overwrites.to_vec(),
+                child_tags,
             ));
         }
     }

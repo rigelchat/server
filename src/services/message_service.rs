@@ -2,16 +2,17 @@ use chrono::Utc;
 use sqlx::FromRow;
 
 use crate::AppState;
+use crate::constants::channel::ChannelType;
 use crate::constants::flags::PermissionFlags;
 use crate::constants::gateway::events;
 use crate::constants::limits::{
     DEFAULT_MESSAGES_PAGE_LIMIT, MAX_MESSAGE_LENGTH, MAX_MESSAGE_NONCE_LENGTH,
     MAX_MESSAGES_PAGE_LIMIT,
 };
+use crate::constants::message::MessageType;
 use crate::error::{AppError, ValidationCode};
-use crate::models::channel::ChannelType;
 use crate::models::gateway::events::{GatewayMessageEvent, MessageDeleteEvent, MessageMember};
-use crate::models::message::{Message, MessageDbRow, MessageType};
+use crate::models::message::{Message, MessageDbRow};
 use crate::models::rest::messages::GetMessagesQuery;
 use crate::services::{permission_service, queries, user};
 use crate::utils::snowflake::{DISCORD_SNOWFLAKE, validate_snowflake};
@@ -124,6 +125,7 @@ pub async fn get_messages(
     state: &AppState,
     channel_id: &str,
     user_id: &str,
+    can_use_threads: bool,
     query: GetMessagesQuery,
 ) -> Result<Vec<Message>, AppError> {
     let before_num = parse_snowflake_opt("before", query.before.as_deref())?;
@@ -131,6 +133,13 @@ pub async fn get_messages(
     let around_num = parse_snowflake_opt("around", query.around.as_deref())?;
 
     let meta = get_channel_meta(state, channel_id).await?;
+    if !can_use_threads
+        && (ChannelType::is_forum_like(meta.channel_type)
+            || ChannelType::is_thread(meta.channel_type))
+    {
+        return Err(AppError::unknown_channel());
+    }
+
     let perms = permission_service::require_channel_permission(
         state,
         &meta.guild_id,
@@ -139,9 +148,7 @@ pub async fn get_messages(
         PermissionFlags::VIEW_CHANNEL,
     )
     .await?;
-    if meta.channel_type == ChannelType::GuildCategory as u32
-        || meta.channel_type == ChannelType::GuildLink as u32
-    {
+    if !ChannelType::supports_messages(meta.channel_type) {
         return Err(AppError::invalid_channel_type());
     }
 
@@ -221,6 +228,7 @@ pub async fn create_message(
     state: &AppState,
     channel_id: &str,
     user_id: &str,
+    can_use_threads: bool,
     content: String,
     nonce: Option<String>,
 ) -> Result<Message, AppError> {
@@ -228,6 +236,13 @@ pub async fn create_message(
     let nonce = validate_nonce(nonce)?;
 
     let meta = get_channel_meta(state, channel_id).await?;
+    if !can_use_threads
+        && (ChannelType::is_forum_like(meta.channel_type)
+            || ChannelType::is_thread(meta.channel_type))
+    {
+        return Err(AppError::unknown_channel());
+    }
+
     let (perm_ctx, member_roles, _) = permission_service::require_channel_permission_with_ctx(
         state,
         &meta.guild_id,
@@ -236,9 +251,7 @@ pub async fn create_message(
         PermissionFlags::VIEW_CHANNEL | PermissionFlags::SEND_MESSAGES,
     )
     .await?;
-    if meta.channel_type == ChannelType::GuildCategory as u32
-        || meta.channel_type == ChannelType::GuildLink as u32
-    {
+    if !ChannelType::supports_messages(meta.channel_type) {
         return Err(AppError::cannot_send_in_non_text_channel());
     }
 
@@ -318,11 +331,18 @@ pub async fn edit_message(
     channel_id: &str,
     message_id: &str,
     user_id: &str,
+    can_use_threads: bool,
     content: String,
 ) -> Result<Message, AppError> {
     validate_message_content(&content)?;
 
     let meta = get_channel_meta(state, channel_id).await?;
+    if !can_use_threads
+        && (ChannelType::is_forum_like(meta.channel_type)
+            || ChannelType::is_thread(meta.channel_type))
+    {
+        return Err(AppError::unknown_channel());
+    }
     let (perm_ctx, member_roles, _) = permission_service::require_channel_permission_with_ctx(
         state,
         &meta.guild_id,
@@ -381,8 +401,15 @@ pub async fn delete_message(
     channel_id: &str,
     message_id: &str,
     user_id: &str,
+    can_use_threads: bool,
 ) -> Result<(), AppError> {
     let meta = get_channel_meta(state, channel_id).await?;
+    if !can_use_threads
+        && (ChannelType::is_forum_like(meta.channel_type)
+            || ChannelType::is_thread(meta.channel_type))
+    {
+        return Err(AppError::unknown_channel());
+    }
     let (perm_ctx, _, perms) = permission_service::require_channel_permission_with_ctx(
         state,
         &meta.guild_id,

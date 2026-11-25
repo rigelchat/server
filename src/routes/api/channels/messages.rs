@@ -1,6 +1,6 @@
 use crate::AppState;
 use crate::error::AppError;
-use crate::extractors::{AppJson, AuthUser};
+use crate::extractors::{AppJson, AuthUser, FluxerFeatures};
 use crate::models::message::Message;
 use crate::models::rest::messages::{CreateMessageRequest, EditMessageRequest, GetMessagesQuery};
 use crate::services::message_service;
@@ -20,16 +20,25 @@ pub fn router() -> Router<AppState> {
 async fn get_messages(
     State(state): State<AppState>,
     auth: AuthUser,
+    features: FluxerFeatures,
     Path(channel_id): Path<String>,
     Query(query): Query<GetMessagesQuery>,
 ) -> Result<Json<Vec<Message>>, AppError> {
-    let messages = message_service::get_messages(&state, &channel_id, &auth.user_id, query).await?;
+    let messages = message_service::get_messages(
+        &state,
+        &channel_id,
+        &auth.user_id,
+        features.has_channel_threads(auth.is_bot),
+        query,
+    )
+    .await?;
     Ok(Json(messages))
 }
 
 async fn create_message(
     State(state): State<AppState>,
     auth: AuthUser,
+    features: FluxerFeatures,
     Path(channel_id): Path<String>,
     AppJson(payload): AppJson<CreateMessageRequest>,
 ) -> Result<Json<Message>, AppError> {
@@ -37,6 +46,7 @@ async fn create_message(
         &state,
         &channel_id,
         &auth.user_id,
+        features.has_channel_threads(auth.is_bot),
         payload.content.unwrap_or_default(),
         payload.nonce,
     )
@@ -47,6 +57,7 @@ async fn create_message(
 async fn edit_message(
     State(state): State<AppState>,
     auth: AuthUser,
+    features: FluxerFeatures,
     Path((channel_id, message_id)): Path<(String, String)>,
     AppJson(payload): AppJson<EditMessageRequest>,
 ) -> Result<Json<Message>, AppError> {
@@ -55,6 +66,7 @@ async fn edit_message(
         &channel_id,
         &message_id,
         &auth.user_id,
+        features.has_channel_threads(auth.is_bot),
         payload.content.unwrap_or_default(),
     )
     .await?;
@@ -64,8 +76,16 @@ async fn edit_message(
 async fn delete_message(
     State(state): State<AppState>,
     auth: AuthUser,
+    features: FluxerFeatures,
     Path((channel_id, message_id)): Path<(String, String)>,
 ) -> Result<StatusCode, AppError> {
-    message_service::delete_message(&state, &channel_id, &message_id, &auth.user_id).await?;
+    message_service::delete_message(
+        &state,
+        &channel_id,
+        &message_id,
+        &auth.user_id,
+        features.has_channel_threads(auth.is_bot),
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }

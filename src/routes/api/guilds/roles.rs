@@ -7,7 +7,7 @@ use axum::{
 
 use crate::AppState;
 use crate::error::AppError;
-use crate::extractors::{AppJson, AuthUser};
+use crate::extractors::{AppJson, AuthUser, FluxerFeatures};
 use crate::models::rest::roles::{
     CreateRoleRequest, RoleHoistPositionUpdate, RolePositionUpdate, UpdateRoleRequest,
 };
@@ -32,29 +32,53 @@ pub fn router() -> Router<AppState> {
 async fn get_roles(
     State(state): State<AppState>,
     auth: AuthUser,
+    features: FluxerFeatures,
     Path(guild_id): Path<String>,
 ) -> Result<Json<Vec<Role>>, AppError> {
-    let roles = role::get_guild_roles(&state, &guild_id, &auth.user_id).await?;
+    let roles = role::get_guild_roles(
+        &state,
+        &guild_id,
+        &auth.user_id,
+        features.has_channel_threads(auth.is_bot),
+    )
+    .await?;
     Ok(Json(roles))
 }
 
 async fn create_role(
     State(state): State<AppState>,
     auth: AuthUser,
+    features: FluxerFeatures,
     Path(guild_id): Path<String>,
     AppJson(payload): AppJson<CreateRoleRequest>,
 ) -> Result<Json<Role>, AppError> {
-    let role = role::create_role(&state, &guild_id, &auth.user_id, payload).await?;
+    let role = role::create_role(
+        &state,
+        &guild_id,
+        &auth.user_id,
+        features.has_channel_threads(auth.is_bot),
+        payload,
+    )
+    .await?;
     Ok(Json(role))
 }
 
 async fn update_role(
     State(state): State<AppState>,
     auth: AuthUser,
+    features: FluxerFeatures,
     Path((guild_id, role_id)): Path<(String, String)>,
     AppJson(payload): AppJson<UpdateRoleRequest>,
 ) -> Result<Json<Role>, AppError> {
-    let role = role::update_role(&state, &guild_id, &role_id, &auth.user_id, payload).await?;
+    let role = role::update_role(
+        &state,
+        &guild_id,
+        &role_id,
+        &auth.user_id,
+        features.has_channel_threads(auth.is_bot),
+        payload,
+    )
+    .await?;
     Ok(Json(role))
 }
 

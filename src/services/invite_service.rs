@@ -3,15 +3,16 @@ use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::constants::channel::ChannelType;
 use crate::constants::flags::PermissionFlags;
+use crate::constants::invite::InviteType;
 use crate::constants::limits::{
     INVITE_CODE_LENGTH, MAX_INVITE_AGE_SECONDS, MAX_INVITE_CODE_LENGTH, MAX_INVITE_USES,
     MAX_INVITES_PER_GUILD,
 };
 use crate::error::AppError;
-use crate::models::channel::ChannelType;
 use crate::models::invite::{
-    CreatedInvite, InviteChannel, InviteGuild, InviteResponse, InviteType,
+    CreatedInvite, InviteChannel, InviteGuild, InviteResponse,
 };
 use crate::models::rest::invites::CreateInviteRequest;
 use crate::models::serde_helpers::millis_to_iso;
@@ -129,6 +130,7 @@ pub async fn create_channel_invite(
     state: &AppState,
     channel_id: &str,
     user_id: &str,
+    can_use_threads: bool,
     payload: CreateInviteRequest,
 ) -> Result<CreatedInvite, AppError> {
     let (guild_id, channel_type): (String, u32) =
@@ -138,8 +140,15 @@ pub async fn create_channel_invite(
             .await?
             .ok_or_else(AppError::unknown_channel)?;
 
+    if !can_use_threads
+        && (ChannelType::is_forum_like(channel_type) || ChannelType::is_thread(channel_type))
+    {
+        return Err(AppError::unknown_channel());
+    }
+
     if channel_type == ChannelType::GuildCategory as u32
         || channel_type == ChannelType::GuildLink as u32
+        || ChannelType::is_thread(channel_type)
     {
         return Err(AppError::invalid_channel_type());
     }

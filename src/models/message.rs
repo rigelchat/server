@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sqlx::FromRow;
 
 use crate::models::serde_helpers::{serialize_millis_iso, serialize_millis_iso_opt};
@@ -78,23 +78,6 @@ impl From<MessageDbRow> for Message {
             nonce: None,
         }
     }
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MessageType {
-    Default = 0,
-    RecipientAdd = 1,
-    RecipientRemove = 2,
-    Call = 3,
-    ChannelNameChange = 4,
-    ChannelIconChange = 5,
-    ChannelPinnedMessage = 6,
-    UserJoin = 7,
-    ChannelFollowAdd = 12,
-    ThreadCreated = 18,
-    Reply = 19,
-    ThreadStarterMessage = 21,
 }
 
 #[cfg(test)]
