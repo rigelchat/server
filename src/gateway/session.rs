@@ -6,6 +6,7 @@ use axum::extract::ws::{CloseFrame, Message};
 use serde::Serialize;
 use tokio::sync::{mpsc, watch};
 
+use crate::constants::flags::SessionFlags;
 use crate::constants::gateway::{
     GATEWAY_MAX_EVENTS_PER_WINDOW, GATEWAY_MAX_EXPENSIVE_OPS_PER_WINDOW,
     GATEWAY_PRE_AUTH_MAX_EVENTS, GATEWAY_RATE_LIMIT_WINDOW_SECS, Opcode, close_codes,
@@ -18,10 +19,15 @@ use crate::models::gateway::ready::ClientSessionInfo;
 struct SessionState {
     user_id: Option<String>,
     auth_session_id: Option<String>,
+    is_bot: bool,
+    flags: u32,
     status: PresenceStatus,
     afk: bool,
     mobile: bool,
     guilds: HashSet<String>,
+    active_guilds: HashSet<String>,
+    thread_subscriptions: HashSet<String>,
+    thread_member_lists: HashMap<String, Vec<String>>,
     member_list_subscriptions: HashMap<String, (String, [i64; 2])>,
 }
 
@@ -30,6 +36,7 @@ struct GatewayRateLimiter {
     total_events: u32,
     expensive_events: u32,
     pre_auth_events: u32,
+    forum_unreads_timestamps_ms: Vec<u64>,
 }
 
 impl GatewayRateLimiter {
@@ -39,7 +46,18 @@ impl GatewayRateLimiter {
             total_events: 0,
             expensive_events: 0,
             pre_auth_events: 0,
+            forum_unreads_timestamps_ms: Vec::new(),
         }
+    }
+
+    fn check_forum_unreads(&mut self, now_ms: u64) -> bool {
+        self.forum_unreads_timestamps_ms
+            .retain(|&ts| now_ms.saturating_sub(ts) < 5_000);
+        if self.forum_unreads_timestamps_ms.len() >= 5 {
+            return false;
+        }
+        self.forum_unreads_timestamps_ms.push(now_ms);
+        true
     }
 
     fn check(&mut self, now_ms: u64, authenticated: bool, is_expensive: bool) -> bool {
@@ -97,10 +115,15 @@ impl GatewaySession {
             state: RwLock::new(SessionState {
                 user_id: None,
                 auth_session_id: None,
+                is_bot: false,
+                flags: 0,
                 status: PresenceStatus::Online,
                 afk: false,
                 mobile: false,
                 guilds: HashSet::new(),
+                active_guilds: HashSet::new(),
+                thread_subscriptions: HashSet::new(),
+                thread_member_lists: HashMap::new(),
                 member_list_subscriptions: HashMap::new(),
             }),
             rate_limiter: Mutex::new(GatewayRateLimiter::new(now)),
@@ -113,6 +136,14 @@ impl GatewaySession {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .check(now, authenticated, is_expensive)
+    }
+
+    pub fn check_forum_unreads_rate_limit(&self) -> bool {
+        let now = now_millis();
+        self.rate_limiter
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .check_forum_unreads(now)
     }
 
     pub fn touch_heartbeat(&self) {
@@ -177,17 +208,80 @@ impl GatewaySession {
     }
 
     pub fn remove_guild(&self, guild_id: &str) {
-        self.state
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .guilds
-            .remove(guild_id);
+        let mut st = self.state.write().unwrap_or_else(|e| e.into_inner());
+        st.guilds.remove(guild_id);
+        st.active_guilds.remove(guild_id);
+        st.thread_subscriptions.remove(guild_id);
+        st.thread_member_lists.remove(guild_id);
     }
 
+    pub fn is_bot(&self) -> bool {
+        self.state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_bot
+    }
+
+    pub fn has_channel_threads(&self) -> bool {
+        let st = self.state.read().unwrap_or_else(|e| e.into_inner());
+        st.is_bot || SessionFlags::from_bits_truncate(st.flags).contains(SessionFlags::CHANNEL_THREADS)
+    }
+
+    pub fn set_guild_active(&self, guild_id: &str, active: bool) {
+        let mut st = self.state.write().unwrap_or_else(|e| e.into_inner());
+        if active {
+            st.active_guilds.insert(guild_id.to_string());
+        } else {
+            st.active_guilds.remove(guild_id);
+            st.thread_subscriptions.remove(guild_id);
+        }
+    }
+
+    pub fn set_thread_subscription(&self, guild_id: &str, enabled: bool) {
+        let mut st = self.state.write().unwrap_or_else(|e| e.into_inner());
+        if enabled {
+            st.thread_subscriptions.insert(guild_id.to_string());
+        } else {
+            st.thread_subscriptions.remove(guild_id);
+        }
+    }
+
+    pub fn set_thread_member_lists(&self, guild_id: &str, thread_ids: Vec<String>) -> Vec<String> {
+        let mut st = self.state.write().unwrap_or_else(|e| e.into_inner());
+        let prev: HashSet<String> = st
+            .thread_member_lists
+            .get(guild_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let newly_added: Vec<String> = thread_ids
+            .iter()
+            .filter(|id| !prev.contains(id.as_str()))
+            .cloned()
+            .collect();
+        if thread_ids.is_empty() {
+            st.thread_member_lists.remove(guild_id);
+        } else {
+            st.thread_member_lists.insert(guild_id.to_string(), thread_ids);
+        }
+        newly_added
+    }
+
+    pub fn is_subscribed_to_thread_members(&self, guild_id: &str, thread_id: &str) -> bool {
+        let st = self.state.read().unwrap_or_else(|e| e.into_inner());
+        st.thread_member_lists
+            .get(guild_id)
+            .is_some_and(|ids| ids.iter().any(|id| id == thread_id))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn set_authenticated(
         &self,
         user_id: String,
         auth_session_id: String,
+        is_bot: bool,
+        flags: u32,
         status: PresenceStatus,
         afk: bool,
         mobile: bool,
@@ -196,6 +290,8 @@ impl GatewaySession {
         let mut st = self.state.write().unwrap_or_else(|e| e.into_inner());
         st.user_id = Some(user_id);
         st.auth_session_id = Some(auth_session_id);
+        st.is_bot = is_bot;
+        st.flags = flags;
         st.status = status;
         st.afk = afk;
         st.mobile = mobile;

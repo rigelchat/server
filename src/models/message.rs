@@ -2,6 +2,7 @@ use serde::Serialize;
 use sqlx::FromRow;
 
 use crate::models::serde_helpers::{serialize_millis_iso, serialize_millis_iso_opt};
+use crate::models::thread::ThreadResponse;
 use crate::models::user::PartialUser;
 
 #[derive(Debug, Clone, FromRow)]
@@ -45,6 +46,8 @@ pub struct Message {
     pub stickers: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread: Option<Box<ThreadResponse>>,
 }
 
 impl From<MessageDbRow> for Message {
@@ -76,6 +79,7 @@ impl From<MessageDbRow> for Message {
             attachments: vec![],
             stickers: vec![],
             nonce: None,
+            thread: None,
         }
     }
 }

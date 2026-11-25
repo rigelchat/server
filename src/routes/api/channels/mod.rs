@@ -1,4 +1,5 @@
 pub mod messages;
+pub mod threads;
 
 use axum::{
     Json, Router,
@@ -18,6 +19,7 @@ use crate::models::rest::forums::{
     CreateForumTagRequest, ForumPostDataResponse, GetForumPostDataRequest, UpdateForumTagRequest,
 };
 use crate::models::rest::invites::CreateInviteRequest;
+use crate::models::thread::ChannelOrThreadResponse;
 use crate::services::{channel, invite_service};
 
 pub fn router() -> Router<AppState> {
@@ -38,6 +40,7 @@ pub fn router() -> Router<AppState> {
             put(update_forum_tag).delete(delete_forum_tag),
         )
         .route("/{id}/post-data", post(get_forum_post_data))
+        .merge(threads::router())
         .nest("/{id}/messages", messages::router())
         .route("/{id}/invites", post(create_channel_invite))
 }
@@ -47,7 +50,7 @@ async fn get_channel(
     auth: AuthUser,
     features: FluxerFeatures,
     Path(channel_id): Path<String>,
-) -> Result<Json<ChannelResponse>, AppError> {
+) -> Result<Json<ChannelOrThreadResponse>, AppError> {
     let channel = channel::get_channel(
         &state,
         &channel_id,
@@ -64,7 +67,7 @@ async fn update_channel(
     features: FluxerFeatures,
     Path(channel_id): Path<String>,
     AppJson(payload): AppJson<UpdateChannelRequest>,
-) -> Result<Json<ChannelResponse>, AppError> {
+) -> Result<Json<ChannelOrThreadResponse>, AppError> {
     let channel = channel::update_channel(
         &state,
         &channel_id,

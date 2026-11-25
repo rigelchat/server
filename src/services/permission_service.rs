@@ -56,7 +56,7 @@ pub fn compute_base_permissions(
     perms
 }
 
-pub fn compute_channel_permissions(
+fn apply_channel_overwrites(
     base: PermissionFlags,
     guild_id: &str,
     user_id: &str,
@@ -106,6 +106,21 @@ pub fn compute_channel_permissions(
         return PermissionFlags::empty();
     }
 
+    perms
+}
+
+pub fn compute_channel_permissions(
+    base: PermissionFlags,
+    guild_id: &str,
+    user_id: &str,
+    member_role_ids: &[String],
+    overwrites: &[PermissionOverwrite],
+) -> PermissionFlags {
+    let mut perms =
+        apply_channel_overwrites(base, guild_id, user_id, member_role_ids, overwrites);
+    if perms.is_empty() {
+        return perms;
+    }
     if !perms.contains(PermissionFlags::SEND_MESSAGES) {
         perms.remove(
             PermissionFlags::MENTION_EVERYONE
@@ -114,7 +129,29 @@ pub fn compute_channel_permissions(
                 | PermissionFlags::EMBED_LINKS,
         );
     }
+    perms
+}
 
+pub fn compute_thread_permissions(
+    base: PermissionFlags,
+    guild_id: &str,
+    user_id: &str,
+    member_role_ids: &[String],
+    parent_overwrites: &[PermissionOverwrite],
+) -> PermissionFlags {
+    let mut perms =
+        apply_channel_overwrites(base, guild_id, user_id, member_role_ids, parent_overwrites);
+    if perms.is_empty() {
+        return perms;
+    }
+    if !perms.contains(PermissionFlags::SEND_MESSAGES_IN_THREADS) {
+        perms.remove(
+            PermissionFlags::MENTION_EVERYONE
+                | PermissionFlags::SEND_TTS_MESSAGES
+                | PermissionFlags::ATTACH_FILES
+                | PermissionFlags::EMBED_LINKS,
+        );
+    }
     perms
 }
 
@@ -209,6 +246,36 @@ pub async fn compute_user_channel_permissions_conn(
         &member_roles,
         &overwrites,
     ))
+}
+
+pub async fn compute_user_thread_permissions_conn(
+    conn: &mut MySqlConnection,
+    guild_id: &str,
+    parent_id: &str,
+    user_id: &str,
+) -> Result<(PermissionFlags, PermissionFlags), AppError> {
+    let (owner_id, roles, member_roles) =
+        load_guild_role_context_conn(conn, guild_id, user_id).await?;
+    let base = compute_base_permissions(&owner_id, guild_id, user_id, &roles, &member_roles);
+    if base.contains(PermissionFlags::ADMINISTRATOR) {
+        return Ok((PermissionFlags::all(), PermissionFlags::all()));
+    }
+
+    let overwrites: Vec<PermissionOverwrite> = sqlx::query_as::<_, ChannelOverwriteRow>(
+        "SELECT channel_id, type, target_id, allow, deny FROM channel_permission_overwrites WHERE channel_id = ?",
+    )
+    .bind(parent_id)
+    .fetch_all(conn)
+    .await?
+    .into_iter()
+    .map(PermissionOverwrite::from)
+    .collect();
+
+    let parent_perms =
+        compute_channel_permissions(base, guild_id, user_id, &member_roles, &overwrites);
+    let thread_perms =
+        compute_thread_permissions(base, guild_id, user_id, &member_roles, &overwrites);
+    Ok((parent_perms, thread_perms))
 }
 
 pub async fn compute_user_channel_permissions(
@@ -509,7 +576,11 @@ pub async fn dispatch_channel_with_ctx<T: Serialize>(
     event_name: &str,
     data: &T,
 ) {
-    let sessions = filter_sessions_for_channel_with_ctx(state, guild_id, channel_id, ctx).await;
+    let mut sessions =
+        filter_sessions_for_channel_with_ctx(state, guild_id, channel_id, ctx).await;
+    if event_name.starts_with("THREAD_") {
+        sessions.retain(|s| s.has_channel_threads());
+    }
     state.dispatch_to_sessions(&sessions, event_name, data);
 }
 

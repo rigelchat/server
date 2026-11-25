@@ -19,6 +19,7 @@ use crate::error::{AppError, ValidationCode};
 use crate::models::channel::{
     ChannelOverwriteRow, ChannelResponse, ChannelRow, PermissionOverwrite,
 };
+use crate::models::thread::ChannelOrThreadResponse;
 use crate::models::guild::{BaseGuild, Guild};
 use crate::models::rest::channels::{CreateChannelRequest, UpdateChannelRequest};
 use crate::services::{member_service, permission_service, queries};
@@ -42,7 +43,7 @@ pub async fn get_channel(
     channel_id: &str,
     user_id: &str,
     can_use_threads: bool,
-) -> Result<ChannelResponse, AppError> {
+) -> Result<ChannelOrThreadResponse, AppError> {
     let channel = sqlx::query_as::<_, ChannelRow>(&format!(
         "SELECT {} FROM channels WHERE id = ?",
         ChannelRow::SELECT_COLS
@@ -56,6 +57,13 @@ pub async fn get_channel(
         && (ChannelType::is_forum_like(channel.kind) || ChannelType::is_thread(channel.kind))
     {
         return Err(AppError::unknown_channel());
+    }
+
+    if ChannelType::is_thread(channel.kind) {
+        let thread =
+            crate::services::thread::get_thread(state, channel_id, user_id, can_use_threads)
+                .await?;
+        return Ok(ChannelOrThreadResponse::Thread(Box::new(thread)));
     }
 
     permission_service::require_channel_permission(
@@ -77,7 +85,7 @@ pub async fn get_channel(
     if !can_use_threads {
         resp.strip_thread_fields();
     }
-    Ok(resp)
+    Ok(ChannelOrThreadResponse::Channel(Box::new(resp)))
 }
 
 pub async fn fetch_guild_channels(
@@ -472,7 +480,7 @@ pub async fn update_channel(
     user_id: &str,
     can_use_threads: bool,
     payload: UpdateChannelRequest,
-) -> Result<ChannelResponse, AppError> {
+) -> Result<ChannelOrThreadResponse, AppError> {
     let current = sqlx::query_as::<_, ChannelRow>(&format!(
         "SELECT {} FROM channels WHERE id = ?",
         ChannelRow::SELECT_COLS
@@ -486,6 +494,12 @@ pub async fn update_channel(
         && (ChannelType::is_forum_like(current.kind) || ChannelType::is_thread(current.kind))
     {
         return Err(AppError::unknown_channel());
+    }
+
+    if ChannelType::is_thread(current.kind) {
+        let thread =
+            crate::services::thread::update_thread(state, channel_id, user_id, payload).await?;
+        return Ok(ChannelOrThreadResponse::Thread(Box::new(thread)));
     }
 
     let (perm_ctx, _, actor_perms) = permission_service::require_channel_permission_with_ctx(
@@ -910,7 +924,7 @@ pub async fn update_channel(
         updated.strip_thread_fields();
     }
 
-    Ok(updated)
+    Ok(ChannelOrThreadResponse::Channel(Box::new(updated)))
 }
 
 pub async fn delete_channel(
@@ -932,6 +946,10 @@ pub async fn delete_channel(
         && (ChannelType::is_forum_like(row.kind) || ChannelType::is_thread(row.kind))
     {
         return Err(AppError::unknown_channel());
+    }
+
+    if ChannelType::is_thread(row.kind) {
+        return crate::services::thread::delete_thread(state, channel_id, user_id).await;
     }
 
     let (perm_ctx, _, _) = permission_service::require_channel_permission_with_ctx(

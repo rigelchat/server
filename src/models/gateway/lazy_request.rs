@@ -12,6 +12,9 @@ pub struct LazyRequestPayload {
 
 #[derive(Debug, Deserialize)]
 pub struct GuildSubscription {
+    pub active: Option<bool>,
+    pub threads: Option<bool>,
+    pub thread_member_lists: Option<Vec<String>>,
     pub member_list_channels: Option<HashMap<String, Vec<Vec<i64>>>>,
     pub members: Option<Vec<String>>,
 }
@@ -29,6 +32,18 @@ pub enum LazyListAction {
         guild_id: String,
         user_ids: Vec<String>,
     },
+    SetGuildActive {
+        guild_id: String,
+        active: bool,
+    },
+    SubscribeThreads {
+        guild_id: String,
+        enabled: bool,
+    },
+    SubscribeThreadMemberLists {
+        guild_id: String,
+        thread_ids: Vec<String>,
+    },
 }
 
 impl LazyRequestPayload {
@@ -37,6 +52,24 @@ impl LazyRequestPayload {
 
         if let Some(subs) = self.subscriptions {
             for (guild_id, sub) in subs {
+                if let Some(active) = sub.active {
+                    actions.push(LazyListAction::SetGuildActive {
+                        guild_id: guild_id.clone(),
+                        active,
+                    });
+                }
+                if let Some(enabled) = sub.threads {
+                    actions.push(LazyListAction::SubscribeThreads {
+                        guild_id: guild_id.clone(),
+                        enabled,
+                    });
+                }
+                if let Some(thread_ids) = sub.thread_member_lists {
+                    actions.push(LazyListAction::SubscribeThreadMemberLists {
+                        guild_id: guild_id.clone(),
+                        thread_ids,
+                    });
+                }
                 if let Some(user_ids) = sub.members
                     && !user_ids.is_empty()
                 {

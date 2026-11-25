@@ -126,6 +126,8 @@ impl GatewayHub {
         session_id: &str,
         user_id: String,
         auth_session_id: String,
+        is_bot: bool,
+        flags: u32,
         status: PresenceStatus,
         afk: bool,
         mobile: bool,
@@ -140,6 +142,8 @@ impl GatewayHub {
         session.set_authenticated(
             user_id.clone(),
             auth_session_id,
+            is_bot,
+            flags,
             status,
             afk,
             mobile,
@@ -487,6 +491,26 @@ impl GatewayHub {
         out
     }
 
+    pub fn thread_member_list_subscribers(
+        &self,
+        guild_id: &str,
+        thread_id: &str,
+    ) -> Vec<Arc<GatewaySession>> {
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let Some(sids) = inner.guild_sessions.get(guild_id) else {
+            return Vec::new();
+        };
+        sids.iter()
+            .filter_map(|sid| inner.sessions.get(sid))
+            .filter(|s| {
+                s.is_authenticated()
+                    && s.has_channel_threads()
+                    && s.is_subscribed_to_thread_members(guild_id, thread_id)
+            })
+            .cloned()
+            .collect()
+    }
+
     pub fn guild_member_list_subscribers(
         &self,
         guild_id: &str,
@@ -643,6 +667,8 @@ mod tests {
             "s1",
             "u1".into(),
             "a1".into(),
+            false,
+            0,
             PresenceStatus::Online,
             false,
             false,
@@ -654,6 +680,8 @@ mod tests {
             "s2",
             "u2".into(),
             "a2".into(),
+            false,
+            0,
             PresenceStatus::Dnd,
             false,
             true,
@@ -665,6 +693,8 @@ mod tests {
             "s3",
             "u3".into(),
             "a3".into(),
+            false,
+            0,
             PresenceStatus::Invisible,
             false,
             false,

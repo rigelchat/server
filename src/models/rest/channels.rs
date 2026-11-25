@@ -119,6 +119,14 @@ pub struct UpdateChannelRequest {
     pub default_auto_archive_duration: Option<Option<u32>>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub default_thread_rate_limit_per_user: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub archived: Option<Option<bool>>,
+    pub auto_archive_duration: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub locked: Option<Option<bool>>,
+    pub applied_tags: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub invitable: Option<Option<bool>>,
 }
 
 #[derive(Debug, Deserialize)]

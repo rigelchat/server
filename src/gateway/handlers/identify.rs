@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, error, warn};
 
 use crate::AppState;
+use crate::constants::flags::SessionFlags;
 use crate::constants::gateway::{
     MAX_GATEWAY_SESSIONS_PER_USER, READY_VERSION, close_codes, events,
 };
@@ -189,6 +190,10 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         (saved_parsed, false, prop_mobile)
     };
 
+    let session_flags = payload.flags.unwrap_or(0);
+    let is_bot = user_row.bot;
+    let can_use_threads =
+        is_bot || SessionFlags::from_bits_truncate(session_flags).contains(SessionFlags::CHANNEL_THREADS);
     let custom_status = user_settings.custom_status.clone();
     let user_summary = PartialUser::from(&user_row);
     let current_user = CurrentUser::from_row(user_row, profile);
@@ -197,6 +202,8 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         session_id,
         user_id.clone(),
         auth_session_id.clone(),
+        is_bot,
+        session_flags,
         initial_status,
         initial_afk,
         initial_mobile,
@@ -208,7 +215,9 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
     };
 
     let guilds: Vec<GatewayGuild> =
-        match guild::build_gateway_guilds_batch(state, &guild_ids, &user_id).await {
+        match guild::build_gateway_guilds_batch(state, &guild_ids, &user_id, can_use_threads, is_bot)
+            .await
+        {
             Ok(g) => g,
             Err(err) => {
                 error!(error = %err, "Failed to build gateway guilds batch");

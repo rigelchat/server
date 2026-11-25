@@ -51,6 +51,7 @@ pub struct IdentifyPayload {
     pub token: String,
     pub properties: serde_json::Value,
     pub presence: Option<IdentifyPresence>,
+    pub flags: Option<u32>,
 }
 
 #[cfg(test)]

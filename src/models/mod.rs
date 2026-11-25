@@ -7,4 +7,5 @@ pub mod message;
 pub mod rest;
 pub mod role;
 pub mod serde_helpers;
+pub mod thread;
 pub mod user;

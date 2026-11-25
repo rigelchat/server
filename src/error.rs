@@ -57,6 +57,7 @@ pub enum ApiErrorCode {
     CannotModifySystemWebhook,
     MaxThreadMembers,
     InvalidThreadNotificationSettings,
+    SlowmodeRateLimited,
     ResourceLocked,
     InternalServerError,
 }
@@ -111,6 +112,7 @@ impl ApiErrorCode {
             Self::CannotModifySystemWebhook => "CANNOT_MODIFY_SYSTEM_WEBHOOK",
             Self::MaxThreadMembers => "MAX_THREAD_MEMBERS",
             Self::InvalidThreadNotificationSettings => "INVALID_THREAD_NOTIFICATION_SETTINGS",
+            Self::SlowmodeRateLimited => "SLOWMODE_RATE_LIMITED",
             Self::ResourceLocked => "RESOURCE_LOCKED",
             Self::InternalServerError => "INTERNAL_SERVER_ERROR",
         }
@@ -547,6 +549,14 @@ impl AppError {
 
     pub fn invalid_thread_notification_settings() -> Self {
         Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::InvalidThreadNotificationSettings, "Invalid thread notification settings.")
+    }
+
+    pub fn slowmode_rate_limited() -> Self {
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::SlowmodeRateLimited,
+            "You are sending messages or creating posts too quickly.",
+        )
     }
 
     pub fn resource_locked() -> Self {

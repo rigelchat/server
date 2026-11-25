@@ -22,11 +22,12 @@ use zstd::stream::raw::{Decoder as RawZstdDecoder, Operation};
 use crate::AppState;
 use crate::constants::gateway::{
     GATEWAY_SEND_QUEUE_CAPACITY, GATEWAY_WRITE_TIMEOUT_SECS, HEARTBEAT_INTERVAL, MAX_PAYLOAD_BYTES,
-    Opcode, ZSTD_COMPRESSION_LEVEL, ZSTD_DECODE_CHUNK_BYTES, close_codes,
+    Opcode, ZSTD_COMPRESSION_LEVEL, ZSTD_DECODE_CHUNK_BYTES, close_codes, events,
 };
 use crate::gateway::session::GatewaySession;
 use crate::models::gateway::{
-    GatewayPayload, GatewayQuery, HelloPayload, IdentifyPayload, lazy_request::LazyRequestPayload,
+    GatewayPayload, GatewayQuery, HelloPayload, IdentifyPayload,
+    events::RequestForumUnreadsPayload, lazy_request::LazyRequestPayload,
     presence::PresenceUpdatePayload,
 };
 
@@ -339,6 +340,28 @@ async fn process_gateway_message(text: &str, session_id: &str, state: &AppState)
             match serde_json::from_value::<LazyRequestPayload>(d) {
                 Ok(lazy_req) => handlers::lazy_request::handle(session_id, state, lazy_req).await,
                 Err(err) => error!(error = %err, "Failed to parse LAZY_REQUEST payload"),
+            }
+        }
+        Opcode::RequestForumUnreads => {
+            if !session.has_channel_threads() {
+                session.close(close_codes::UNKNOWN_OPCODE);
+                return;
+            }
+            if !session.check_forum_unreads_rate_limit() {
+                return;
+            }
+            let Some(d) = payload.d else {
+                return;
+            };
+            let Some(uid) = session.user_id() else {
+                return;
+            };
+            if let Ok(req) = serde_json::from_value::<RequestForumUnreadsPayload>(d)
+                && session.has_guild(&req.guild_id)
+                && let Some(evt) =
+                    crate::services::thread::handle_request_forum_unreads(state, &uid, req).await
+            {
+                session.dispatch(events::FORUM_UNREADS, evt);
             }
         }
         other => {

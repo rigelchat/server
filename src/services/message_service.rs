@@ -3,7 +3,7 @@ use sqlx::FromRow;
 
 use crate::AppState;
 use crate::constants::channel::ChannelType;
-use crate::constants::flags::PermissionFlags;
+use crate::constants::flags::{MessageFlags, PermissionFlags};
 use crate::constants::gateway::events;
 use crate::constants::limits::{
     DEFAULT_MESSAGES_PAGE_LIMIT, MAX_MESSAGE_LENGTH, MAX_MESSAGE_NONCE_LENGTH,
@@ -14,7 +14,7 @@ use crate::error::{AppError, ValidationCode};
 use crate::models::gateway::events::{GatewayMessageEvent, MessageDeleteEvent, MessageMember};
 use crate::models::message::{Message, MessageDbRow};
 use crate::models::rest::messages::GetMessagesQuery;
-use crate::services::{permission_service, queries, user};
+use crate::services::{permission_service, queries, thread, user};
 use crate::utils::snowflake::{DISCORD_SNOWFLAKE, validate_snowflake};
 
 #[derive(FromRow)]
@@ -152,7 +152,15 @@ pub async fn get_messages(
         return Err(AppError::invalid_channel_type());
     }
 
-    if !perms.contains(PermissionFlags::READ_MESSAGE_HISTORY) {
+    let read_perms = if ChannelType::is_thread(meta.channel_type) {
+        thread::require_thread_message_access(state, channel_id, user_id)
+            .await?
+            .thread_perms
+    } else {
+        perms
+    };
+
+    if !read_perms.contains(PermissionFlags::READ_MESSAGE_HISTORY) {
         return Ok(vec![]);
     }
 
@@ -221,7 +229,29 @@ pub async fn get_messages(
         .await?
     };
 
-    Ok(rows.into_iter().map(Message::from).collect())
+    let mut messages: Vec<Message> = rows.into_iter().map(Message::from).collect();
+    if can_use_threads {
+        let thread_ids: Vec<String> = messages
+            .iter()
+            .filter(|m| (m.flags & MessageFlags::HAS_THREAD.bits()) != 0)
+            .map(|m| m.id.clone())
+            .collect();
+        if !thread_ids.is_empty() {
+            let mut by_id =
+                thread::fetch_threads_for_messages(state, &thread_ids, user_id).await?;
+            for m in &mut messages {
+                if (m.flags & MessageFlags::HAS_THREAD.bits()) != 0 {
+                    m.thread = by_id.remove(&m.id).map(Box::new);
+                }
+            }
+        }
+    } else {
+        let mask = !MessageFlags::HAS_THREAD.bits();
+        for m in &mut messages {
+            m.flags &= mask;
+        }
+    }
+    Ok(messages)
 }
 
 pub async fn create_message(
@@ -229,6 +259,7 @@ pub async fn create_message(
     channel_id: &str,
     user_id: &str,
     can_use_threads: bool,
+    is_bot: bool,
     content: String,
     nonce: Option<String>,
 ) -> Result<Message, AppError> {
@@ -242,18 +273,34 @@ pub async fn create_message(
     {
         return Err(AppError::unknown_channel());
     }
-
-    let (perm_ctx, member_roles, _) = permission_service::require_channel_permission_with_ctx(
-        state,
-        &meta.guild_id,
-        channel_id,
-        user_id,
-        PermissionFlags::VIEW_CHANNEL | PermissionFlags::SEND_MESSAGES,
-    )
-    .await?;
     if !ChannelType::supports_messages(meta.channel_type) {
         return Err(AppError::cannot_send_in_non_text_channel());
     }
+
+    let is_thread = ChannelType::is_thread(meta.channel_type);
+    let (perm_ctx, member_roles, thread_ctx) = if is_thread {
+        let ctx = thread::require_thread_message_access(state, channel_id, user_id).await?;
+        if !ctx
+            .thread_perms
+            .contains(PermissionFlags::SEND_MESSAGES_IN_THREADS)
+        {
+            return Err(AppError::missing_permissions());
+        }
+        if ctx.row.locked && !ctx.is_moderator {
+            return Err(AppError::thread_locked());
+        }
+        (None, None, Some(ctx))
+    } else {
+        let (ctx, roles, _) = permission_service::require_channel_permission_with_ctx(
+            state,
+            &meta.guild_id,
+            channel_id,
+            user_id,
+            PermissionFlags::VIEW_CHANNEL | PermissionFlags::SEND_MESSAGES,
+        )
+        .await?;
+        (ctx, roles, None)
+    };
 
     let message_id = DISCORD_SNOWFLAKE.generate(None).to_string();
     let timestamp = Utc::now().timestamp_millis() as u64;
@@ -272,11 +319,26 @@ pub async fn create_message(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("UPDATE channels SET last_message_id = ? WHERE id = ?")
-        .bind(&message_id)
-        .bind(channel_id)
-        .execute(&mut *tx)
-        .await?;
+    let thread_post_effects = if let Some(ref ctx) = thread_ctx {
+        Some(
+            thread::apply_thread_message_created(
+                &mut tx,
+                ctx,
+                user_id,
+                &message_id,
+                timestamp,
+                is_bot,
+            )
+            .await?,
+        )
+    } else {
+        sqlx::query("UPDATE channels SET last_message_id = ? WHERE id = ?")
+            .bind(&message_id)
+            .bind(channel_id)
+            .execute(&mut *tx)
+            .await?;
+        None
+    };
 
     tx.commit().await?;
 
@@ -303,6 +365,7 @@ pub async fn create_message(
         attachments: vec![],
         stickers: vec![],
         nonce,
+        thread: None,
     };
 
     let member = fetch_message_member(state, &meta.guild_id, user_id, member_roles).await;
@@ -313,15 +376,23 @@ pub async fn create_message(
         member,
     };
 
+    let dispatch_channel_id = thread_ctx
+        .as_ref()
+        .map_or(channel_id, |ctx| ctx.row.parent_id.as_str());
+
     permission_service::dispatch_channel_with_ctx(
         state,
         &meta.guild_id,
-        channel_id,
+        dispatch_channel_id,
         perm_ctx.as_ref(),
         events::MESSAGE_CREATE,
         &event,
     )
     .await;
+
+    if let (Some(ctx), Some((unarchived, added_info))) = (thread_ctx, thread_post_effects) {
+        thread::dispatch_thread_after_message(state, &ctx, user_id, unarchived, added_info).await;
+    }
 
     Ok(msg)
 }
@@ -343,14 +414,27 @@ pub async fn edit_message(
     {
         return Err(AppError::unknown_channel());
     }
-    let (perm_ctx, member_roles, _) = permission_service::require_channel_permission_with_ctx(
-        state,
-        &meta.guild_id,
-        channel_id,
-        user_id,
-        PermissionFlags::VIEW_CHANNEL,
-    )
-    .await?;
+    let is_thread = ChannelType::is_thread(meta.channel_type);
+    let (perm_ctx, member_roles, thread_ctx) = if is_thread {
+        let ctx = thread::require_thread_message_access(state, channel_id, user_id).await?;
+        if ctx.row.archived {
+            return Err(AppError::thread_archived());
+        }
+        if ctx.row.locked && !ctx.is_moderator {
+            return Err(AppError::thread_locked());
+        }
+        (None, None, Some(ctx))
+    } else {
+        let (ctx, roles, _) = permission_service::require_channel_permission_with_ctx(
+            state,
+            &meta.guild_id,
+            channel_id,
+            user_id,
+            PermissionFlags::VIEW_CHANNEL,
+        )
+        .await?;
+        (ctx, roles, None)
+    };
 
     let author_id = sqlx::query_scalar::<_, String>(
         "SELECT author_id FROM messages WHERE id = ? AND channel_id = ?",
@@ -374,7 +458,16 @@ pub async fn edit_message(
         .execute(&state.db)
         .await?;
 
-    let updated = fetch_message(state, message_id).await?;
+    let mut updated = fetch_message(state, message_id).await?;
+    if can_use_threads && (updated.flags & MessageFlags::HAS_THREAD.bits()) != 0 {
+        let mut map =
+            thread::fetch_threads_for_messages(state, std::slice::from_ref(&updated.id), user_id)
+                .await?;
+        updated.thread = map.remove(&updated.id).map(Box::new);
+    } else if !can_use_threads {
+        updated.flags &= !MessageFlags::HAS_THREAD.bits();
+    }
+
     let member = fetch_message_member(state, &meta.guild_id, user_id, member_roles).await;
     let event = GatewayMessageEvent {
         message: updated.clone(),
@@ -383,10 +476,13 @@ pub async fn edit_message(
         member,
     };
 
+    let dispatch_channel_id = thread_ctx
+        .as_ref()
+        .map_or(channel_id, |ctx| ctx.row.parent_id.as_str());
     permission_service::dispatch_channel_with_ctx(
         state,
         &meta.guild_id,
-        channel_id,
+        dispatch_channel_id,
         perm_ctx.as_ref(),
         events::MESSAGE_UPDATE,
         &event,
@@ -410,14 +506,21 @@ pub async fn delete_message(
     {
         return Err(AppError::unknown_channel());
     }
-    let (perm_ctx, _, perms) = permission_service::require_channel_permission_with_ctx(
-        state,
-        &meta.guild_id,
-        channel_id,
-        user_id,
-        PermissionFlags::VIEW_CHANNEL,
-    )
-    .await?;
+    let is_thread = ChannelType::is_thread(meta.channel_type);
+    let (perm_ctx, perms, thread_ctx) = if is_thread {
+        let ctx = thread::require_thread_message_access(state, channel_id, user_id).await?;
+        (None, ctx.thread_perms, Some(ctx))
+    } else {
+        let (ctx, _, p) = permission_service::require_channel_permission_with_ctx(
+            state,
+            &meta.guild_id,
+            channel_id,
+            user_id,
+            PermissionFlags::VIEW_CHANNEL,
+        )
+        .await?;
+        (ctx, p, None)
+    };
 
     let author_id = sqlx::query_scalar::<_, String>(
         "SELECT author_id FROM messages WHERE id = ? AND channel_id = ?",
@@ -439,6 +542,10 @@ pub async fn delete_message(
         .execute(&mut *tx)
         .await?;
 
+    if let Some(ref ctx) = thread_ctx {
+        thread::apply_thread_message_deleted(&mut tx, ctx, message_id).await?;
+    }
+
     sqlx::query(
         r#"
         UPDATE channels
@@ -459,10 +566,13 @@ pub async fn delete_message(
 
     tx.commit().await?;
 
+    let dispatch_channel_id = thread_ctx
+        .as_ref()
+        .map_or(channel_id, |ctx| ctx.row.parent_id.as_str());
     permission_service::dispatch_channel_with_ctx(
         state,
         &meta.guild_id,
-        channel_id,
+        dispatch_channel_id,
         perm_ctx.as_ref(),
         events::MESSAGE_DELETE,
         &MessageDeleteEvent {

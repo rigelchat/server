@@ -12,6 +12,10 @@ pub fn router() -> Router<AppState> {
         .nest("/api", api::router())
         .nest(&format!("/api/v{}", API_VERSION), api::router())
         .nest(
+            "/.well-known/fluxer",
+            api::well_known_fluxer::router(),
+        )
+        .nest(
             "/.well-known/spacebar/client",
             well_known_spacebar::router(),
         )

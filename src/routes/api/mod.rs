@@ -7,7 +7,7 @@ mod guilds;
 mod invites;
 mod ping;
 mod users;
-mod well_known_fluxer;
+pub mod well_known_fluxer;
 
 use axum::Router;
 

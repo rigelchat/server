@@ -9,5 +9,6 @@ pub mod invites;
 pub mod messages;
 pub mod ping;
 pub mod roles;
+pub mod threads;
 pub mod users;
 pub mod well_known;

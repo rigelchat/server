@@ -8,4 +8,5 @@ pub mod message_service;
 pub mod permission_service;
 pub mod queries;
 pub mod role;
+pub mod thread;
 pub mod user;

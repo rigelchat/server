@@ -6,6 +6,7 @@ use crate::models::gateway::presence::GatewayPresence;
 use crate::models::guild_member::GatewayGuildMember;
 use crate::models::role::Role;
 use crate::models::serde_helpers::serialize_millis_iso;
+use crate::models::thread::ThreadResponse;
 
 #[derive(Debug, Clone, FromRow)]
 pub struct BaseGuild {
@@ -150,6 +151,7 @@ pub struct GatewayGuild<M = GatewayGuildMember> {
     pub stickers: Vec<serde_json::Value>,
     pub presences: Vec<GatewayPresence>,
     pub voice_states: Vec<serde_json::Value>,
-    pub threads: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threads: Option<Vec<ThreadResponse>>,
     pub properties: GatewayGuildProperties,
 }

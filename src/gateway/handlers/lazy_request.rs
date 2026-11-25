@@ -362,8 +362,11 @@ pub async fn handle(session_id: &str, state: &AppState, payload: LazyRequestPayl
         return;
     };
 
+    let can_use_threads = session.has_channel_threads();
     let mut to_send: Vec<(String, String, [i64; 2])> = Vec::new();
     let mut member_presences: Vec<(String, Vec<String>)> = Vec::new();
+    let mut thread_sync_guilds: Vec<String> = Vec::new();
+    let mut thread_member_list_reqs: Vec<(String, Vec<String>)> = Vec::new();
 
     for action in actions {
         match action {
@@ -421,6 +424,59 @@ pub async fn handle(session_id: &str, state: &AppState, payload: LazyRequestPayl
                     member_presences.push((guild_id, user_ids));
                 }
             }
+            LazyListAction::SetGuildActive { guild_id, active } => {
+                if session.has_guild(&guild_id) {
+                    session.set_guild_active(&guild_id, active);
+                }
+            }
+            LazyListAction::SubscribeThreads { guild_id, enabled } => {
+                if can_use_threads && session.has_guild(&guild_id) {
+                    session.set_thread_subscription(&guild_id, enabled);
+                    if enabled {
+                        thread_sync_guilds.push(guild_id);
+                    }
+                }
+            }
+            LazyListAction::SubscribeThreadMemberLists {
+                guild_id,
+                thread_ids,
+            } => {
+                if can_use_threads && session.has_guild(&guild_id) {
+                    let mut seen = HashSet::new();
+                    let capped: Vec<String> = thread_ids
+                        .into_iter()
+                        .filter(|id| seen.insert(id.clone()))
+                        .take(10)
+                        .collect();
+                    let newly_added = session.set_thread_member_lists(&guild_id, capped);
+                    if !newly_added.is_empty() {
+                        thread_member_list_reqs.push((guild_id, newly_added));
+                    }
+                }
+            }
+        }
+    }
+
+    for guild_id in thread_sync_guilds {
+        if let Ok(sync_evt) =
+            crate::services::thread::build_thread_list_sync(state, &guild_id, &user_id).await
+        {
+            session.dispatch(events::THREAD_LIST_SYNC, sync_evt);
+        }
+    }
+
+    for (guild_id, thread_ids) in thread_member_list_reqs {
+        for thread_id in thread_ids {
+            if let Ok(Some(evt)) = crate::services::thread::build_thread_member_list_update(
+                state,
+                &guild_id,
+                &thread_id,
+                &user_id,
+            )
+            .await
+            {
+                session.dispatch(events::THREAD_MEMBER_LIST_UPDATE, evt);
+            }
         }
     }
 
@@ -467,6 +523,21 @@ pub async fn handle(session_id: &str, state: &AppState, payload: LazyRequestPayl
         };
         let update = snapshot.build_update(&guild_id, &channel_id, range);
         session.dispatch(events::GUILD_MEMBER_LIST_UPDATE, update);
+    }
+}
+
+pub async fn refresh_thread_member_lists(state: &AppState, guild_id: &str, thread_id: &str) {
+    let subs = state.hub.thread_member_list_subscribers(guild_id, thread_id);
+    for session in subs {
+        let Some(uid) = session.user_id() else {
+            continue;
+        };
+        if let Ok(Some(evt)) =
+            crate::services::thread::build_thread_member_list_update(state, guild_id, thread_id, &uid)
+                .await
+        {
+            session.dispatch(events::THREAD_MEMBER_LIST_UPDATE, evt);
+        }
     }
 }
 

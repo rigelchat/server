@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use sqlx::{FromRow, MySql, QueryBuilder};
 
 use crate::AppState;
+use crate::constants::channel::ChannelType;
+use crate::constants::flags::PermissionFlags;
 use crate::error::AppError;
 use crate::models::channel::{
     ChannelOverwriteRow, ChannelResponse, ChannelRow, ForumTag, ForumTagRow, PermissionOverwrite,
@@ -227,6 +229,8 @@ pub async fn build_gateway_guilds_batch(
     state: &AppState,
     guild_ids: &[String],
     user_id: &str,
+    can_use_threads: bool,
+    is_bot: bool,
 ) -> Result<Vec<GatewayGuild>, AppError> {
     let mut base = load_guilds_base_data(state, guild_ids).await?;
     if base.guilds.is_empty() {
@@ -293,14 +297,20 @@ pub async fn build_gateway_guilds_batch(
         let Some(member) = self_members.remove(&guild.id) else {
             continue;
         };
-        let roles = base.roles_by_guild.remove(&guild.id).unwrap_or_default();
+        let mut roles = base.roles_by_guild.remove(&guild.id).unwrap_or_default();
         let role_perms = base
             .role_perms_by_guild
             .remove(&guild.id)
             .unwrap_or_default();
+        if !can_use_threads {
+            let mask = !PermissionFlags::THREAD_GATED_BITS.bits();
+            for r in &mut roles {
+                r.permissions &= mask;
+            }
+        }
         let member_roles = self_roles.remove(&guild.id).unwrap_or_default();
         let all_channels = base.channels_by_guild.remove(&guild.id).unwrap_or_default();
-        let channels = permission_service::filter_visible_channels_with_context(
+        let mut channels = permission_service::filter_visible_channels_with_context(
             &guild.owner_id,
             &guild.id,
             user_id,
@@ -308,6 +318,25 @@ pub async fn build_gateway_guilds_batch(
             &member_roles,
             all_channels,
         );
+        if !can_use_threads {
+            channels.retain(|c| !ChannelType::is_forum_like(c.base.kind));
+            for c in &mut channels {
+                c.strip_thread_fields();
+            }
+        }
+        let threads = if can_use_threads {
+            Some(
+                crate::services::thread::fetch_guild_ready_threads(
+                    state,
+                    &guild.id,
+                    user_id,
+                    is_bot,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         let member_count = member_counts.get(&guild.id).copied().unwrap_or(1).max(1) as u64;
         let online_count = base.online_counts.get(&guild.id).copied().unwrap_or(0);
 
@@ -328,7 +357,7 @@ pub async fn build_gateway_guilds_batch(
             stickers: vec![],
             presences: vec![],
             voice_states: vec![],
-            threads: vec![],
+            threads,
             properties: Guild::from(guild),
         });
     }
@@ -468,6 +497,10 @@ async fn build_full_gateway_guilds_batch(
                 .collect()
         };
 
+        let threads = Some(
+            crate::services::thread::fetch_guild_ready_threads(state, &guild.id, user_id, false)
+                .await?,
+        );
         out.push(GatewayGuild {
             id: guild.id.clone(),
             joined_at,
@@ -480,7 +513,7 @@ async fn build_full_gateway_guilds_batch(
             stickers: vec![],
             presences,
             voice_states: vec![],
-            threads: vec![],
+            threads,
             properties: Guild::from(guild),
         });
     }
