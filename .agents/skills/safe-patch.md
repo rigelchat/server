@@ -8,9 +8,10 @@ description: Use when generating file edits or bash patch commands for rigel-ser
 1. **Split large changes into small, self-contained blocks**:
    - Never generate one giant script touching 15+ files at once (split by layer/domain into small blocks of ~100–350 lines max: e.g., constants, schema/errors, models, services, routes).
    - Whenever possible, make each block independently compilable or clearly order blocks so the final block compiles cleanly.
-2. **New or heavily rewritten files**:
+2. **New or heavily rewritten files & Markdown fences**:
    - Keep files small per the 1-file-1-responsibility rule.
    - Output standalone files in fenced code blocks or write them via `write_new(...)` inside a small Python block.
+   - Always use 4 backticks (````) for outer code blocks in responses so embedded triple-backtick blocks (like Markdown or examples) never break rendering.
 3. **Targeted edits (use Python, never `git apply`)**:
    - Do **not** generate multi-hunk `git apply` / unified diffs (line counts in `@@` headers are error-prone).
    - Always use a unique heredoc delimiter like `<<'__SAFE_PATCH_EOF__'` (never `EOF` or `PY`, which can appear inside snippets or markdown examples).
