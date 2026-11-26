@@ -8,6 +8,7 @@ pub mod guilds;
 pub mod invites;
 pub mod messages;
 pub mod ping;
+pub mod read_states;
 pub mod roles;
 pub mod threads;
 pub mod users;

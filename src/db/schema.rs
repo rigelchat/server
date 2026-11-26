@@ -1,10 +1,6 @@
 use sqlx::mysql::MySqlPool;
 
-async fn column_exists(
-    pool: &MySqlPool,
-    table: &str,
-    column: &str,
-) -> Result<bool, sqlx::Error> {
+async fn column_exists(pool: &MySqlPool, table: &str, column: &str) -> Result<bool, sqlx::Error> {
     let exists: Option<(i32,)> = sqlx::query_as(
         "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1",
     )
@@ -207,12 +203,21 @@ pub(super) async fn apply(pool: &MySqlPool) -> Result<(), sqlx::Error> {
         ("last_pin_timestamp", "BIGINT UNSIGNED DEFAULT NULL"),
         ("flags", "INT UNSIGNED NOT NULL DEFAULT 0"),
         ("default_auto_archive_duration", "INT UNSIGNED DEFAULT NULL"),
-        ("default_thread_rate_limit_per_user", "INT UNSIGNED NOT NULL DEFAULT 0"),
+        (
+            "default_thread_rate_limit_per_user",
+            "INT UNSIGNED NOT NULL DEFAULT 0",
+        ),
         ("default_reaction_emoji_id", "VARCHAR(20) DEFAULT NULL"),
         ("default_reaction_emoji_name", "VARCHAR(64) DEFAULT NULL"),
         ("default_sort_order", "TINYINT UNSIGNED DEFAULT NULL"),
-        ("default_forum_layout", "TINYINT UNSIGNED NOT NULL DEFAULT 0"),
-        ("default_tag_setting", "VARCHAR(16) NOT NULL DEFAULT 'match_some'"),
+        (
+            "default_forum_layout",
+            "TINYINT UNSIGNED NOT NULL DEFAULT 0",
+        ),
+        (
+            "default_tag_setting",
+            "VARCHAR(16) NOT NULL DEFAULT 'match_some'",
+        ),
     ] {
         if !column_exists(pool, "channels", col).await? {
             let sql = format!("ALTER TABLE channels ADD COLUMN {col} {def}");
@@ -380,6 +385,24 @@ pub(super) async fn apply(pool: &MySqlPool) -> Result<(), sqlx::Error> {
             INDEX idx_messages_channel_idnum (channel_id, id_num),
             FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
             FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS read_states (
+            user_id VARCHAR(20) NOT NULL,
+            channel_id VARCHAR(20) NOT NULL,
+            last_message_id VARCHAR(20) DEFAULT NULL,
+            last_pin_timestamp BIGINT UNSIGNED DEFAULT NULL,
+            mention_count INT UNSIGNED NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, channel_id),
+            INDEX idx_read_states_channel (channel_id),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
         )
         "#,
     )

@@ -170,10 +170,10 @@ pub async fn list_public_archived_threads(
     }
     check_archived_parent_access(state, channel_id, user_id, false, false).await?;
     let before_ms = parse_before_timestamp(query.before.as_deref())?;
-    let limit = query
-        .limit
-        .unwrap_or(DEFAULT_THREADS_PAGE_LIMIT)
-        .clamp(MIN_ARCHIVED_THREADS_PAGE_LIMIT, MAX_ARCHIVED_THREADS_PAGE_LIMIT);
+    let limit = query.limit.unwrap_or(DEFAULT_THREADS_PAGE_LIMIT).clamp(
+        MIN_ARCHIVED_THREADS_PAGE_LIMIT,
+        MAX_ARCHIVED_THREADS_PAGE_LIMIT,
+    );
 
     let mut qb = QueryBuilder::<MySql>::new(format!(
         "SELECT {} FROM channels c INNER JOIN channel_threads ct ON ct.channel_id = c.id INNER JOIN channels p ON p.id = ct.parent_id WHERE ct.parent_id = ",
@@ -219,10 +219,10 @@ pub async fn list_private_archived_threads(
     }
     check_archived_parent_access(state, channel_id, user_id, true, true).await?;
     let before_ms = parse_before_timestamp(query.before.as_deref())?;
-    let limit = query
-        .limit
-        .unwrap_or(DEFAULT_THREADS_PAGE_LIMIT)
-        .clamp(MIN_ARCHIVED_THREADS_PAGE_LIMIT, MAX_ARCHIVED_THREADS_PAGE_LIMIT);
+    let limit = query.limit.unwrap_or(DEFAULT_THREADS_PAGE_LIMIT).clamp(
+        MIN_ARCHIVED_THREADS_PAGE_LIMIT,
+        MAX_ARCHIVED_THREADS_PAGE_LIMIT,
+    );
 
     let mut qb = QueryBuilder::<MySql>::new(format!(
         "SELECT {} FROM channels c INNER JOIN channel_threads ct ON ct.channel_id = c.id INNER JOIN channels p ON p.id = ct.parent_id WHERE ct.parent_id = ",
@@ -268,10 +268,10 @@ pub async fn list_joined_private_archived_threads(
     }
     validate_snowflake_opt("before", query.before.as_deref())?;
     check_archived_parent_access(state, channel_id, user_id, false, true).await?;
-    let limit = query
-        .limit
-        .unwrap_or(DEFAULT_THREADS_PAGE_LIMIT)
-        .clamp(MIN_ARCHIVED_THREADS_PAGE_LIMIT, MAX_ARCHIVED_THREADS_PAGE_LIMIT);
+    let limit = query.limit.unwrap_or(DEFAULT_THREADS_PAGE_LIMIT).clamp(
+        MIN_ARCHIVED_THREADS_PAGE_LIMIT,
+        MAX_ARCHIVED_THREADS_PAGE_LIMIT,
+    );
 
     let mut qb = QueryBuilder::<MySql>::new(format!(
         "SELECT {} FROM channels c INNER JOIN channel_threads ct ON ct.channel_id = c.id INNER JOIN channels p ON p.id = ct.parent_id INNER JOIN thread_members tm ON tm.thread_id = c.id WHERE ct.parent_id = ",

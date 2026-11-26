@@ -316,12 +316,7 @@ pub(super) fn validate_and_normalize_tags_list(
             return Err(AppError::forum_tag_names_must_be_unique());
         }
 
-        let id = match input
-            .id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
+        let id = match input.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             Some(existing_id) => {
                 if !existing_ids.contains(existing_id) || !seen_ids.insert(existing_id.to_string())
                 {

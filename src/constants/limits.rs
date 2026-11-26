@@ -77,6 +77,8 @@ pub const MAX_MESSAGE_LENGTH: usize = 2000;
 pub const MAX_MESSAGE_NONCE_LENGTH: usize = 32;
 pub const DEFAULT_MESSAGES_PAGE_LIMIT: u32 = 50;
 pub const MAX_MESSAGES_PAGE_LIMIT: u32 = 100;
+pub const MAX_READ_STATES_ACK_BATCH: usize = 100;
+pub const MAX_READ_STATE_MENTION_COUNT: u32 = i32::MAX as u32;
 
 pub const MAX_INVITES_PER_GUILD: u64 = 1000;
 pub const MAX_INVITE_USES: u32 = 100;

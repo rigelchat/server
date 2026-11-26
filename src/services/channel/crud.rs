@@ -11,17 +11,16 @@ use crate::constants::limits::{
     MAX_CHANNEL_NAME_LENGTH, MAX_CHANNEL_RATE_LIMIT_PER_USER, MAX_CHANNEL_TOPIC_LENGTH,
     MAX_CHANNELS_PER_CATEGORY, MAX_CHANNELS_PER_GUILD, MAX_CONTENT_WARNING_TEXT_LENGTH,
     MAX_FORUM_TOPIC_LENGTH, MAX_LINK_CHANNEL_URL_LENGTH, MAX_VOICE_BITRATE_CEILING,
-    MAX_VOICE_BITRATE_STANDARD,
-    MAX_VOICE_CONNECTION_LIMIT, MAX_VOICE_USER_LIMIT, MIN_VOICE_BITRATE,
-    MIN_VOICE_CONNECTION_LIMIT,
+    MAX_VOICE_BITRATE_STANDARD, MAX_VOICE_CONNECTION_LIMIT, MAX_VOICE_USER_LIMIT,
+    MIN_VOICE_BITRATE, MIN_VOICE_CONNECTION_LIMIT,
 };
 use crate::error::{AppError, ValidationCode};
 use crate::models::channel::{
     ChannelOverwriteRow, ChannelResponse, ChannelRow, PermissionOverwrite,
 };
-use crate::models::thread::ChannelOrThreadResponse;
 use crate::models::guild::{BaseGuild, Guild};
 use crate::models::rest::channels::{CreateChannelRequest, UpdateChannelRequest};
+use crate::models::thread::ChannelOrThreadResponse;
 use crate::services::{member_service, permission_service, queries};
 use crate::utils::snowflake::{DISCORD_SNOWFLAKE, validate_snowflake};
 use crate::utils::validation::{collapse_channel_whitespace, slugify_channel_name};

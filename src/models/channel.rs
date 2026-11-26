@@ -183,7 +183,10 @@ impl ChannelResponse {
 
         let default_reaction_emoji = if is_forum_like {
             Some(
-                match (row.default_reaction_emoji_id, row.default_reaction_emoji_name) {
+                match (
+                    row.default_reaction_emoji_id,
+                    row.default_reaction_emoji_name,
+                ) {
                     (None, None) => None,
                     (emoji_id, emoji_name) => Some(DefaultReaction {
                         emoji_id,

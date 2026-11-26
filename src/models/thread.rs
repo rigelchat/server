@@ -239,7 +239,10 @@ mod tests {
     #[test]
     fn thread_response_serializes_forum_and_private_fields_only_when_applicable() {
         let forum_post = serde_json::to_value(ThreadResponse::from_row(
-            sample_row(ChannelType::PublicThread as u32, ChannelType::GuildForum as u32),
+            sample_row(
+                ChannelType::PublicThread as u32,
+                ChannelType::GuildForum as u32,
+            ),
             vec!["t1".into()],
             vec!["10".into()],
             None,
@@ -251,7 +254,10 @@ mod tests {
         assert!(forum_post["thread_metadata"].get("invitable").is_none());
 
         let priv_thread = serde_json::to_value(ThreadResponse::from_row(
-            sample_row(ChannelType::PrivateThread as u32, ChannelType::GuildText as u32),
+            sample_row(
+                ChannelType::PrivateThread as u32,
+                ChannelType::GuildText as u32,
+            ),
             vec![],
             vec![],
             None,

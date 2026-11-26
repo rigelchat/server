@@ -6,6 +6,7 @@ mod gateway;
 mod guilds;
 mod invites;
 mod ping;
+mod read_states;
 mod users;
 pub mod well_known_fluxer;
 
@@ -22,6 +23,7 @@ pub fn router() -> Router<AppState> {
         .nest("/gateway", gateway::router())
         .nest("/guilds", guilds::router())
         .nest("/ping", ping::router())
+        .nest("/read-states", read_states::router())
         .nest("/users", users::router())
         .nest("/invites", invites::router())
         .nest("/.well-known/fluxer", well_known_fluxer::router())

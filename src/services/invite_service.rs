@@ -11,9 +11,7 @@ use crate::constants::limits::{
     MAX_INVITES_PER_GUILD,
 };
 use crate::error::AppError;
-use crate::models::invite::{
-    CreatedInvite, InviteChannel, InviteGuild, InviteResponse,
-};
+use crate::models::invite::{CreatedInvite, InviteChannel, InviteGuild, InviteResponse};
 use crate::models::rest::invites::CreateInviteRequest;
 use crate::models::serde_helpers::millis_to_iso;
 use crate::services::{member_service, permission_service, user};

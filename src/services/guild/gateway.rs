@@ -327,10 +327,7 @@ pub async fn build_gateway_guilds_batch(
         let threads = if can_use_threads {
             Some(
                 crate::services::thread::fetch_guild_ready_threads(
-                    state,
-                    &guild.id,
-                    user_id,
-                    is_bot,
+                    state, &guild.id, user_id, is_bot,
                 )
                 .await?,
             )

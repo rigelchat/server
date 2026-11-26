@@ -468,10 +468,7 @@ pub async fn handle(session_id: &str, state: &AppState, payload: LazyRequestPayl
     for (guild_id, thread_ids) in thread_member_list_reqs {
         for thread_id in thread_ids {
             if let Ok(Some(evt)) = crate::services::thread::build_thread_member_list_update(
-                state,
-                &guild_id,
-                &thread_id,
-                &user_id,
+                state, &guild_id, &thread_id, &user_id,
             )
             .await
             {
@@ -527,14 +524,17 @@ pub async fn handle(session_id: &str, state: &AppState, payload: LazyRequestPayl
 }
 
 pub async fn refresh_thread_member_lists(state: &AppState, guild_id: &str, thread_id: &str) {
-    let subs = state.hub.thread_member_list_subscribers(guild_id, thread_id);
+    let subs = state
+        .hub
+        .thread_member_list_subscribers(guild_id, thread_id);
     for session in subs {
         let Some(uid) = session.user_id() else {
             continue;
         };
-        if let Ok(Some(evt)) =
-            crate::services::thread::build_thread_member_list_update(state, guild_id, thread_id, &uid)
-                .await
+        if let Ok(Some(evt)) = crate::services::thread::build_thread_member_list_update(
+            state, guild_id, thread_id, &uid,
+        )
+        .await
         {
             session.dispatch(events::THREAD_MEMBER_LIST_UPDATE, evt);
         }

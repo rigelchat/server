@@ -169,6 +169,7 @@ pub mod events {
     pub const MESSAGE_CREATE: &str = "MESSAGE_CREATE";
     pub const MESSAGE_UPDATE: &str = "MESSAGE_UPDATE";
     pub const MESSAGE_DELETE: &str = "MESSAGE_DELETE";
+    pub const MESSAGE_ACK: &str = "MESSAGE_ACK";
     pub const PRESENCE_UPDATE: &str = "PRESENCE_UPDATE";
     pub const USER_UPDATE: &str = "USER_UPDATE";
     pub const USER_SETTINGS_UPDATE: &str = "USER_SETTINGS_UPDATE";

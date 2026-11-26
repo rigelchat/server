@@ -14,20 +14,15 @@ use crate::models::gateway::events::{GatewayMessageEvent, ThreadCreateEvent, Thr
 use crate::models::guild_member::GuildMemberFields;
 use crate::models::message::{Message, MessageDbRow};
 use crate::models::rest::channels::UpdateChannelRequest;
-use crate::models::rest::threads::{
-    StartThreadFromMessageRequest, StartThreadRequest,
-};
-use crate::models::thread::{
-    ForumPostResponse, StartThreadResponse, ThreadDbRow, ThreadResponse,
-};
+use crate::models::rest::threads::{StartThreadFromMessageRequest, StartThreadRequest};
+use crate::models::thread::{ForumPostResponse, StartThreadResponse, ThreadDbRow, ThreadResponse};
 use crate::services::{permission_service, queries, user};
 use crate::utils::snowflake::DISCORD_SNOWFLAKE;
 
 use super::helpers::{
     add_thread_member_tx, check_thread_view_access, ensure_active_thread_capacity,
-    fetch_thread_row, hydrate_thread, sync_thread_applied_tags,
-    validate_and_prepare_applied_tags, validate_auto_archive_duration_val, validate_thread_name,
-    validate_thread_rate_limit,
+    fetch_thread_row, hydrate_thread, sync_thread_applied_tags, validate_and_prepare_applied_tags,
+    validate_auto_archive_duration_val, validate_thread_name, validate_thread_rate_limit,
 };
 
 async fn fetch_message_member_fields(
@@ -129,11 +124,10 @@ pub async fn start_thread_from_message(
 
     let mut tx = state.db.begin().await?;
 
-    let _: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM guilds WHERE id = ? FOR UPDATE")
-            .bind(&guild_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let _: Option<(String,)> = sqlx::query_as("SELECT id FROM guilds WHERE id = ? FOR UPDATE")
+        .bind(&guild_id)
+        .fetch_optional(&mut *tx)
+        .await?;
 
     let msg_row = sqlx::query_as::<_, MessageDbRow>(
         r#"
@@ -254,6 +248,15 @@ pub async fn start_thread_from_message(
         None
     };
 
+    if let Some(ref sid) = sys_msg_id
+        && !is_bot
+    {
+        crate::services::read_state_service::mark_channel_read_on_send_tx(
+            &mut tx, user_id, channel_id, sid,
+        )
+        .await?;
+    }
+
     let row = fetch_thread_row(&mut *tx, message_id)
         .await?
         .ok_or_else(AppError::unknown_channel)?;
@@ -295,6 +298,7 @@ pub async fn start_thread_from_message(
     )
     .await;
 
+    let ack_sys_msg_id = (!is_bot).then_some(sys_msg_id.clone()).flatten();
     if let Some(sid) = sys_msg_id
         && let Ok(author) = user::get_partial_user(state, user_id).await
     {
@@ -331,6 +335,19 @@ pub async fn start_thread_from_message(
                 guild_id: Some(guild_id.clone()),
                 member: actor_member,
             },
+        )
+        .await;
+    }
+
+    if let Some(ref sid) = ack_sys_msg_id {
+        crate::services::read_state_service::dispatch_message_ack(
+            state,
+            user_id,
+            parent_kind,
+            channel_id,
+            sid,
+            0,
+            false,
         )
         .await;
     }
@@ -471,11 +488,10 @@ pub async fn start_thread(
 
     let mut tx = state.db.begin().await?;
 
-    let _: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM guilds WHERE id = ? FOR UPDATE")
-            .bind(&guild_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let _: Option<(String,)> = sqlx::query_as("SELECT id FROM guilds WHERE id = ? FOR UPDATE")
+        .bind(&guild_id)
+        .fetch_optional(&mut *tx)
+        .await?;
 
     ensure_active_thread_capacity(&mut tx, &guild_id).await?;
 
@@ -591,6 +607,24 @@ pub async fn start_thread(
         None
     };
 
+    if !is_bot {
+        if first_msg_data.is_some() {
+            crate::services::read_state_service::mark_channel_read_on_send_tx(
+                &mut tx, user_id, &thread_id, &thread_id,
+            )
+            .await?;
+            crate::services::read_state_service::mark_channel_read_on_send_tx(
+                &mut tx, user_id, channel_id, &thread_id,
+            )
+            .await?;
+        } else if let Some(ref sid) = sys_msg_id {
+            crate::services::read_state_service::mark_channel_read_on_send_tx(
+                &mut tx, user_id, channel_id, sid,
+            )
+            .await?;
+        }
+    }
+
     let row = fetch_thread_row(&mut *tx, &thread_id)
         .await?
         .ok_or_else(AppError::unknown_channel)?;
@@ -696,12 +730,37 @@ pub async fn start_thread(
             },
         )
         .await;
-        return Ok(StartThreadResponse::ForumPost(Box::new(ForumPostResponse {
-            thread,
-            message: first_message,
-        })));
+        if !is_bot {
+            crate::services::read_state_service::dispatch_message_ack(
+                state,
+                user_id,
+                thread_kind,
+                &thread_id,
+                &thread_id,
+                0,
+                false,
+            )
+            .await;
+            crate::services::read_state_service::dispatch_message_ack(
+                state,
+                user_id,
+                parent_kind,
+                channel_id,
+                &thread_id,
+                0,
+                false,
+            )
+            .await;
+        }
+        return Ok(StartThreadResponse::ForumPost(Box::new(
+            ForumPostResponse {
+                thread,
+                message: first_message,
+            },
+        )));
     }
 
+    let ack_sys_msg_id = (!is_bot).then_some(sys_msg_id.clone()).flatten();
     if let Some(sid) = sys_msg_id
         && let Ok(author) = user::get_partial_user(state, user_id).await
     {
@@ -742,6 +801,19 @@ pub async fn start_thread(
         .await;
     }
 
+    if let Some(ref sid) = ack_sys_msg_id {
+        crate::services::read_state_service::dispatch_message_ack(
+            state,
+            user_id,
+            parent_kind,
+            channel_id,
+            sid,
+            0,
+            false,
+        )
+        .await;
+    }
+
     Ok(StartThreadResponse::Thread(Box::new(thread)))
 }
 
@@ -762,8 +834,7 @@ pub async fn update_thread(
         .await?
         .ok_or_else(AppError::unknown_channel)?;
 
-    let (parent_perms, _, is_member) =
-        check_thread_view_access(&mut tx, &current, user_id).await?;
+    let (parent_perms, _, is_member) = check_thread_view_access(&mut tx, &current, user_id).await?;
     let is_moderator = parent_perms.contains(PermissionFlags::MANAGE_THREADS);
     let is_owner = current.owner_id == user_id;
     let is_forum_post = ChannelType::is_forum_like(current.parent_kind);
@@ -777,9 +848,8 @@ pub async fn update_thread(
     let req_invitable = payload.invitable.flatten();
     let req_rate_limit = payload.rate_limit_per_user.map(|o| o.unwrap_or(0));
 
-    let wants_mod_only = req_rate_limit.is_some()
-        || payload.flags.is_some()
-        || req_locked == Some(false);
+    let wants_mod_only =
+        req_rate_limit.is_some() || payload.flags.is_some() || req_locked == Some(false);
     if wants_mod_only && !is_moderator {
         return Err(AppError::missing_permissions());
     }

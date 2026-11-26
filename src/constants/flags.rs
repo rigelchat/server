@@ -106,8 +106,9 @@ bitflags! {
 
 impl ChannelFlags {
     pub const FORUM_ALLOWED: Self = Self::REQUIRE_TAG;
-    pub const MEDIA_ALLOWED: Self =
-        Self::from_bits_truncate(Self::REQUIRE_TAG.bits() | Self::HIDE_MEDIA_DOWNLOAD_OPTIONS.bits());
+    pub const MEDIA_ALLOWED: Self = Self::from_bits_truncate(
+        Self::REQUIRE_TAG.bits() | Self::HIDE_MEDIA_DOWNLOAD_OPTIONS.bits(),
+    );
     pub const THREAD_ALLOWED: Self = Self::PINNED;
 }
 
@@ -150,5 +151,14 @@ bitflags! {
         const DEBOUNCE_MESSAGE_REACTIONS = 1 << 1;
         const CHANNEL_THREADS = 1 << 2;
         const GUILD_VISITS = 1 << 3;
+    }
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ReadStateFlags: u32 {
+        const IS_GUILD_CHANNEL = 1 << 0;
+        const IS_THREAD = 1 << 1;
     }
 }

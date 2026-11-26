@@ -16,7 +16,7 @@ use crate::models::gateway::IdentifyPayload;
 use crate::models::gateway::ready::{ReadyData, RtcRegion};
 use crate::models::guild::GatewayGuild;
 use crate::models::user::{CurrentUser, PartialUser, UserProfileRow, UserRow};
-use crate::services::{auth_service, guild, user};
+use crate::services::{auth_service, guild, read_state_service, user};
 use crate::utils::token::{TokenClaims, strip_auth_prefix, verify};
 
 use super::{lazy_request, presence};
@@ -192,8 +192,8 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
 
     let session_flags = payload.flags.unwrap_or(0);
     let is_bot = user_row.bot;
-    let can_use_threads =
-        is_bot || SessionFlags::from_bits_truncate(session_flags).contains(SessionFlags::CHANNEL_THREADS);
+    let can_use_threads = is_bot
+        || SessionFlags::from_bits_truncate(session_flags).contains(SessionFlags::CHANNEL_THREADS);
     let custom_status = user_settings.custom_status.clone();
     let user_summary = PartialUser::from(&user_row);
     let current_user = CurrentUser::from_row(user_row, profile);
@@ -214,17 +214,39 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         return;
     };
 
-    let guilds: Vec<GatewayGuild> =
-        match guild::build_gateway_guilds_batch(state, &guild_ids, &user_id, can_use_threads, is_bot)
-            .await
-        {
-            Ok(g) => g,
-            Err(err) => {
-                error!(error = %err, "Failed to build gateway guilds batch");
-                session.close(close_codes::UNKNOWN_ERROR);
-                return;
-            }
-        };
+    let guilds: Vec<GatewayGuild> = match guild::build_gateway_guilds_batch(
+        state,
+        &guild_ids,
+        &user_id,
+        can_use_threads,
+        is_bot,
+    )
+    .await
+    {
+        Ok(g) => g,
+        Err(err) => {
+            error!(error = %err, "Failed to build gateway guilds batch");
+            session.close(close_codes::UNKNOWN_ERROR);
+            return;
+        }
+    };
+
+    let read_states = match read_state_service::fetch_ready_read_states(
+        state,
+        &user_id,
+        is_bot,
+        can_use_threads,
+        &guilds,
+    )
+    .await
+    {
+        Ok(rs) => rs,
+        Err(err) => {
+            error!(error = %err, "Failed to load read states during identify");
+            session.close(close_codes::UNKNOWN_ERROR);
+            return;
+        }
+    };
 
     debug!(user_id = %user_id, "User identified, sending READY");
 
@@ -238,7 +260,7 @@ pub async fn handle(session_id: &str, state: &AppState, payload: IdentifyPayload
         pinned_dms: vec![],
         relationships: vec![],
         presences: presence::build_ready_presences(state, &user_id, &guild_ids).await,
-        read_states: vec![],
+        read_states,
         notes: HashMap::new(),
         favorite_memes: vec![],
         webauthn_credentials: vec![],

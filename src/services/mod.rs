@@ -7,6 +7,7 @@ pub mod member_service;
 pub mod message_service;
 pub mod permission_service;
 pub mod queries;
+pub mod read_state_service;
 pub mod role;
 pub mod thread;
 pub mod user;

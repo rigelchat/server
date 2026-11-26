@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::models::gateway::presence::GatewayPresence;
 use crate::models::guild::GatewayGuild;
+use crate::models::read_state::ReadState;
 use crate::models::user::{CurrentUser, PartialUser, UserSettings};
 
 #[derive(Serialize)]
@@ -32,7 +33,7 @@ pub struct ReadyData {
     pub pinned_dms: Vec<String>,
     pub relationships: Vec<serde_json::Value>,
     pub presences: Vec<GatewayPresence>,
-    pub read_states: Vec<serde_json::Value>,
+    pub read_states: Vec<ReadState>,
     pub notes: HashMap<String, String>,
     pub favorite_memes: Vec<serde_json::Value>,
     pub webauthn_credentials: Vec<serde_json::Value>,

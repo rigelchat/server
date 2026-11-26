@@ -484,71 +484,139 @@ impl AppError {
     }
 
     pub fn missing_access() -> Self {
-        Self::coded(StatusCode::FORBIDDEN, ApiErrorCode::MissingAccess, "Missing access")
+        Self::coded(
+            StatusCode::FORBIDDEN,
+            ApiErrorCode::MissingAccess,
+            "Missing access",
+        )
     }
 
     pub fn access_denied() -> Self {
-        Self::coded(StatusCode::FORBIDDEN, ApiErrorCode::AccessDenied, "Access denied")
+        Self::coded(
+            StatusCode::FORBIDDEN,
+            ApiErrorCode::AccessDenied,
+            "Access denied",
+        )
     }
 
     pub fn unknown_forum_tag() -> Self {
-        Self::coded(StatusCode::NOT_FOUND, ApiErrorCode::UnknownForumTag, "Unknown forum tag")
+        Self::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownForumTag,
+            "Unknown forum tag",
+        )
     }
 
     pub fn unknown_emoji() -> Self {
-        Self::coded(StatusCode::NOT_FOUND, ApiErrorCode::UnknownEmoji, "Unknown emoji")
+        Self::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownEmoji,
+            "Unknown emoji",
+        )
     }
 
     pub fn unknown_thread_member() -> Self {
-        Self::coded(StatusCode::NOT_FOUND, ApiErrorCode::UnknownThreadMember, "Unknown thread member")
+        Self::coded(
+            StatusCode::NOT_FOUND,
+            ApiErrorCode::UnknownThreadMember,
+            "Unknown thread member",
+        )
     }
 
     pub fn max_forum_tags() -> Self {
-        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::MaxForumTags, "Maximum number of forum tags reached for this channel.")
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::MaxForumTags,
+            "Maximum number of forum tags reached for this channel.",
+        )
     }
 
     pub fn forum_tag_names_must_be_unique() -> Self {
-        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::ForumTagNamesMustBeUnique, "Forum tag names must be unique.")
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::ForumTagNamesMustBeUnique,
+            "Forum tag names must be unique.",
+        )
     }
 
     pub fn no_tags_available_to_non_moderators() -> Self {
-        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::NoTagsAvailableToNonModerators, "No unmoderated tags would remain available.")
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::NoTagsAvailableToNonModerators,
+            "No unmoderated tags would remain available.",
+        )
     }
 
     pub fn hide_media_download_option_media_only() -> Self {
-        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::HideMediaDownloadOptionMediaOnly, "HIDE_MEDIA_DOWNLOAD_OPTIONS can only be set on media channels.")
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::HideMediaDownloadOptionMediaOnly,
+            "HIDE_MEDIA_DOWNLOAD_OPTIONS can only be set on media channels.",
+        )
     }
 
     pub fn forum_tag_required() -> Self {
-        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::ForumTagRequired, "A tag is required to post in this channel.")
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::ForumTagRequired,
+            "A tag is required to post in this channel.",
+        )
     }
 
     pub fn max_pinned_threads_in_forum() -> Self {
-        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::MaxPinnedThreadsInForum, "Maximum number of pinned posts reached for this channel.")
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::MaxPinnedThreadsInForum,
+            "Maximum number of pinned posts reached for this channel.",
+        )
     }
 
     pub fn max_active_threads() -> Self {
-        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::MaxActiveThreads, "Maximum number of active threads reached for this community.")
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::MaxActiveThreads,
+            "Maximum number of active threads reached for this community.",
+        )
     }
 
     pub fn thread_archived() -> Self {
-        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::ThreadArchived, "This thread is archived.")
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::ThreadArchived,
+            "This thread is archived.",
+        )
     }
 
     pub fn thread_locked() -> Self {
-        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::ThreadLocked, "This thread is locked.")
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::ThreadLocked,
+            "This thread is locked.",
+        )
     }
 
     pub fn thread_already_created_for_message() -> Self {
-        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::ThreadAlreadyCreatedForMessage, "A thread has already been created for this message.")
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::ThreadAlreadyCreatedForMessage,
+            "A thread has already been created for this message.",
+        )
     }
 
     pub fn max_thread_members() -> Self {
-        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::MaxThreadMembers, "Maximum number of members reached for this thread.")
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::MaxThreadMembers,
+            "Maximum number of members reached for this thread.",
+        )
     }
 
     pub fn invalid_thread_notification_settings() -> Self {
-        Self::coded(StatusCode::BAD_REQUEST, ApiErrorCode::InvalidThreadNotificationSettings, "Invalid thread notification settings.")
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::InvalidThreadNotificationSettings,
+            "Invalid thread notification settings.",
+        )
     }
 
     pub fn slowmode_rate_limited() -> Self {
@@ -560,7 +628,11 @@ impl AppError {
     }
 
     pub fn resource_locked() -> Self {
-        Self::coded(StatusCode::TOO_MANY_REQUESTS, ApiErrorCode::ResourceLocked, "Another tag change is currently running.")
+        Self::coded(
+            StatusCode::TOO_MANY_REQUESTS,
+            ApiErrorCode::ResourceLocked,
+            "Another tag change is currently running.",
+        )
     }
 
     pub fn internal(message: impl Into<String>) -> Self {

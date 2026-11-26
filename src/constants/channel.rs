@@ -40,6 +40,14 @@ impl ChannelType {
     pub const fn supports_thread_defaults(kind: u32) -> bool {
         matches!(kind, 0 | 5 | 15 | 16)
     }
+
+    pub const fn supports_read_states(kind: u32) -> bool {
+        Self::supports_messages(kind) || Self::is_forum_like(kind)
+    }
+
+    pub const fn requires_channel_threads_capability(kind: u32) -> bool {
+        Self::is_thread(kind) || Self::is_forum_like(kind)
+    }
 }
 
 /// See: https://docs.fluxer.app/http-api/channels/#permission-overwrite-types

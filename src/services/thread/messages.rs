@@ -35,7 +35,8 @@ pub async fn require_thread_message_access(
     let row = fetch_thread_row(&mut *conn, thread_id)
         .await?
         .ok_or_else(AppError::unknown_channel)?;
-    let (parent_perms, thread_perms, _) = check_thread_view_access(&mut conn, &row, user_id).await?;
+    let (parent_perms, thread_perms, _) =
+        check_thread_view_access(&mut conn, &row, user_id).await?;
     let is_moderator = parent_perms.contains(PermissionFlags::MANAGE_THREADS);
     Ok(ThreadMessageContext {
         row,
@@ -99,7 +100,10 @@ pub async fn apply_thread_message_created(
         };
         let (_, inserted_row, member_count) =
             add_thread_member_tx(tx, &ctx.row.id, user_id, member_flags, now_ms).await?;
-        Some((ThreadMember::from_db_public(inserted_row, None), member_count))
+        Some((
+            ThreadMember::from_db_public(inserted_row, None),
+            member_count,
+        ))
     };
 
     Ok((unarchived, added_info))
@@ -155,9 +159,7 @@ pub async fn dispatch_thread_after_message(
         .await
         .ok()
         .flatten()
-        .map(|mr| {
-            GuildMemberUserRow::into_member_response(mr, Vec::new())
-        });
+        .map(|mr| GuildMemberUserRow::into_member_response(mr, Vec::new()));
         let gm = match gm {
             Some(mut m) => {
                 m.member.roles = queries::fetch_member_roles(&state.db, &ctx.row.guild_id, user_id)
@@ -245,10 +247,7 @@ pub async fn fetch_threads_for_messages(
         .fetch_all(&mut *conn)
         .await?;
     let hydrated = hydrate_threads_batch(&mut conn, rows, viewer_id, false).await?;
-    Ok(hydrated
-        .into_iter()
-        .map(|t| (t.id.clone(), t))
-        .collect())
+    Ok(hydrated.into_iter().map(|t| (t.id.clone(), t)).collect())
 }
 
 pub fn now_ms_u64() -> u64 {

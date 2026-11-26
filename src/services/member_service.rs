@@ -185,6 +185,14 @@ pub async fn leave_guild(state: &AppState, user_id: &str, guild_id: &str) -> Res
         .execute(&mut *tx)
         .await?;
 
+    sqlx::query(
+        "DELETE rs FROM read_states rs INNER JOIN channels c ON c.id = rs.channel_id WHERE rs.user_id = ? AND c.guild_id = ?",
+    )
+    .bind(user_id)
+    .bind(guild_id)
+    .execute(&mut *tx)
+    .await?;
+
     tx.commit().await?;
 
     state.remove_user_guild(user_id, guild_id).await;

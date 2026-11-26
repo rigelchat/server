@@ -74,13 +74,12 @@ pub(super) async fn is_thread_member<'e, E>(
 where
     E: Executor<'e, Database = MySql>,
 {
-    let exists: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM thread_members WHERE thread_id = ? AND user_id = ? LIMIT 1",
-    )
-    .bind(thread_id)
-    .bind(user_id)
-    .fetch_optional(executor)
-    .await?;
+    let exists: Option<(i32,)> =
+        sqlx::query_as("SELECT 1 FROM thread_members WHERE thread_id = ? AND user_id = ? LIMIT 1")
+            .bind(thread_id)
+            .bind(user_id)
+            .fetch_optional(executor)
+            .await?;
     Ok(exists.is_some())
 }
 
@@ -167,12 +166,11 @@ pub(super) async fn validate_and_prepare_applied_tags(
         ));
     }
 
-    let all_parent_tags: Vec<(String, bool)> = sqlx::query_as(
-        "SELECT id, moderated FROM forum_tags WHERE channel_id = ?",
-    )
-    .bind(parent_id)
-    .fetch_all(&mut **tx)
-    .await?;
+    let all_parent_tags: Vec<(String, bool)> =
+        sqlx::query_as("SELECT id, moderated FROM forum_tags WHERE channel_id = ?")
+            .bind(parent_id)
+            .fetch_all(&mut **tx)
+            .await?;
 
     let mod_by_id: HashMap<String, bool> = all_parent_tags.iter().cloned().collect();
     let has_unmoderated_option = all_parent_tags.iter().any(|(_, m)| !*m);
@@ -248,12 +246,11 @@ pub(super) async fn add_thread_member_tx(
 ) -> Result<(bool, ThreadMemberDbRow, u32), AppError> {
     let existing = fetch_thread_member_self(&mut **tx, thread_id, user_id).await?;
     if let Some(row) = existing {
-        let count: u32 = sqlx::query_scalar(
-            "SELECT member_count FROM channel_threads WHERE channel_id = ?",
-        )
-        .bind(thread_id)
-        .fetch_one(&mut **tx)
-        .await?;
+        let count: u32 =
+            sqlx::query_scalar("SELECT member_count FROM channel_threads WHERE channel_id = ?")
+                .bind(thread_id)
+                .fetch_one(&mut **tx)
+                .await?;
         return Ok((false, row, count));
     }
 
@@ -267,11 +264,10 @@ pub(super) async fn add_thread_member_tx(
     .execute(&mut **tx)
     .await?;
 
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM thread_members WHERE thread_id = ?")
-            .bind(thread_id)
-            .fetch_one(&mut **tx)
-            .await?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM thread_members WHERE thread_id = ?")
+        .bind(thread_id)
+        .fetch_one(&mut **tx)
+        .await?;
     let count_u32 = count.max(0) as u32;
 
     sqlx::query("UPDATE channel_threads SET member_count = ? WHERE channel_id = ?")
@@ -305,11 +301,10 @@ pub(super) async fn remove_thread_member_tx(
         return Ok(None);
     }
 
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM thread_members WHERE thread_id = ?")
-            .bind(thread_id)
-            .fetch_one(&mut **tx)
-            .await?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM thread_members WHERE thread_id = ?")
+        .bind(thread_id)
+        .fetch_one(&mut **tx)
+        .await?;
     let count_u32 = count.max(0) as u32;
 
     sqlx::query("UPDATE channel_threads SET member_count = ? WHERE channel_id = ?")
@@ -363,10 +358,7 @@ pub(super) async fn hydrate_threads_batch(
         tqb.push(") ORDER BY position ASC");
         let tag_rows: Vec<(String, String)> = tqb.build_query_as().fetch_all(&mut *conn).await?;
         for (tid, tag_id) in tag_rows {
-            applied_tags_by_thread
-                .entry(tid)
-                .or_default()
-                .push(tag_id);
+            applied_tags_by_thread.entry(tid).or_default().push(tag_id);
         }
 
         let mut pqb = QueryBuilder::<MySql>::new(

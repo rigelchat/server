@@ -159,3 +159,16 @@ pub struct ForumUnreadsEvent {
     pub channel_id: String,
     pub threads: Vec<ForumUnreadEntry>,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageAckEvent {
+    pub channel_id: String,
+    pub message_id: String,
+    pub version: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mention_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manual: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flags: Option<u32>,
+}

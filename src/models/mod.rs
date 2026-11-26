@@ -4,6 +4,7 @@ pub mod guild;
 pub mod guild_member;
 pub mod invite;
 pub mod message;
+pub mod read_state;
 pub mod rest;
 pub mod role;
 pub mod serde_helpers;

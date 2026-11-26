@@ -266,3 +266,48 @@ async fn cors_allows_only_configured_origins_and_auth_rate_limit_triggers_429() 
     assert_eq!(body["global"], false);
     assert!(body["retry_after"].as_f64().is_some_and(|v| v > 0.0));
 }
+
+#[tokio::test]
+async fn read_states_endpoints_require_auth_and_enforce_ack_bulk_rate_limit() {
+    let base = spawn_test_server(RegistrationMode::Open, vec!["*".to_string()]).await;
+    let client = reqwest::Client::new();
+
+    for path in [
+        "/api/read-states/ack",
+        "/api/read-states/ack-bulk",
+        "/api/channels/123456/messages/789012/ack",
+    ] {
+        let res = client
+            .post(format!("{base}{path}"))
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        let body: Value = serde_json::from_slice(&res.bytes().await.unwrap()).unwrap();
+        assert_eq!(body["code"], "MISSING_AUTHORIZATION");
+    }
+
+    for _ in 0..18 {
+        let res = client
+            .post(format!("{base}/api/read-states/ack-bulk"))
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    let throttled = client
+        .post(format!("{base}/api/read-states/ack-bulk"))
+        .header("content-type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body: Value = serde_json::from_slice(&throttled.bytes().await.unwrap()).unwrap();
+    assert_eq!(body["code"], "RATE_LIMITED");
+}

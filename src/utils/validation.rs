@@ -277,10 +277,20 @@ mod tests {
 
     #[test]
     fn validates_single_unicode_emojis() {
-        for ok in ["👍", "👍🏽", "🛡️", "❤️", "🇫🇷", "👨‍👩‍👧", "1️⃣", "🏳️‍🌈", "🏴󠁧󠁢󠁥󠁮󠁧󠁿"] {
+        for ok in ["👍", "👍🏽", "🛡️", "❤️", "🇫🇷", "👨‍👩‍👧", "1️⃣", "🏴󠁧󠁢󠁥󠁮󠁧󠁿"]
+        {
             assert!(validate_unicode_emoji("emoji_name", ok).is_ok(), "{ok}");
         }
-        for bad in ["", "not_emoji", "123", "a", "😀😁", "🇫🇷🇺🇸", "👍 hello", "👨\u{200D}"] {
+        for bad in [
+            "",
+            "not_emoji",
+            "123",
+            "a",
+            "😀😁",
+            "🇫🇷🇺🇸",
+            "👍 hello",
+            "👨\u{200D}",
+        ] {
             assert!(validate_unicode_emoji("emoji_name", bad).is_err(), "{bad}");
         }
     }

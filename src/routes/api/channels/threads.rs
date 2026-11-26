@@ -256,14 +256,8 @@ async fn list_thread_members(
     Path(channel_id): Path<String>,
     Query(query): Query<ListThreadMembersQuery>,
 ) -> Result<Json<Vec<ThreadMember>>, AppError> {
-    let members = thread::list_thread_members(
-        &state,
-        &channel_id,
-        &auth.user_id,
-        auth.is_bot,
-        query,
-    )
-    .await?;
+    let members =
+        thread::list_thread_members(&state, &channel_id, &auth.user_id, auth.is_bot, query).await?;
     Ok(Json(members))
 }
 

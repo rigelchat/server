@@ -10,9 +10,7 @@ use crate::constants::channel::{ChannelType, OverwriteType};
 use crate::constants::flags::PermissionFlags;
 use crate::error::AppError;
 use crate::gateway::session::GatewaySession;
-use crate::models::channel::{
-    ChannelOverwriteRow, ChannelResponse, PermissionOverwrite,
-};
+use crate::models::channel::{ChannelOverwriteRow, ChannelResponse, PermissionOverwrite};
 use crate::models::guild_member::GuildMemberRole;
 use crate::models::role::RolePerm;
 
@@ -116,8 +114,7 @@ pub fn compute_channel_permissions(
     member_role_ids: &[String],
     overwrites: &[PermissionOverwrite],
 ) -> PermissionFlags {
-    let mut perms =
-        apply_channel_overwrites(base, guild_id, user_id, member_role_ids, overwrites);
+    let mut perms = apply_channel_overwrites(base, guild_id, user_id, member_role_ids, overwrites);
     if perms.is_empty() {
         return perms;
     }
@@ -576,8 +573,7 @@ pub async fn dispatch_channel_with_ctx<T: Serialize>(
     event_name: &str,
     data: &T,
 ) {
-    let mut sessions =
-        filter_sessions_for_channel_with_ctx(state, guild_id, channel_id, ctx).await;
+    let mut sessions = filter_sessions_for_channel_with_ctx(state, guild_id, channel_id, ctx).await;
     if event_name.starts_with("THREAD_") {
         sessions.retain(|s| s.has_channel_threads());
     }

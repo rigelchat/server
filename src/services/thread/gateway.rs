@@ -253,19 +253,21 @@ pub async fn build_thread_member_list_update(
         .into_iter()
         .map(|m| {
             let gm = gm_by_user.remove(&m.user_id);
-            let pres = presence_by_user.remove(&m.user_id).unwrap_or(GatewayPresence {
-                user: match &gm {
-                    Some(g) => PresenceUser::Partial(g.user.clone()),
-                    None => PresenceUser::IdOnly {
-                        id: m.user_id.clone(),
+            let pres = presence_by_user
+                .remove(&m.user_id)
+                .unwrap_or(GatewayPresence {
+                    user: match &gm {
+                        Some(g) => PresenceUser::Partial(g.user.clone()),
+                        None => PresenceUser::IdOnly {
+                            id: m.user_id.clone(),
+                        },
                     },
-                },
-                status: "offline".to_string(),
-                mobile: false,
-                afk: false,
-                custom_status: None,
-                guild_id: Some(guild_id.to_string()),
-            });
+                    status: "offline".to_string(),
+                    mobile: false,
+                    afk: false,
+                    custom_status: None,
+                    guild_id: Some(guild_id.to_string()),
+                });
             ThreadMemberListItem {
                 user_id: m.user_id,
                 join_timestamp: m.join_timestamp,
@@ -294,15 +296,14 @@ pub async fn handle_request_forum_unreads(
         return None;
     }
 
-    let channel_row: Option<(String, u32)> = sqlx::query_as(
-        "SELECT guild_id, type FROM channels WHERE id = ? AND guild_id = ? LIMIT 1",
-    )
-    .bind(&payload.channel_id)
-    .bind(&payload.guild_id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
+    let channel_row: Option<(String, u32)> =
+        sqlx::query_as("SELECT guild_id, type FROM channels WHERE id = ? AND guild_id = ? LIMIT 1")
+            .bind(&payload.channel_id)
+            .bind(&payload.guild_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
     let (_, kind) = channel_row?;
     if !ChannelType::is_forum_like(kind) {
         return None;

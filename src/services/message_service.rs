@@ -237,8 +237,7 @@ pub async fn get_messages(
             .map(|m| m.id.clone())
             .collect();
         if !thread_ids.is_empty() {
-            let mut by_id =
-                thread::fetch_threads_for_messages(state, &thread_ids, user_id).await?;
+            let mut by_id = thread::fetch_threads_for_messages(state, &thread_ids, user_id).await?;
             for m in &mut messages {
                 if (m.flags & MessageFlags::HAS_THREAD.bits()) != 0 {
                     m.thread = by_id.remove(&m.id).map(Box::new);
@@ -340,6 +339,16 @@ pub async fn create_message(
         None
     };
 
+    if !is_bot {
+        crate::services::read_state_service::mark_channel_read_on_send_tx(
+            &mut tx,
+            user_id,
+            channel_id,
+            &message_id,
+        )
+        .await?;
+    }
+
     tx.commit().await?;
 
     let author = match state.hub.get_cached_partial_user(user_id) {
@@ -389,6 +398,19 @@ pub async fn create_message(
         &event,
     )
     .await;
+
+    if !is_bot {
+        crate::services::read_state_service::dispatch_message_ack(
+            state,
+            user_id,
+            meta.channel_type,
+            channel_id,
+            &msg.id,
+            0,
+            false,
+        )
+        .await;
+    }
 
     if let (Some(ctx), Some((unarchived, added_info))) = (thread_ctx, thread_post_effects) {
         thread::dispatch_thread_after_message(state, &ctx, user_id, unarchived, added_info).await;

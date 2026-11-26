@@ -216,15 +216,13 @@ impl GatewaySession {
     }
 
     pub fn is_bot(&self) -> bool {
-        self.state
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_bot
+        self.state.read().unwrap_or_else(|e| e.into_inner()).is_bot
     }
 
     pub fn has_channel_threads(&self) -> bool {
         let st = self.state.read().unwrap_or_else(|e| e.into_inner());
-        st.is_bot || SessionFlags::from_bits_truncate(st.flags).contains(SessionFlags::CHANNEL_THREADS)
+        st.is_bot
+            || SessionFlags::from_bits_truncate(st.flags).contains(SessionFlags::CHANNEL_THREADS)
     }
 
     pub fn set_guild_active(&self, guild_id: &str, active: bool) {
@@ -263,7 +261,8 @@ impl GatewaySession {
         if thread_ids.is_empty() {
             st.thread_member_lists.remove(guild_id);
         } else {
-            st.thread_member_lists.insert(guild_id.to_string(), thread_ids);
+            st.thread_member_lists
+                .insert(guild_id.to_string(), thread_ids);
         }
         newly_added
     }

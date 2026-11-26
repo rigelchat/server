@@ -29,6 +29,7 @@ struct RateLimitBody {
 pub enum BucketKind {
     AuthStrict,
     AuthProbe,
+    ReadStateAckBulk,
     ApiWrite,
     ApiRead,
 }
@@ -38,6 +39,7 @@ impl BucketKind {
         match self {
             Self::AuthStrict => (15, Duration::from_secs(60)),
             Self::AuthProbe => (30, Duration::from_secs(60)),
+            Self::ReadStateAckBulk => (20, Duration::from_secs(10)),
             Self::ApiWrite => (60, Duration::from_secs(10)),
             Self::ApiRead => (120, Duration::from_secs(10)),
         }
@@ -115,6 +117,12 @@ fn classify_route(method: &Method, path: &str) -> Option<BucketKind> {
 
     if stripped == "/auth/username-availability" || stripped == "/auth/username-suggestions" {
         return Some(BucketKind::AuthProbe);
+    }
+
+    if *method == Method::POST
+        && (stripped == "/read-states/ack" || stripped == "/read-states/ack-bulk")
+    {
+        return Some(BucketKind::ReadStateAckBulk);
     }
 
     if matches!(
@@ -225,6 +233,14 @@ mod tests {
             Some(BucketKind::ApiWrite)
         );
         assert_eq!(
+            classify_route(&Method::POST, "/api/read-states/ack"),
+            Some(BucketKind::ReadStateAckBulk)
+        );
+        assert_eq!(
+            classify_route(&Method::POST, "/api/v9/read-states/ack-bulk"),
+            Some(BucketKind::ReadStateAckBulk)
+        );
+        assert_eq!(
             classify_route(&Method::GET, "/api/ping"),
             Some(BucketKind::ApiRead)
         );
@@ -257,6 +273,28 @@ mod tests {
         assert!(
             limiter
                 .check(BucketKind::AuthStrict, "1.2.3.4", after_window)
+                .is_ok()
+        );
+
+        for _ in 0..20 {
+            assert!(
+                limiter
+                    .check(BucketKind::ReadStateAckBulk, "1.2.3.4", start)
+                    .is_ok()
+            );
+        }
+        assert!(
+            limiter
+                .check(BucketKind::ReadStateAckBulk, "1.2.3.4", start)
+                .is_err()
+        );
+        assert!(
+            limiter
+                .check(
+                    BucketKind::ReadStateAckBulk,
+                    "1.2.3.4",
+                    start + Duration::from_secs(11)
+                )
                 .is_ok()
         );
     }

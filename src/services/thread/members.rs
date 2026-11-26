@@ -18,9 +18,7 @@ use crate::models::gateway::events::{
 };
 use crate::models::guild_member::{GuildMemberFields, GuildMemberResponse, GuildMemberUserRow};
 use crate::models::message::Message;
-use crate::models::rest::threads::{
-    ListThreadMembersQuery, ModifyThreadMemberSettingsRequest,
-};
+use crate::models::rest::threads::{ListThreadMembersQuery, ModifyThreadMemberSettingsRequest};
 use crate::models::thread::{ThreadMember, ThreadMemberDbRow};
 use crate::services::{member_service, permission_service, queries, user};
 use crate::utils::snowflake::{DISCORD_SNOWFLAKE, validate_snowflake, validate_snowflake_opt};
