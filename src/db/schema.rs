@@ -1,16 +1,5 @@
 use sqlx::mysql::MySqlPool;
 
-async fn column_exists(pool: &MySqlPool, table: &str, column: &str) -> Result<bool, sqlx::Error> {
-    let exists: Option<(i32,)> = sqlx::query_as(
-        "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1",
-    )
-    .bind(table)
-    .bind(column)
-    .fetch_optional(pool)
-    .await?;
-    Ok(exists.is_some())
-}
-
 pub(super) async fn apply(pool: &MySqlPool) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
@@ -186,44 +175,6 @@ pub(super) async fn apply(pool: &MySqlPool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
-
-    let topic_max_len: Option<u64> = sqlx::query_scalar::<_, Option<u64>>(
-        "SELECT CAST(CHARACTER_MAXIMUM_LENGTH AS UNSIGNED) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'channels' AND COLUMN_NAME = 'topic'",
-    )
-    .fetch_optional(pool)
-    .await?
-    .flatten();
-    if topic_max_len.is_some_and(|len| len < 4096) {
-        sqlx::query("ALTER TABLE channels MODIFY COLUMN topic TEXT DEFAULT NULL")
-            .execute(pool)
-            .await?;
-    }
-
-    for (col, def) in [
-        ("last_pin_timestamp", "BIGINT UNSIGNED DEFAULT NULL"),
-        ("flags", "INT UNSIGNED NOT NULL DEFAULT 0"),
-        ("default_auto_archive_duration", "INT UNSIGNED DEFAULT NULL"),
-        (
-            "default_thread_rate_limit_per_user",
-            "INT UNSIGNED NOT NULL DEFAULT 0",
-        ),
-        ("default_reaction_emoji_id", "VARCHAR(20) DEFAULT NULL"),
-        ("default_reaction_emoji_name", "VARCHAR(64) DEFAULT NULL"),
-        ("default_sort_order", "TINYINT UNSIGNED DEFAULT NULL"),
-        (
-            "default_forum_layout",
-            "TINYINT UNSIGNED NOT NULL DEFAULT 0",
-        ),
-        (
-            "default_tag_setting",
-            "VARCHAR(16) NOT NULL DEFAULT 'match_some'",
-        ),
-    ] {
-        if !column_exists(pool, "channels", col).await? {
-            let sql = format!("ALTER TABLE channels ADD COLUMN {col} {def}");
-            sqlx::query(&sql).execute(pool).await?;
-        }
-    }
 
     sqlx::query(
         r#"
