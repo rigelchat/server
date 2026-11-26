@@ -20,4 +20,5 @@ Minimalist, self-hosted chat backend in Rust (`edition = 2024`, Axum 0.8, SQLx 0
 - Minimalist comments (only explain non-obvious invariants).
 - **No `.unwrap()` or `.expect()`** outside `#[cfg(test)]` modules in `routes/`, `services/`, `extractors.rs`, `gateway/`, `utils/`, `models/`, or `rate_limit.rs`.
 - Stay **minimalist & lightweight**: no voice/WebRTC, billing, quests, or protobuf bloat.
+- **Breaking changes**: always welcome when justified, provided they are explicitly flagged and explained to the user (see `.agents/skills/breaking-changes.md`).
 - Verify compilation with `cargo check` / `cargo clippy --all-targets -- -D warnings` after every code change.
