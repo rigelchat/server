@@ -371,6 +371,8 @@ pub(super) async fn apply(pool: &MySqlPool) -> Result<(), sqlx::Error> {
             max_uses INT UNSIGNED NOT NULL DEFAULT 0,
             created_at BIGINT UNSIGNED NOT NULL,
             expires_at BIGINT UNSIGNED DEFAULT NULL,
+            INDEX idx_invites_guild_created (guild_id, created_at),
+            INDEX idx_invites_channel_created (channel_id, created_at),
             FOREIGN KEY (guild_id) REFERENCES guilds(id) ON DELETE CASCADE,
             FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
             FOREIGN KEY (inviter_id) REFERENCES users(id) ON DELETE CASCADE

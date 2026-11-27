@@ -13,7 +13,7 @@ use crate::AppState;
 use crate::error::AppError;
 use crate::extractors::{AppJson, AuthUser, FluxerFeatures};
 use crate::models::channel::ChannelResponse;
-use crate::models::invite::CreatedInvite;
+use crate::models::invite::InviteMetadata;
 use crate::models::rest::channels::{SetPermissionOverwriteRequest, UpdateChannelRequest};
 use crate::models::rest::forums::{
     CreateForumTagRequest, ForumPostDataResponse, GetForumPostDataRequest, UpdateForumTagRequest,
@@ -42,7 +42,10 @@ pub fn router() -> Router<AppState> {
         .route("/{id}/post-data", post(get_forum_post_data))
         .merge(threads::router())
         .nest("/{id}/messages", messages::router())
-        .route("/{id}/invites", post(create_channel_invite))
+        .route(
+            "/{id}/invites",
+            get(list_channel_invites).post(create_channel_invite),
+        )
 }
 
 async fn get_channel(
@@ -203,13 +206,29 @@ async fn get_forum_post_data(
     Ok(Json(data))
 }
 
+async fn list_channel_invites(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    features: FluxerFeatures,
+    Path(channel_id): Path<String>,
+) -> Result<Json<Vec<InviteMetadata>>, AppError> {
+    let invites = invite_service::list_channel_invites(
+        &state,
+        &channel_id,
+        &auth.user_id,
+        features.has_channel_threads(auth.is_bot),
+    )
+    .await?;
+    Ok(Json(invites))
+}
+
 async fn create_channel_invite(
     State(state): State<AppState>,
     auth: AuthUser,
     features: FluxerFeatures,
     Path(channel_id): Path<String>,
     body: Bytes,
-) -> Result<Json<CreatedInvite>, AppError> {
+) -> Result<Json<InviteMetadata>, AppError> {
     let payload: CreateInviteRequest = if body.is_empty() {
         CreateInviteRequest::default()
     } else {

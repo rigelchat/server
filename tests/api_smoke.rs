@@ -149,6 +149,10 @@ async fn auth_rejection_validation_and_closed_registration_work_deterministicall
         (reqwest::Method::GET, "/api/users/@me/guilds"),
         (reqwest::Method::PATCH, "/api/users/@me/settings"),
         (reqwest::Method::POST, "/api/guilds"),
+        (reqwest::Method::GET, "/api/guilds/123456/invites"),
+        (reqwest::Method::GET, "/api/v9/guilds/123456/invites"),
+        (reqwest::Method::GET, "/api/channels/123456/invites"),
+        (reqwest::Method::GET, "/api/v9/channels/123456/invites"),
         (reqwest::Method::GET, "/api/channels/123456/messages"),
     ] {
         let res = client

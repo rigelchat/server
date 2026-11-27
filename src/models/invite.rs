@@ -52,7 +52,7 @@ pub struct InviteResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct CreatedInvite {
+pub struct InviteMetadata {
     #[serde(flatten)]
     pub invite: InviteResponse,
     #[serde(serialize_with = "serialize_millis_iso")]
@@ -60,4 +60,75 @@ pub struct CreatedInvite {
     pub uses: u32,
     pub max_uses: u32,
     pub max_age: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invite_metadata_flattens_invite_and_serializes_iso_created_at() {
+        let meta = InviteMetadata {
+            invite: InviteResponse {
+                code: "aB3dEf7h".to_string(),
+                kind: InviteType::Guild,
+                guild: InviteGuild {
+                    id: "100".to_string(),
+                    name: "Example guild".to_string(),
+                    icon: None,
+                    banner: None,
+                    banner_width: None,
+                    banner_height: None,
+                    splash: None,
+                    splash_width: None,
+                    splash_height: None,
+                    splash_card_alignment: 0,
+                    embed_splash: None,
+                    embed_splash_width: None,
+                    embed_splash_height: None,
+                    features: vec![],
+                    badge_ids: vec![],
+                    description: None,
+                },
+                channel: InviteChannel {
+                    id: "200".to_string(),
+                    name: Some("general".to_string()),
+                    kind: 0,
+                },
+                inviter: Some(PartialUser {
+                    id: "300".to_string(),
+                    username: "alice".to_string(),
+                    discriminator: "0000".to_string(),
+                    global_name: None,
+                    avatar: None,
+                    avatar_color: None,
+                    bot: false,
+                    flags: 0,
+                }),
+                member_count: Some(12),
+                presence_count: Some(4),
+                expires_at: None,
+                temporary: false,
+            },
+            created_at: 1_700_000_000_000,
+            uses: 3,
+            max_uses: 10,
+            max_age: 86_400,
+        };
+
+        let val = serde_json::to_value(&meta).unwrap();
+        assert_eq!(val["code"], "aB3dEf7h");
+        assert_eq!(val["type"], 0);
+        assert_eq!(val["guild"]["id"], "100");
+        assert_eq!(val["channel"]["id"], "200");
+        assert_eq!(val["inviter"]["id"], "300");
+        assert_eq!(val["member_count"], 12);
+        assert_eq!(val["presence_count"], 4);
+        assert!(val["expires_at"].is_null());
+        assert_eq!(val["temporary"], false);
+        assert_eq!(val["created_at"], "2023-11-14T22:13:20.000Z");
+        assert_eq!(val["uses"], 3);
+        assert_eq!(val["max_uses"], 10);
+        assert_eq!(val["max_age"], 86_400);
+    }
 }
