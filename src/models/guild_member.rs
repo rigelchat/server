@@ -5,7 +5,7 @@ use crate::models::serde_helpers::serialize_millis_iso;
 use crate::models::user::PartialUser;
 
 #[derive(Debug, Clone, FromRow)]
-pub struct BaseGuildMember {
+pub struct GuildMemberRow {
     pub joined_at: u64,
     pub nick: Option<String>,
 }

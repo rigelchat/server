@@ -19,6 +19,7 @@ pub struct StartThreadFromMessageRequest {
 pub struct StartThreadMessageInput {
     pub content: Option<String>,
     pub flags: Option<u32>,
+    pub allowed_mentions: Option<crate::models::rest::messages::AllowedMentionsInput>,
 }
 
 #[derive(Debug, Deserialize)]

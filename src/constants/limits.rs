@@ -77,6 +77,8 @@ pub const MAX_MESSAGE_LENGTH: usize = 2000;
 pub const MAX_MESSAGE_NONCE_LENGTH: usize = 32;
 pub const DEFAULT_MESSAGES_PAGE_LIMIT: u32 = 50;
 pub const MAX_MESSAGES_PAGE_LIMIT: u32 = 100;
+pub const MAX_ALLOWED_MENTION_IDS: usize = 100;
+pub const MENTION_READ_STATE_BATCH_SIZE: usize = 500;
 pub const MAX_READ_STATES_ACK_BATCH: usize = 100;
 pub const MAX_READ_STATE_MENTION_COUNT: u32 = i32::MAX as u32;
 

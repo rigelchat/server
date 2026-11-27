@@ -11,11 +11,11 @@ use crate::constants::limits::{
     MAX_SEARCH_THREADS_LIMIT, MAX_SEARCH_THREADS_OFFSET, MIN_ARCHIVED_THREADS_PAGE_LIMIT,
 };
 use crate::error::{AppError, ValidationCode};
-use crate::models::message::{Message, MessageDbRow};
+use crate::models::message::MessageRow;
 use crate::models::rest::threads::{
     ListArchivedThreadsQuery, SearchThreadsQuery, SearchThreadsResponse, ThreadListResponse,
 };
-use crate::models::thread::{ThreadDbRow, ThreadMember, ThreadMemberDbRow};
+use crate::models::thread::{ThreadMember, ThreadMemberRow, ThreadRow};
 use crate::services::{member_service, permission_service};
 use crate::utils::snowflake::{validate_snowflake, validate_snowflake_opt};
 
@@ -40,7 +40,7 @@ async fn fetch_self_members_for_threads(
     }
     qb.push(")");
     let rows = qb
-        .build_query_as::<ThreadMemberDbRow>()
+        .build_query_as::<ThreadMemberRow>()
         .fetch_all(conn)
         .await?;
     Ok(rows
@@ -63,9 +63,9 @@ pub async fn list_active_guild_threads(
     let mut conn = state.db.acquire().await?;
     let sql = format!(
         "SELECT {} FROM channels c INNER JOIN channel_threads ct ON ct.channel_id = c.id INNER JOIN channels p ON p.id = ct.parent_id WHERE ct.guild_id = ? AND ct.archived = FALSE ORDER BY CAST(c.id AS UNSIGNED) DESC",
-        ThreadDbRow::SELECT_COLS
+        ThreadRow::SELECT_COLS
     );
-    let rows = sqlx::query_as::<_, ThreadDbRow>(&sql)
+    let rows = sqlx::query_as::<_, ThreadRow>(&sql)
         .bind(guild_id)
         .fetch_all(&mut *conn)
         .await?;
@@ -177,7 +177,7 @@ pub async fn list_public_archived_threads(
 
     let mut qb = QueryBuilder::<MySql>::new(format!(
         "SELECT {} FROM channels c INNER JOIN channel_threads ct ON ct.channel_id = c.id INNER JOIN channels p ON p.id = ct.parent_id WHERE ct.parent_id = ",
-        ThreadDbRow::SELECT_COLS
+        ThreadRow::SELECT_COLS
     ));
     qb.push_bind(channel_id);
     qb.push(" AND ct.archived = TRUE AND c.type IN (10, 11)");
@@ -190,7 +190,7 @@ pub async fn list_public_archived_threads(
 
     let mut conn = state.db.acquire().await?;
     let mut rows = qb
-        .build_query_as::<ThreadDbRow>()
+        .build_query_as::<ThreadRow>()
         .fetch_all(&mut *conn)
         .await?;
     let has_more = rows.len() > limit as usize;
@@ -226,7 +226,7 @@ pub async fn list_private_archived_threads(
 
     let mut qb = QueryBuilder::<MySql>::new(format!(
         "SELECT {} FROM channels c INNER JOIN channel_threads ct ON ct.channel_id = c.id INNER JOIN channels p ON p.id = ct.parent_id WHERE ct.parent_id = ",
-        ThreadDbRow::SELECT_COLS
+        ThreadRow::SELECT_COLS
     ));
     qb.push_bind(channel_id);
     qb.push(" AND ct.archived = TRUE AND c.type = 12");
@@ -239,7 +239,7 @@ pub async fn list_private_archived_threads(
 
     let mut conn = state.db.acquire().await?;
     let mut rows = qb
-        .build_query_as::<ThreadDbRow>()
+        .build_query_as::<ThreadRow>()
         .fetch_all(&mut *conn)
         .await?;
     let has_more = rows.len() > limit as usize;
@@ -275,7 +275,7 @@ pub async fn list_joined_private_archived_threads(
 
     let mut qb = QueryBuilder::<MySql>::new(format!(
         "SELECT {} FROM channels c INNER JOIN channel_threads ct ON ct.channel_id = c.id INNER JOIN channels p ON p.id = ct.parent_id INNER JOIN thread_members tm ON tm.thread_id = c.id WHERE ct.parent_id = ",
-        ThreadDbRow::SELECT_COLS
+        ThreadRow::SELECT_COLS
     ));
     qb.push_bind(channel_id);
     qb.push(" AND tm.user_id = ");
@@ -291,7 +291,7 @@ pub async fn list_joined_private_archived_threads(
 
     let mut conn = state.db.acquire().await?;
     let mut rows = qb
-        .build_query_as::<ThreadDbRow>()
+        .build_query_as::<ThreadRow>()
         .fetch_all(&mut *conn)
         .await?;
     let has_more = rows.len() > limit as usize;
@@ -500,7 +500,7 @@ pub async fn search_threads(
 
     let mut list_qb = QueryBuilder::<MySql>::new(format!(
         "SELECT {} FROM channels c INNER JOIN channel_threads ct ON ct.channel_id = c.id INNER JOIN channels p ON p.id = ct.parent_id",
-        ThreadDbRow::SELECT_COLS
+        ThreadRow::SELECT_COLS
     ));
     push_search_filters(
         &mut list_qb,
@@ -523,7 +523,7 @@ pub async fn search_threads(
     list_qb.push_bind(offset);
 
     let rows = list_qb
-        .build_query_as::<ThreadDbRow>()
+        .build_query_as::<ThreadRow>()
         .fetch_all(&mut *conn)
         .await?;
     let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
@@ -534,28 +534,26 @@ pub async fn search_threads(
         if ids.is_empty() {
             Some(vec![])
         } else {
-            let mut mqb = QueryBuilder::<MySql>::new(
-                r#"
-                SELECT
-                    m.id, m.channel_id, m.content, m.timestamp, m.edited_timestamp,
-                    m.type AS kind, m.flags,
-                    u.id AS author_id, u.username, u.discriminator, u.global_name, u.avatar,
-                    u.bot, u.public_flags
-                FROM messages m
-                INNER JOIN users u ON u.id = m.author_id
-                WHERE m.id IN (
-                "#,
-            );
+            let mut mqb =
+                QueryBuilder::<MySql>::new(format!("{} WHERE m.id IN (", MessageRow::SELECT_FROM));
             let mut sep = mqb.separated(", ");
             for tid in &ids {
                 sep.push_bind(tid);
             }
             mqb.push(") AND m.channel_id = m.id");
             let msg_rows = mqb
-                .build_query_as::<MessageDbRow>()
+                .build_query_as::<MessageRow>()
                 .fetch_all(&mut *conn)
                 .await?;
-            Some(msg_rows.into_iter().map(Message::from).collect())
+            Some(
+                crate::services::message_service::hydrate_messages(
+                    state,
+                    msg_rows,
+                    user_id,
+                    can_use_threads,
+                )
+                .await?,
+            )
         }
     } else {
         None

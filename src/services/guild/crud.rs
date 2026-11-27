@@ -16,7 +16,7 @@ use crate::constants::limits::{
 };
 use crate::error::{AppError, ValidationCode};
 use crate::models::gateway::events::GuildDeleteEvent;
-use crate::models::guild::{BaseGuild, Guild};
+use crate::models::guild::{Guild, GuildRow};
 use crate::models::rest::guilds::{CreateGuildRequest, ListGuildsQuery, UpdateGuildRequest};
 use crate::models::role::RolePerm;
 use crate::services::{channel, member_service, permission_service, queries, role};
@@ -272,7 +272,7 @@ pub async fn get_guild(
     user_id: &str,
     can_use_threads: bool,
 ) -> Result<Guild, AppError> {
-    let base = sqlx::query_as::<_, BaseGuild>("SELECT * FROM guilds WHERE id = ?")
+    let base = sqlx::query_as::<_, GuildRow>("SELECT * FROM guilds WHERE id = ?")
         .bind(guild_id)
         .fetch_optional(&state.db)
         .await?
@@ -347,7 +347,7 @@ pub async fn update_guild(
 
     let mut tx = state.db.begin().await?;
 
-    let current = sqlx::query_as::<_, BaseGuild>("SELECT * FROM guilds WHERE id = ? FOR UPDATE")
+    let current = sqlx::query_as::<_, GuildRow>("SELECT * FROM guilds WHERE id = ? FOR UPDATE")
         .bind(guild_id)
         .fetch_optional(&mut *tx)
         .await?
@@ -625,7 +625,7 @@ pub async fn update_guild(
     query.push_bind(guild_id);
     query.build().execute(&mut *tx).await?;
 
-    let updated_base = sqlx::query_as::<_, BaseGuild>("SELECT * FROM guilds WHERE id = ?")
+    let updated_base = sqlx::query_as::<_, GuildRow>("SELECT * FROM guilds WHERE id = ?")
         .bind(guild_id)
         .fetch_one(&mut *tx)
         .await?;
@@ -707,10 +707,7 @@ pub async fn get_user_guilds(
     qb.push(" ORDER BY CAST(g.id AS UNSIGNED) ASC LIMIT ");
     qb.push_bind(limit);
 
-    let rows = qb
-        .build_query_as::<BaseGuild>()
-        .fetch_all(&state.db)
-        .await?;
+    let rows = qb.build_query_as::<GuildRow>().fetch_all(&state.db).await?;
     if rows.is_empty() {
         return Ok(vec![]);
     }

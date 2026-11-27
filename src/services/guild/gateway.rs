@@ -10,10 +10,10 @@ use crate::models::channel::{
     ChannelOverwriteRow, ChannelResponse, ChannelRow, ForumTag, ForumTagRow, PermissionOverwrite,
 };
 use crate::models::gateway::presence::{GatewayPresence, PresenceUser};
-use crate::models::guild::{BaseGuild, GatewayGuild, Guild};
+use crate::models::guild::{GatewayGuild, Guild, GuildRow};
 use crate::models::guild_member::{
-    BaseGuildMember, GatewayGuildMember, GuildMemberFields, GuildMemberResponse,
-    GuildMemberUserRef, GuildMemberUserRow,
+    GatewayGuildMember, GuildMemberFields, GuildMemberResponse, GuildMemberRow, GuildMemberUserRef,
+    GuildMemberUserRow,
 };
 use crate::models::role::{Role, RolePerm, RoleRow};
 use crate::services::permission_service;
@@ -62,7 +62,7 @@ struct GuildMemberBatchRoleRow {
 }
 
 struct GuildsBaseData {
-    guilds: Vec<BaseGuild>,
+    guilds: Vec<GuildRow>,
     channels_by_guild: HashMap<String, Vec<ChannelResponse>>,
     roles_by_guild: HashMap<String, Vec<Role>>,
     role_perms_by_guild: HashMap<String, Vec<RolePerm>>,
@@ -90,7 +90,7 @@ async fn load_guilds_base_data(
     }
     gqb.push(") ORDER BY CAST(id AS UNSIGNED) ASC");
     let guilds = gqb
-        .build_query_as::<BaseGuild>()
+        .build_query_as::<GuildRow>()
         .fetch_all(&state.db)
         .await?;
 
@@ -252,12 +252,11 @@ pub async fn build_gateway_guilds_batch(
         .fetch_all(&state.db)
         .await?;
 
-    let mut self_members: HashMap<String, BaseGuildMember> =
-        HashMap::with_capacity(self_rows.len());
+    let mut self_members: HashMap<String, GuildMemberRow> = HashMap::with_capacity(self_rows.len());
     for r in self_rows {
         self_members.insert(
             r.guild_id,
-            BaseGuildMember {
+            GuildMemberRow {
                 joined_at: r.joined_at,
                 nick: r.nick,
             },

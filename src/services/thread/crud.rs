@@ -12,10 +12,10 @@ use crate::constants::message::MessageType;
 use crate::error::{AppError, ValidationCode};
 use crate::models::gateway::events::{GatewayMessageEvent, ThreadCreateEvent, ThreadDeleteEvent};
 use crate::models::guild_member::GuildMemberFields;
-use crate::models::message::{Message, MessageDbRow};
+use crate::models::message::{Message, MessageRow};
 use crate::models::rest::channels::UpdateChannelRequest;
 use crate::models::rest::threads::{StartThreadFromMessageRequest, StartThreadRequest};
-use crate::models::thread::{ForumPostResponse, StartThreadResponse, ThreadDbRow, ThreadResponse};
+use crate::models::thread::{ForumPostResponse, StartThreadResponse, ThreadResponse, ThreadRow};
 use crate::services::{permission_service, queries, user};
 use crate::utils::snowflake::DISCORD_SNOWFLAKE;
 
@@ -129,19 +129,10 @@ pub async fn start_thread_from_message(
         .fetch_optional(&mut *tx)
         .await?;
 
-    let msg_row = sqlx::query_as::<_, MessageDbRow>(
-        r#"
-        SELECT
-            m.id, m.channel_id, m.content, m.timestamp, m.edited_timestamp,
-            m.type AS kind, m.flags,
-            u.id AS author_id, u.username, u.discriminator, u.global_name, u.avatar,
-            u.bot, u.public_flags
-        FROM messages m
-        INNER JOIN users u ON u.id = m.author_id
-        WHERE m.id = ? AND m.channel_id = ?
-        FOR UPDATE
-        "#,
-    )
+    let msg_row = sqlx::query_as::<_, MessageRow>(&format!(
+        "{} WHERE m.id = ? AND m.channel_id = ? FOR UPDATE",
+        MessageRow::SELECT_FROM
+    ))
     .bind(message_id)
     .bind(channel_id)
     .fetch_optional(&mut *tx)
@@ -279,24 +270,29 @@ pub async fn start_thread_from_message(
     )
     .await;
 
-    let mut updated_source_msg = Message::from(msg_row);
-    updated_source_msg.flags = new_msg_flags;
-    updated_source_msg.thread = Some(Box::new(thread.clone()));
-    let member = fetch_message_member_fields(state, &guild_id, &updated_source_msg.author.id).await;
-    permission_service::dispatch_channel_with_ctx(
-        state,
-        &guild_id,
-        channel_id,
-        perm_ctx.as_ref(),
-        events::MESSAGE_UPDATE,
-        &GatewayMessageEvent {
-            message: updated_source_msg,
-            channel_type: parent_kind,
-            guild_id: Some(guild_id.clone()),
-            member,
-        },
-    )
-    .await;
+    let mut hydrated_src =
+        crate::services::message_service::hydrate_messages(state, vec![msg_row], user_id, true)
+            .await?;
+    if let Some(mut updated_source_msg) = hydrated_src.pop() {
+        updated_source_msg.flags = new_msg_flags;
+        updated_source_msg.thread = Some(Box::new(thread.clone()));
+        let member =
+            fetch_message_member_fields(state, &guild_id, &updated_source_msg.author.id).await;
+        permission_service::dispatch_channel_with_ctx(
+            state,
+            &guild_id,
+            channel_id,
+            perm_ctx.as_ref(),
+            events::MESSAGE_UPDATE,
+            &GatewayMessageEvent {
+                message: updated_source_msg,
+                channel_type: parent_kind,
+                guild_id: Some(guild_id.clone()),
+                member,
+            },
+        )
+        .await;
+    }
 
     let ack_sys_msg_id = (!is_bot).then_some(sys_msg_id.clone()).flatten();
     if let Some(sid) = sys_msg_id
@@ -319,7 +315,9 @@ pub async fn start_thread_from_message(
             embeds: vec![],
             attachments: vec![],
             stickers: vec![],
+            message_reference: None,
             nonce: None,
+            referenced_message: None,
             thread: Some(Box::new(thread.clone())),
         };
         let actor_member = fetch_message_member_fields(state, &guild_id, user_id).await;
@@ -461,7 +459,17 @@ pub async fn start_thread(
         let allowed_msg_flags =
             MessageFlags::SUPPRESS_EMBEDS.bits() | MessageFlags::SUPPRESS_NOTIFICATIONS.bits();
         let msg_flags = msg_input.flags.unwrap_or(0) & allowed_msg_flags;
-        Some((content, msg_flags))
+        let resolved_mentions = crate::services::mention_service::resolve_mentions(
+            state,
+            &guild_id,
+            user_id,
+            parent_perms,
+            &content,
+            msg_input.allowed_mentions.as_ref(),
+            None,
+        )
+        .await?;
+        Some((content, msg_flags, resolved_mentions))
     } else {
         None
     };
@@ -563,9 +571,9 @@ pub async fn start_thread(
     };
     add_thread_member_tx(&mut tx, &thread_id, user_id, member_flags, now).await?;
 
-    if let Some((ref content, msg_flags)) = first_msg_data {
+    if let Some((ref content, msg_flags, ref resolved)) = first_msg_data {
         sqlx::query(
-            "INSERT INTO messages (id, channel_id, author_id, content, timestamp, type, flags) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (id, channel_id, author_id, content, timestamp, type, flags, mention_everyone) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&thread_id)
         .bind(&thread_id)
@@ -574,8 +582,31 @@ pub async fn start_thread(
         .bind(now)
         .bind(MessageType::Default as u32)
         .bind(msg_flags)
+        .bind(resolved.mention_everyone)
         .execute(&mut *tx)
         .await?;
+
+        crate::services::mention_service::persist_mentions_tx(
+            &mut tx,
+            &thread_id,
+            &resolved.mentions,
+            &resolved.mention_roles,
+            false,
+        )
+        .await?;
+
+        if (msg_flags & MessageFlags::SUPPRESS_NOTIFICATIONS.bits()) == 0 {
+            crate::services::mention_service::increment_mention_counts_tx(
+                &mut tx,
+                &guild_id,
+                &thread_id,
+                thread_kind,
+                Some(channel_id),
+                user_id,
+                resolved,
+            )
+            .await?;
+        }
 
         sqlx::query("UPDATE channels SET last_message_id = ? WHERE id = ?")
             .bind(&thread_id)
@@ -676,7 +707,7 @@ pub async fn start_thread(
         .await;
     }
 
-    if let Some((content, msg_flags)) = first_msg_data {
+    if let Some((content, msg_flags, resolved)) = first_msg_data {
         let author = match state.hub.get_cached_partial_user(user_id) {
             Some(u) => u,
             None => user::get_partial_user(state, user_id).await?,
@@ -691,14 +722,16 @@ pub async fn start_thread(
             timestamp: now,
             edited_timestamp: None,
             pinned: false,
-            mention_everyone: false,
+            mention_everyone: resolved.mention_everyone,
             tts: false,
-            mentions: vec![],
-            mention_roles: vec![],
+            mentions: resolved.mentions,
+            mention_roles: resolved.mention_roles,
             embeds: vec![],
             attachments: vec![],
             stickers: vec![],
+            message_reference: None,
             nonce: None,
+            referenced_message: None,
             thread: None,
         };
         let member = match member_roles {
@@ -781,7 +814,9 @@ pub async fn start_thread(
             embeds: vec![],
             attachments: vec![],
             stickers: vec![],
+            message_reference: None,
             nonce: None,
+            referenced_message: None,
             thread: Some(Box::new(thread.clone())),
         };
         let actor_member = fetch_message_member_fields(state, &guild_id, user_id).await;
@@ -826,9 +861,9 @@ pub async fn update_thread(
     let mut tx = state.db.begin().await?;
     let sql = format!(
         "SELECT {} FROM channels c INNER JOIN channel_threads ct ON ct.channel_id = c.id INNER JOIN channels p ON p.id = ct.parent_id WHERE c.id = ? FOR UPDATE",
-        ThreadDbRow::SELECT_COLS
+        ThreadRow::SELECT_COLS
     );
-    let current = sqlx::query_as::<_, ThreadDbRow>(&sql)
+    let current = sqlx::query_as::<_, ThreadRow>(&sql)
         .bind(thread_id)
         .fetch_optional(&mut *tx)
         .await?

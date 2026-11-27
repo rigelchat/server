@@ -9,7 +9,7 @@ use crate::models::message::Message;
 use crate::models::serde_helpers::{serialize_millis_iso, serialize_millis_iso_opt};
 
 #[derive(Debug, Clone, FromRow)]
-pub struct ThreadDbRow {
+pub struct ThreadRow {
     pub id: String,
     #[sqlx(rename = "type")]
     pub kind: u32,
@@ -34,7 +34,7 @@ pub struct ThreadDbRow {
     pub parent_kind: u32,
 }
 
-impl ThreadDbRow {
+impl ThreadRow {
     pub const SELECT_COLS: &'static str = r#"
         c.id, c.type, c.guild_id, ct.parent_id, ct.owner_id, c.name,
         c.last_message_id, c.last_pin_timestamp, c.rate_limit_per_user, c.flags,
@@ -46,7 +46,7 @@ impl ThreadDbRow {
 }
 
 #[derive(Debug, Clone, FromRow)]
-pub struct ThreadMemberDbRow {
+pub struct ThreadMemberRow {
     pub thread_id: String,
     pub user_id: String,
     pub join_timestamp: u64,
@@ -88,7 +88,7 @@ pub struct ThreadMember {
 }
 
 impl ThreadMember {
-    pub fn from_db_self(row: ThreadMemberDbRow, include_ids: bool) -> Self {
+    pub fn from_db_self(row: ThreadMemberRow, include_ids: bool) -> Self {
         let mute_config = row
             .mute_config
             .as_deref()
@@ -105,7 +105,7 @@ impl ThreadMember {
         }
     }
 
-    pub fn from_db_public(row: ThreadMemberDbRow, member: Option<GuildMemberResponse>) -> Self {
+    pub fn from_db_public(row: ThreadMemberRow, member: Option<GuildMemberResponse>) -> Self {
         Self {
             id: Some(row.thread_id),
             user_id: Some(row.user_id),
@@ -147,7 +147,7 @@ pub struct ThreadResponse {
 
 impl ThreadResponse {
     pub fn from_row(
-        row: ThreadDbRow,
+        row: ThreadRow,
         applied_tags: Vec<String>,
         member_ids_preview: Vec<String>,
         member: Option<ThreadMember>,
@@ -210,8 +210,8 @@ pub enum StartThreadResponse {
 mod tests {
     use super::*;
 
-    fn sample_row(kind: u32, parent_kind: u32) -> ThreadDbRow {
-        ThreadDbRow {
+    fn sample_row(kind: u32, parent_kind: u32) -> ThreadRow {
+        ThreadRow {
             id: "100".into(),
             kind,
             guild_id: "1".into(),

@@ -9,7 +9,7 @@ use crate::constants::limits::{
     MAX_CHANNEL_RATE_LIMIT_PER_USER, MAX_THREAD_MEMBER_IDS_PREVIEW,
 };
 use crate::error::{AppError, ValidationCode};
-use crate::models::thread::{ThreadDbRow, ThreadMember, ThreadMemberDbRow, ThreadResponse};
+use crate::models::thread::{ThreadMember, ThreadMemberRow, ThreadResponse, ThreadRow};
 use crate::services::permission_service;
 use crate::utils::snowflake::validate_snowflake;
 use crate::utils::validation::reject_control_chars;
@@ -52,15 +52,15 @@ pub(super) fn validate_thread_rate_limit(val: u32) -> Result<u32, AppError> {
 pub(super) async fn fetch_thread_row<'e, E>(
     executor: E,
     thread_id: &str,
-) -> Result<Option<ThreadDbRow>, AppError>
+) -> Result<Option<ThreadRow>, AppError>
 where
     E: Executor<'e, Database = MySql>,
 {
     let sql = format!(
         "SELECT {} FROM channels c INNER JOIN channel_threads ct ON ct.channel_id = c.id INNER JOIN channels p ON p.id = ct.parent_id WHERE c.id = ?",
-        ThreadDbRow::SELECT_COLS
+        ThreadRow::SELECT_COLS
     );
-    Ok(sqlx::query_as::<_, ThreadDbRow>(&sql)
+    Ok(sqlx::query_as::<_, ThreadRow>(&sql)
         .bind(thread_id)
         .fetch_optional(executor)
         .await?)
@@ -87,11 +87,11 @@ pub(super) async fn fetch_thread_member_self<'e, E>(
     executor: E,
     thread_id: &str,
     user_id: &str,
-) -> Result<Option<ThreadMemberDbRow>, AppError>
+) -> Result<Option<ThreadMemberRow>, AppError>
 where
     E: Executor<'e, Database = MySql>,
 {
-    Ok(sqlx::query_as::<_, ThreadMemberDbRow>(
+    Ok(sqlx::query_as::<_, ThreadMemberRow>(
         "SELECT thread_id, user_id, join_timestamp, flags, muted, mute_config FROM thread_members WHERE thread_id = ? AND user_id = ?",
     )
     .bind(thread_id)
@@ -102,7 +102,7 @@ where
 
 pub(super) async fn check_thread_view_access(
     conn: &mut sqlx::MySqlConnection,
-    row: &ThreadDbRow,
+    row: &ThreadRow,
     user_id: &str,
 ) -> Result<(PermissionFlags, PermissionFlags, bool), AppError> {
     let (parent_perms, thread_perms) = permission_service::compute_user_thread_permissions_conn(
@@ -243,7 +243,7 @@ pub(super) async fn add_thread_member_tx(
     user_id: &str,
     flags: u32,
     now_ms: u64,
-) -> Result<(bool, ThreadMemberDbRow, u32), AppError> {
+) -> Result<(bool, ThreadMemberRow, u32), AppError> {
     let existing = fetch_thread_member_self(&mut **tx, thread_id, user_id).await?;
     if let Some(row) = existing {
         let count: u32 =
@@ -276,7 +276,7 @@ pub(super) async fn add_thread_member_tx(
         .execute(&mut **tx)
         .await?;
 
-    let inserted = ThreadMemberDbRow {
+    let inserted = ThreadMemberRow {
         thread_id: thread_id.to_string(),
         user_id: user_id.to_string(),
         join_timestamp: now_ms,
@@ -318,7 +318,7 @@ pub(super) async fn remove_thread_member_tx(
 
 pub(super) async fn hydrate_thread(
     conn: &mut sqlx::MySqlConnection,
-    row: ThreadDbRow,
+    row: ThreadRow,
     viewer_id: &str,
     include_member_ids: bool,
 ) -> Result<ThreadResponse, AppError> {
@@ -330,7 +330,7 @@ pub(super) async fn hydrate_thread(
 
 pub(super) async fn hydrate_threads_batch(
     conn: &mut sqlx::MySqlConnection,
-    rows: Vec<ThreadDbRow>,
+    rows: Vec<ThreadRow>,
     viewer_id: &str,
     include_member_ids: bool,
 ) -> Result<Vec<ThreadResponse>, AppError> {
@@ -391,7 +391,7 @@ pub(super) async fn hydrate_threads_batch(
     mqb.push(")");
 
     let self_rows = mqb
-        .build_query_as::<ThreadMemberDbRow>()
+        .build_query_as::<ThreadMemberRow>()
         .fetch_all(&mut *conn)
         .await?;
     let mut self_by_thread: HashMap<String, ThreadMember> = self_rows

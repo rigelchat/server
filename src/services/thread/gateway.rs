@@ -13,7 +13,7 @@ use crate::models::gateway::events::{
 };
 use crate::models::gateway::presence::{GatewayPresence, PresenceUser};
 use crate::models::guild_member::{GuildMemberResponse, GuildMemberUserRow};
-use crate::models::thread::{ThreadDbRow, ThreadMember, ThreadMemberDbRow, ThreadResponse};
+use crate::models::thread::{ThreadMember, ThreadMemberRow, ThreadResponse, ThreadRow};
 use crate::services::{permission_service, queries};
 use crate::utils::snowflake::validate_snowflake;
 
@@ -29,18 +29,18 @@ pub async fn fetch_guild_ready_threads(
     let rows = if is_bot {
         let sql = format!(
             "SELECT {} FROM channels c INNER JOIN channel_threads ct ON ct.channel_id = c.id INNER JOIN channels p ON p.id = ct.parent_id WHERE ct.guild_id = ? AND ct.archived = FALSE ORDER BY CAST(c.id AS UNSIGNED) DESC",
-            ThreadDbRow::SELECT_COLS
+            ThreadRow::SELECT_COLS
         );
-        sqlx::query_as::<_, ThreadDbRow>(&sql)
+        sqlx::query_as::<_, ThreadRow>(&sql)
             .bind(guild_id)
             .fetch_all(&mut *conn)
             .await?
     } else {
         let sql = format!(
             "SELECT {} FROM channels c INNER JOIN channel_threads ct ON ct.channel_id = c.id INNER JOIN channels p ON p.id = ct.parent_id INNER JOIN thread_members tm ON tm.thread_id = c.id WHERE ct.guild_id = ? AND tm.user_id = ? AND ct.archived = FALSE ORDER BY CAST(c.id AS UNSIGNED) DESC",
-            ThreadDbRow::SELECT_COLS
+            ThreadRow::SELECT_COLS
         );
-        sqlx::query_as::<_, ThreadDbRow>(&sql)
+        sqlx::query_as::<_, ThreadRow>(&sql)
             .bind(guild_id)
             .bind(user_id)
             .fetch_all(&mut *conn)
@@ -98,16 +98,16 @@ pub async fn build_thread_list_sync(
     let mut conn = state.db.acquire().await?;
     let sql = format!(
         "SELECT {} FROM channels c INNER JOIN channel_threads ct ON ct.channel_id = c.id INNER JOIN channels p ON p.id = ct.parent_id WHERE ct.guild_id = ? AND ct.archived = FALSE ORDER BY CAST(c.id AS UNSIGNED) DESC",
-        ThreadDbRow::SELECT_COLS
+        ThreadRow::SELECT_COLS
     );
-    let rows = sqlx::query_as::<_, ThreadDbRow>(&sql)
+    let rows = sqlx::query_as::<_, ThreadRow>(&sql)
         .bind(guild_id)
         .fetch_all(&mut *conn)
         .await?;
 
     let mut visible_rows = Vec::with_capacity(rows.len());
     let mut perm_cache: HashMap<String, PermissionFlags> = HashMap::new();
-    let joined_rows: Vec<ThreadMemberDbRow> = sqlx::query_as(
+    let joined_rows: Vec<ThreadMemberRow> = sqlx::query_as(
         r#"
         SELECT tm.thread_id, tm.user_id, tm.join_timestamp, tm.flags, tm.muted, tm.mute_config
         FROM thread_members tm
@@ -188,7 +188,7 @@ pub async fn build_thread_member_list_update(
         return Ok(None);
     }
 
-    let member_rows: Vec<ThreadMemberDbRow> = sqlx::query_as(
+    let member_rows: Vec<ThreadMemberRow> = sqlx::query_as(
         "SELECT thread_id, user_id, join_timestamp, flags, muted, mute_config FROM thread_members WHERE thread_id = ? ORDER BY join_timestamp ASC LIMIT 1000",
     )
     .bind(thread_id)

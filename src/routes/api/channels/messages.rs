@@ -51,8 +51,7 @@ async fn create_message(
         &auth.user_id,
         features.has_channel_threads(auth.is_bot),
         auth.is_bot,
-        payload.content.unwrap_or_default(),
-        payload.nonce,
+        payload,
     )
     .await?;
     Ok(Json(msg))
@@ -71,7 +70,7 @@ async fn edit_message(
         &message_id,
         &auth.user_id,
         features.has_channel_threads(auth.is_bot),
-        payload.content.unwrap_or_default(),
+        payload,
     )
     .await?;
     Ok(Json(updated))

@@ -19,7 +19,7 @@ use crate::models::gateway::events::{
 use crate::models::guild_member::{GuildMemberFields, GuildMemberResponse, GuildMemberUserRow};
 use crate::models::message::Message;
 use crate::models::rest::threads::{ListThreadMembersQuery, ModifyThreadMemberSettingsRequest};
-use crate::models::thread::{ThreadMember, ThreadMemberDbRow};
+use crate::models::thread::{ThreadMember, ThreadMemberRow};
 use crate::services::{member_service, permission_service, queries, user};
 use crate::utils::snowflake::{DISCORD_SNOWFLAKE, validate_snowflake, validate_snowflake_opt};
 
@@ -31,7 +31,7 @@ use super::helpers::{
 async fn ensure_thread_row(
     conn: &mut sqlx::MySqlConnection,
     thread_id: &str,
-) -> Result<crate::models::thread::ThreadDbRow, AppError> {
+) -> Result<crate::models::thread::ThreadRow, AppError> {
     if let Some(row) = fetch_thread_row(&mut *conn, thread_id).await? {
         return Ok(row);
     }
@@ -255,6 +255,12 @@ pub async fn add_thread_member(
     .execute(&mut *tx)
     .await?;
 
+    sqlx::query("INSERT IGNORE INTO message_mentions (message_id, user_id) VALUES (?, ?)")
+        .bind(&sys_msg_id)
+        .bind(target_user_id)
+        .execute(&mut *tx)
+        .await?;
+
     let hydrated_for_target = hydrate_thread(&mut tx, row.clone(), target_user_id, false).await?;
     tx.commit().await?;
 
@@ -322,7 +328,9 @@ pub async fn add_thread_member(
             embeds: vec![],
             attachments: vec![],
             stickers: vec![],
+            message_reference: None,
             nonce: None,
+            referenced_message: None,
             thread: None,
         };
         let actor_gm = fetch_guild_member_response(state, &row.guild_id, actor_id)
@@ -450,6 +458,12 @@ pub async fn remove_thread_member(
     .execute(&mut *tx)
     .await?;
 
+    sqlx::query("INSERT IGNORE INTO message_mentions (message_id, user_id) VALUES (?, ?)")
+        .bind(&sys_msg_id)
+        .bind(target_user_id)
+        .execute(&mut *tx)
+        .await?;
+
     tx.commit().await?;
 
     permission_service::dispatch_channel_with_ctx(
@@ -496,7 +510,9 @@ pub async fn remove_thread_member(
             embeds: vec![],
             attachments: vec![],
             stickers: vec![],
+            message_reference: None,
             nonce: None,
+            referenced_message: None,
             thread: None,
         };
         let actor_gm = fetch_guild_member_response(state, &row.guild_id, actor_id)
@@ -594,7 +610,7 @@ pub async fn list_thread_members(
     qb.push_bind(limit);
 
     let member_rows = qb
-        .build_query_as::<ThreadMemberDbRow>()
+        .build_query_as::<ThreadMemberRow>()
         .fetch_all(&mut *conn)
         .await?;
     drop(conn);
@@ -698,7 +714,7 @@ pub async fn modify_thread_member_settings(
     .execute(&mut *tx)
     .await?;
 
-    let updated_row = ThreadMemberDbRow {
+    let updated_row = ThreadMemberRow {
         thread_id: current.thread_id,
         user_id: current.user_id,
         join_timestamp: current.join_timestamp,

@@ -18,7 +18,7 @@ use crate::error::{AppError, ValidationCode};
 use crate::models::channel::{
     ChannelOverwriteRow, ChannelResponse, ChannelRow, PermissionOverwrite,
 };
-use crate::models::guild::{BaseGuild, Guild};
+use crate::models::guild::{Guild, GuildRow};
 use crate::models::rest::channels::{CreateChannelRequest, UpdateChannelRequest};
 use crate::models::thread::ChannelOrThreadResponse;
 use crate::services::{member_service, permission_service, queries};
@@ -1019,7 +1019,7 @@ pub async fn delete_channel(
     .await?;
 
     let updated_guild_base = if guild_update_res.rows_affected() > 0 {
-        sqlx::query_as::<_, BaseGuild>("SELECT * FROM guilds WHERE id = ?")
+        sqlx::query_as::<_, GuildRow>("SELECT * FROM guilds WHERE id = ?")
             .bind(&row.guild_id)
             .fetch_optional(&mut *tx)
             .await?

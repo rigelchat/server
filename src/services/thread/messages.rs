@@ -11,7 +11,7 @@ use crate::error::AppError;
 use crate::gateway::handlers::presence;
 use crate::models::gateway::events::{ThreadCreateEvent, ThreadMembersUpdateEvent};
 use crate::models::guild_member::GuildMemberUserRow;
-use crate::models::thread::{ThreadDbRow, ThreadMember, ThreadResponse};
+use crate::models::thread::{ThreadMember, ThreadResponse, ThreadRow};
 use crate::services::{permission_service, queries};
 
 use super::helpers::{
@@ -20,7 +20,7 @@ use super::helpers::{
 };
 
 pub struct ThreadMessageContext {
-    pub row: ThreadDbRow,
+    pub row: ThreadRow,
     pub parent_perms: PermissionFlags,
     pub thread_perms: PermissionFlags,
     pub is_moderator: bool,
@@ -233,7 +233,7 @@ pub async fn fetch_threads_for_messages(
     }
     let mut qb = QueryBuilder::<MySql>::new(format!(
         "SELECT {} FROM channels c INNER JOIN channel_threads ct ON ct.channel_id = c.id INNER JOIN channels p ON p.id = ct.parent_id WHERE c.id IN (",
-        ThreadDbRow::SELECT_COLS
+        ThreadRow::SELECT_COLS
     ));
     let mut sep = qb.separated(", ");
     for tid in thread_ids {
@@ -243,7 +243,7 @@ pub async fn fetch_threads_for_messages(
 
     let mut conn = state.db.acquire().await?;
     let rows = qb
-        .build_query_as::<ThreadDbRow>()
+        .build_query_as::<ThreadRow>()
         .fetch_all(&mut *conn)
         .await?;
     let hydrated = hydrate_threads_batch(&mut conn, rows, viewer_id, false).await?;

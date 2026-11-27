@@ -9,7 +9,7 @@ use crate::models::serde_helpers::serialize_millis_iso;
 use crate::models::thread::ThreadResponse;
 
 #[derive(Debug, Clone, FromRow)]
-pub struct BaseGuild {
+pub struct GuildRow {
     pub id: String,
     pub created_at: u64,
     pub owner_id: String,
@@ -85,8 +85,8 @@ pub struct Guild {
 
 pub type GatewayGuildProperties = Guild;
 
-impl From<BaseGuild> for Guild {
-    fn from(g: BaseGuild) -> Self {
+impl From<GuildRow> for Guild {
+    fn from(g: GuildRow) -> Self {
         Self {
             id: g.id,
             name: g.name,

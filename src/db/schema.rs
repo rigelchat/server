@@ -331,11 +331,89 @@ pub(super) async fn apply(pool: &MySqlPool) -> Result<(), sqlx::Error> {
             author_id VARCHAR(20) NOT NULL,
             type INT UNSIGNED NOT NULL DEFAULT 0,
             flags INT UNSIGNED NOT NULL DEFAULT 0,
+            mention_everyone BOOLEAN NOT NULL DEFAULT FALSE,
+            referenced_message_id VARCHAR(20) DEFAULT NULL,
+            referenced_channel_id VARCHAR(20) DEFAULT NULL,
+            referenced_guild_id VARCHAR(20) DEFAULT NULL,
+            reference_type TINYINT UNSIGNED DEFAULT NULL,
             content TEXT DEFAULT NULL,
             INDEX idx_messages_channel_ts (channel_id, timestamp),
             INDEX idx_messages_channel_idnum (channel_id, id_num),
+            INDEX idx_messages_ref_id (referenced_message_id),
             FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
             FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    ensure_column(
+        pool,
+        "messages",
+        "mention_everyone",
+        "BOOLEAN NOT NULL DEFAULT FALSE",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "messages",
+        "referenced_message_id",
+        "VARCHAR(20) DEFAULT NULL",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "messages",
+        "referenced_channel_id",
+        "VARCHAR(20) DEFAULT NULL",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "messages",
+        "referenced_guild_id",
+        "VARCHAR(20) DEFAULT NULL",
+    )
+    .await?;
+    ensure_column(
+        pool,
+        "messages",
+        "reference_type",
+        "TINYINT UNSIGNED DEFAULT NULL",
+    )
+    .await?;
+    ensure_index(
+        pool,
+        "messages",
+        "idx_messages_ref_id",
+        "(referenced_message_id)",
+    )
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS message_mentions (
+            message_id VARCHAR(20) NOT NULL,
+            user_id VARCHAR(20) NOT NULL,
+            PRIMARY KEY (message_id, user_id),
+            INDEX idx_message_mentions_user (user_id),
+            FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS message_mention_roles (
+            message_id VARCHAR(20) NOT NULL,
+            role_id VARCHAR(20) NOT NULL,
+            PRIMARY KEY (message_id, role_id),
+            FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
+            FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE
         )
         "#,
     )
@@ -382,5 +460,47 @@ pub(super) async fn apply(pool: &MySqlPool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    Ok(())
+}
+
+async fn ensure_column(
+    pool: &MySqlPool,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), sqlx::Error> {
+    let exists: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ? LIMIT 1",
+    )
+    .bind(table)
+    .bind(column)
+    .fetch_optional(pool)
+    .await?;
+
+    if exists.is_none() {
+        let sql = format!("ALTER TABLE `{table}` ADD COLUMN `{column}` {definition}");
+        sqlx::query(&sql).execute(pool).await?;
+    }
+    Ok(())
+}
+
+async fn ensure_index(
+    pool: &MySqlPool,
+    table: &str,
+    index: &str,
+    definition: &str,
+) -> Result<(), sqlx::Error> {
+    let exists: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ? LIMIT 1",
+    )
+    .bind(table)
+    .bind(index)
+    .fetch_optional(pool)
+    .await?;
+
+    if exists.is_none() {
+        let sql = format!("ALTER TABLE `{table}` ADD INDEX `{index}` {definition}");
+        sqlx::query(&sql).execute(pool).await?;
+    }
     Ok(())
 }

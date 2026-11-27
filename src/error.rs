@@ -439,6 +439,14 @@ impl AppError {
         )
     }
 
+    pub fn cannot_modify_system_message(message: impl Into<String>) -> Self {
+        Self::coded(
+            StatusCode::BAD_REQUEST,
+            ApiErrorCode::CannotModifySystemWebhook,
+            message,
+        )
+    }
+
     pub fn max_guild_channels() -> Self {
         Self::coded(
             StatusCode::BAD_REQUEST,

@@ -4,6 +4,7 @@ pub mod discovery_service;
 pub mod guild;
 pub mod invite_service;
 pub mod member_service;
+pub mod mention_service;
 pub mod message_service;
 pub mod permission_service;
 pub mod queries;

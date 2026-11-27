@@ -16,7 +16,7 @@ use crate::constants::limits::{
 use crate::error::{AppError, ValidationCode};
 use crate::models::channel::{ChannelResponse, ChannelRow, ForumTag, ForumTagRow};
 use crate::models::guild_member::{GuildMemberResponse, GuildMemberUserRow};
-use crate::models::message::{Message, MessageDbRow};
+use crate::models::message::{Message, MessageRow};
 use crate::models::rest::channels::{DefaultReactionInput, ForumTagInput};
 use crate::models::rest::forums::{
     CreateForumTagRequest, ForumPostDataItem, ForumPostDataResponse, GetForumPostDataRequest,
@@ -712,30 +712,26 @@ pub async fn get_forum_post_data(
             owners_by_user.insert(uid, mr.into_member_response(roles));
         }
 
-        let mut msg_qb = QueryBuilder::<MySql>::new(
-            r#"
-            SELECT
-                m.id, m.channel_id, m.content, m.timestamp, m.edited_timestamp,
-                m.type AS kind, m.flags,
-                u.id AS author_id, u.username, u.discriminator, u.global_name, u.avatar,
-                u.bot, u.public_flags
-            FROM messages m
-            INNER JOIN users u ON u.id = m.author_id
-            WHERE m.id IN (
-            "#,
-        );
+        let mut msg_qb =
+            QueryBuilder::<MySql>::new(format!("{} WHERE m.id IN (", MessageRow::SELECT_FROM));
         let mut sep = msg_qb.separated(", ");
         for pid in post_owners.keys() {
             sep.push_bind(pid);
         }
         msg_qb.push(") AND m.channel_id = m.id");
         let msg_rows = msg_qb
-            .build_query_as::<MessageDbRow>()
+            .build_query_as::<MessageRow>()
             .fetch_all(&state.db)
             .await?;
-        for m in msg_rows {
-            let id = m.id.clone();
-            messages_by_id.insert(id, Message::from(m));
+        let hydrated = crate::services::message_service::hydrate_messages(
+            state,
+            msg_rows,
+            user_id,
+            can_use_threads,
+        )
+        .await?;
+        for m in hydrated {
+            messages_by_id.insert(m.id.clone(), m);
         }
     }
 
