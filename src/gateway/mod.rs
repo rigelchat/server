@@ -298,7 +298,11 @@ async fn process_gateway_message(text: &str, session_id: &str, state: &AppState)
 
     debug!(op = ?payload.op, bytes = text.len(), "Received gateway message");
 
-    if !matches!(payload.op, Opcode::Identify | Opcode::Heartbeat) && !authenticated {
+    if !matches!(
+        payload.op,
+        Opcode::Identify | Opcode::Heartbeat | Opcode::Resume
+    ) && !authenticated
+    {
         session.close(close_codes::NOT_AUTHENTICATED);
         return;
     }
@@ -318,6 +322,13 @@ async fn process_gateway_message(text: &str, session_id: &str, state: &AppState)
             }
         }
         Opcode::Heartbeat => handlers::heartbeat::handle(session_id, state).await,
+        Opcode::Resume => {
+            if authenticated {
+                session.close(close_codes::ALREADY_AUTHENTICATED);
+            } else {
+                session.send(Opcode::InvalidSession, Some(json!(false)));
+            }
+        }
         Opcode::PresenceUpdate => {
             let Some(d) = payload.d else {
                 session.close(close_codes::DECODE_ERROR);

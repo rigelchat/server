@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 use sqlx::{MySql, QueryBuilder};
-use tracing::{debug, error};
+use tracing::debug;
 
 use crate::AppState;
 use crate::constants::gateway::{close_codes, events};
@@ -9,9 +9,7 @@ use crate::constants::user::PresenceStatus;
 use crate::gateway::hub::LivePresenceSnapshot;
 use crate::models::gateway::presence::{GatewayPresence, PresenceUpdatePayload, PresenceUser};
 use crate::models::gateway::ready::ClientSessionInfo;
-use crate::models::user::{
-    CustomStatus, CustomStatusInput, PartialUser, UserRow, UserSettingsExtras,
-};
+use crate::models::user::{CustomStatus, CustomStatusInput, PartialUser, UserRow};
 use crate::services::user;
 
 pub fn combined_status<'a>(statuses: impl IntoIterator<Item = &'a str>) -> &'static str {
@@ -191,6 +189,10 @@ pub async fn handle(session_id: &str, state: &AppState, payload: PresenceUpdateP
         return;
     };
 
+    let prev_public_status = session
+        .user_id()
+        .map(|uid| state.hub.collect_user_live_state(&uid).0);
+
     let Some((user_id, guild_ids)) =
         session.update_presence(session_status, payload.afk, payload.mobile)
     else {
@@ -204,22 +206,9 @@ pub async fn handle(session_id: &str, state: &AppState, payload: PresenceUpdateP
         "Received OP 3 PRESENCE_UPDATE"
     );
 
-    if payload.afk != Some(true) {
-        let persisted_status = if session_status == PresenceStatus::Offline {
-            "invisible"
-        } else {
-            session_status.as_str()
-        };
-        if let Err(err) = sqlx::query("UPDATE user_settings SET status = ? WHERE id = ?")
-            .bind(persisted_status)
-            .bind(&user_id)
-            .execute(&state.db)
-            .await
-        {
-            error!(error = %err, "Failed to update status in user_settings");
-        }
-    }
-
+    // OP 3 only updates ephemeral session presence; persisted user_settings are
+    // owned exclusively by PATCH /users/@me/settings so background handoff sessions
+    // (which send status="invisible") never clobber the user's saved status.
     let custom_status = if let Some(cs_opt) = payload.custom_status {
         let parsed_custom = match cs_opt
             .map(CustomStatusInput::try_into_custom_status)
@@ -228,42 +217,15 @@ pub async fn handle(session_id: &str, state: &AppState, payload: PresenceUpdateP
             Ok(cs) => cs,
             Err(_) => return,
         };
-        match state.db.begin().await {
-            Ok(mut tx) => {
-                let existing_extra: Option<String> = sqlx::query_scalar(
-                    "SELECT extra_settings FROM user_settings WHERE id = ? FOR UPDATE",
-                )
-                .bind(&user_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .ok()
-                .flatten()
-                .flatten();
-
-                let mut extras: UserSettingsExtras = existing_extra
-                    .as_deref()
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default();
-
-                extras.custom_status = parsed_custom.clone();
-                if let Ok(json_str) = serde_json::to_string(&extras)
-                    && let Err(err) =
-                        sqlx::query("UPDATE user_settings SET extra_settings = ? WHERE id = ?")
-                            .bind(&json_str)
-                            .bind(&user_id)
-                            .execute(&mut *tx)
-                            .await
-                {
-                    error!(error = %err, "Failed to update custom_status in user_settings");
-                }
-                if let Err(err) = tx.commit().await {
-                    error!(error = %err, "Failed to commit custom_status update");
-                }
-            }
-            Err(err) => error!(error = %err, "Failed to begin custom_status transaction"),
+        if !matches!(
+            session_status,
+            PresenceStatus::Invisible | PresenceStatus::Offline
+        ) {
+            state.hub.set_custom_status(&user_id, parsed_custom.clone());
+            parsed_custom
+        } else {
+            state.hub.get_custom_status(&user_id)
         }
-        state.hub.set_custom_status(&user_id, parsed_custom.clone());
-        parsed_custom
     } else {
         state.hub.get_custom_status(&user_id)
     };
@@ -271,6 +233,10 @@ pub async fn handle(session_id: &str, state: &AppState, payload: PresenceUpdateP
     dispatch_sessions_replace(state, &user_id).await;
 
     let pub_status = user_public_status(state, &user_id).await;
+    if prev_public_status == Some("offline") && pub_status == "offline" {
+        return;
+    }
+
     broadcast_presence(
         state,
         &user_id,
