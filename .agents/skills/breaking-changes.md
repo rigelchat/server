@@ -1,15 +1,14 @@
 ---
 name: breaking-changes
-description: Policy for proposing and applying breaking changes in rigel-server — breaking changes are always welcome when justified, provided they are explicitly called out to the user.
+description: Policy for proposing and applying breaking changes in rigel-server — always welcome when justified, provided they are explicitly flagged to the user.
 ---
 
 # Breaking Changes Policy
 
 1. **Always open to breaking changes**:
-   - Do not hesitate to propose or implement breaking changes (DB schema changes, REST/Gateway payload or route changes, config/env changes, internal refactors) when they lead to a cleaner, more faithful, or more maintainable design instead of keeping awkward backwards-compatibility hacks.
+   - Propose and implement breaking changes (DB schema, REST/Gateway payloads or routes, `.env` config, internal refactors) whenever they yield a cleaner, more faithful, or safer design instead of awkward backwards-compatibility hacks.
 2. **Mandatory explicit notice**:
-   - Whenever a change introduces a breaking change, **explicitly flag it** in the response before or alongside the patch.
-   - Clearly list:
-     - **What breaks** (affected routes, payloads, DB tables/columns, config keys, or Gateway events).
-     - **Why** the breaking change is worthwhile.
-     - **Action required** (e.g., DB migration/reset, `.env` update, or client expectation impact).
+   - Whenever a change introduces a breaking change (or auto-migrates an existing DB), **explicitly flag it** before or alongside the patch:
+     - **What changes / breaks** (routes, payloads, DB tables/columns, `.env` keys, or Gateway events).
+     - **Why** it is worthwhile.
+     - **Action required** (e.g. automatic via `schema.rs` on boot, `.env` update, DB reset if needed, or client behavior impact).

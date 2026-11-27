@@ -1,28 +1,29 @@
 ---
 name: safe-patch
-description: Use when generating file edits or bash patch commands for rigel-server so modifications are split into small blocks, atomic, all-or-nothing, and never corrupt or truncate files.
+description: Rules for generating safe, atomic, copy-paste-ready patches (Repomix + terminal workflow) without corrupting or truncating files.
 ---
 
 # Safe Patching Rules
 
+This repo is primarily worked on via **Repomix context + terminal patches** (or direct editing tools if available). When generating patches for the terminal:
+
 1. **Split large changes into small, self-contained blocks**:
-   - Never generate one giant script touching 15+ files at once (split by layer/domain into small blocks of ~100–350 lines max: e.g., constants, schema/errors, models, services, routes).
-   - Whenever possible, make each block independently compilable or clearly order blocks so the final block compiles cleanly.
-2. **New or heavily rewritten files & Markdown fences**:
-   - Keep files small per the 1-file-1-responsibility rule.
-   - Output standalone files in fenced code blocks or write them via `write_new(...)` inside a small Python block.
-   - Always use 4 backticks (````) for outer code blocks in responses so embedded triple-backtick blocks (like Markdown or examples) never break rendering.
-3. **Targeted edits (use Python, never `git apply`)**:
-   - Do **not** generate multi-hunk `git apply` / unified diffs (line counts in `@@` headers are error-prone).
-   - Always use a unique heredoc delimiter like `<<'__SAFE_PATCH_EOF__'` (never `EOF` or `PY`, which can appear inside snippets or markdown examples).
-   - Use raw triple-quoted strings (`r'''...'''`) when Rust snippets contain backslashes (`\u{...}`, `\0`) or raw strings (`r#"..."#`).
-   - **NEVER** write `open(p, "w").write(open(p).read())` (truncates the file to 0 bytes before `read()` runs).
-4. **All-or-nothing atomicity (mandatory Python template)**:
-   - **Phase 1 (in-memory only)**: read every target file into memory, assert `text.count(old) == 1` for each replacement, and stage all edits in memory. If **any** assertion fails, **zero files are modified on disk**.
-   - **Phase 2 (atomic flush + rollback)**: snapshot original bytes before writing and restore every modified/created/deleted path in `except Exception:` if an I/O error occurs.
+   - Keep each block focused (~100–350 lines max, grouped by layer: constants/DB/errors, models, services, routes).
+   - Never generate one giant script touching 15+ files at once.
+2. **Markdown fences & readability**:
+   - Always use 4 backticks (````) for outer code blocks so embedded triple-backtick blocks never break rendering.
+3. **Targeted edits (Python only, never `git apply`)**:
+   - Never output multi-hunk unified diffs (`@@` line counts are fragile).
+   - Use a unique heredoc delimiter (`<<'__SAFE_PATCH_EOF__'`, never `EOF` or `PY`), or pick a distinct delimiter if the patch text itself mentions `__SAFE_PATCH_EOF__`.
+   - Use raw triple-quoted strings (`r'''...'''`) when Rust snippets contain backslashes or raw strings (`r#"..."#`).
+   - **NEVER** open a file for writing before reading it in full (`open(p, "w").write(open(p).read())` truncates to 0 bytes).
+4. **All-or-nothing atomicity (mandatory template)**:
+   - **Phase 1 (in-memory only)**: read every target file, assert `text.count(old) == 1` (or exact `re.subn` match count) for every replacement, and stage all edits in memory. If any assertion fails, **zero files are touched on disk**.
+   - **Phase 2 (backup + rollback)**: snapshot original bytes before writing and restore every modified/created/deleted file in `except Exception:` if anything fails.
 5. **Verification & Git hygiene**:
-   - End code changes with `cargo check` (and `cargo clippy --all-targets -- -D warnings` + `cargo test` when ready).
-   - Never stage or commit `.env`, secrets, `/target/`, or `/static/emoji/`.
+   - End code changes with: `cargo check && cargo clippy --all-targets -- -D warnings && cargo test`.
+   - Never stage or commit `.env`, secrets, `/target/`, `/static/emoji/`, or runtime media upload directories.
+   - Never modify or commit unrelated files (such as `.github/workflows/release.yml`) unless explicitly requested.
 
 ## Safe Python Patch Template
 
